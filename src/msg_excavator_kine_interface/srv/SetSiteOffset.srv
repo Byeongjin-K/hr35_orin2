@@ -1,0 +1,24 @@
+#
+#   [숙련자 과제용]
+#   굴착기에 장착된 Lidar 등 서비스에서 사용할 site offset 값을 전달하는 서비스
+#
+#   flags:
+#   set_offset      :   site offset 값을 적용할지 말지 결정
+#                       이경우 GNSS 값으로 excavator의 base 위치값을 사용하고 거기서 site offset 값을 뺀다
+#   offset          :   site offset 값, TM 좌표
+#   do_accumulate   :   드론과제 한것처럼 point cloud 값을 계속 모은다.
+
+
+# Request
+bool set_offset
+bool reset_offset
+float32[3] offset
+bool do_accumulate
+bool reset_accumulate
+---
+# Response
+bool do_accumulate
+bool set_offset
+float32[3] offset
+
+

@@ -1,0 +1,47 @@
+# 센서 캘리브레이션 서비스 요청
+
+# 캘리브레이션 타입 (0: 모든 센서, 1: 경사계만, 2: 압력센서만, 3: GNSS만)
+uint8 calibration_type
+
+# 특정 센서 캘리브레이션 플래그
+bool calibrate_boom_inclinometer
+bool calibrate_arm_inclinometer
+bool calibrate_bucket_inclinometer
+bool calibrate_pressure_sensors
+bool calibrate_gnss
+
+# 캘리브레이션 모드 (0: 자동, 1: 수동)
+uint8 calibration_mode
+
+# 현재 자세 정보 (수동 캘리브레이션용)
+float32 current_boom_angle
+float32 current_arm_angle
+float32 current_bucket_angle
+
+---
+
+# 센서 캘리브레이션 서비스 응답
+
+# 요청 처리 성공 여부
+bool success
+
+# 캘리브레이션된 센서들
+string[] calibrated_sensors
+
+# 캘리브레이션 결과
+bool boom_calibration_success
+bool arm_calibration_success
+bool bucket_calibration_success
+bool pressure_calibration_success
+bool gnss_calibration_success
+
+# 캘리브레이션 오프셋 값들
+float32 boom_offset
+float32 arm_offset
+float32 bucket_offset
+
+# 응답 메시지
+string message
+
+# 캘리브레이션 소요 시간 (초)
+float32 calibration_duration 

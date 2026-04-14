@@ -1,0 +1,7 @@
+float64 theta_swing
+float64 x_distal_coordinate
+float64 x_proximal_coordinate
+float64 y_height_coordinate
+float64 depth
+---
+bool success

@@ -1,0 +1,43 @@
+# 굴삭기 작업 관리 액션 정의
+# Task Manager Node에서 사용하는 전체 작업 계획 관리 및 순차적 실행을 위한 액션
+
+# Goal - 작업 목표 정의
+geometry_msgs/Point start_point     # 시작점 (x, y, z) - 단위: m
+geometry_msgs/Point end_point       # 종료점 (x, y, z) - 단위: m  
+float64 task_depth                  # 작업 깊이 - 단위: m
+float64 ground_offset               # 지면 오프셋 - 단위: m
+string task_type                    # 작업 타입 (dig, level, etc.)
+
+# 추가 작업 파라미터
+float64 max_speed                   # 최대 속도 - 단위: m/s
+float64 acceleration                # 가속도 - 단위: m/s²
+bool enable_safety_checks          # 안전 검사 활성화
+float64 position_tolerance          # 위치 허용 오차 - 단위: m
+float32 swing_angle                 # 스윙 각도 - 단위: degree
+
+---
+
+# Result - 작업 완료 결과
+bool success                        # 작업 성공 여부
+string message                      # 결과 메시지
+trajectory_msgs/JointTrajectory executed_trajectory  # 실행된 궤적
+float64 total_execution_time        # 총 실행 시간 - 단위: s
+uint32 completed_trajectories       # 완료된 궤적 수
+string[] trajectory_sequence        # 실행된 궤적 시퀀스 (dig->swing->dump 등)
+
+# 오류 정보
+uint8 error_code                    # 오류 코드 (성공시 0)
+string error_details                # 오류 상세 정보
+
+---
+
+# Feedback - 실시간 진행 상태
+string current_phase                # 현재 진행 단계 (dig_trajectory, swing_trajectory, dump_trajectory 등)
+float64 progress_percentage         # 전체 진행률 (0.0 ~ 100.0)
+geometry_msgs/Point current_position # 현재 버킷 끝점 위치
+uint32 current_trajectory_index     # 현재 궤적 인덱스 (0부터 시작)
+uint32 total_trajectories          # 전체 궤적 수
+float64 phase_progress              # 현재 단계 진행률 (0.0 ~ 100.0)
+float64 estimated_remaining_time    # 예상 남은 시간 - 단위: s
+string status_message               # 상태 메시지
+bool safety_status                  # 안전 상태 (true: 안전, false: 위험) 

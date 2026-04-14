@@ -1,0 +1,21 @@
+# Request: Batch IK solving for entire trajectory
+excavator_msgs/BucketTrajectory bucket_trajectory
+float32 swing_angle                   # Swing angle in degrees (applied to all points)
+bool use_current_params               # Use current excavator parameters or custom
+
+# Optional custom parameters (if use_current_params is false)
+float64 boom_length                   # L1 in m (optional)
+float64 arm_length                    # L2 in m (optional) 
+float64 bucket_length                 # L3 in m (optional)
+float64 base_offset_x                 # a1 in m (optional)
+float64 base_offset_y                 # h1 in m (optional)
+
+---
+# Response: Complete joint trajectory for entire path
+bool success                          # True if all solutions found
+string message                        # Status message
+trajectory_msgs/JointTrajectory joint_trajectory  # Complete joint trajectory
+
+# Detailed status for each point
+bool[] point_success                  # Success status for each trajectory point
+string[] point_messages               # Error messages for failed points (if any) 

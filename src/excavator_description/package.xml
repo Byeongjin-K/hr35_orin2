@@ -1,0 +1,10 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>excavator_description</name>
+  <version>0.0.0</version>
+  <description>Excavator URDF description</description>
+  <maintainer email="bjkim@kimm.re.kr">Byeongjin Kim</maintainer>
+  <license>Apache-2.0</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <exec_depend>urdf</exec_depend>
+</package>

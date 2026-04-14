@@ -1,0 +1,40 @@
+{
+  "ros_distro": "kilted",
+  "python_version": "3.12.3 (main, Jan  8 2026, 11:30:50) [GCC 13.3.0]",
+  "api_checks": {
+    "TopicMetadata": {
+      "has_id": true,
+      "has_type_description_hash": true,
+      "constructor_test": "success"
+    },
+    "SequentialWriter": {
+      "has_close": true,
+      "methods": [
+        "close",
+        "create_topic",
+        "open",
+        "remove_topic",
+        "split_bagfile",
+        "take_snapshot",
+        "write"
+      ]
+    },
+    "SequentialReader": {
+      "has_has_next": true,
+      "methods": [
+        "close",
+        "get_all_message_definitions",
+        "get_all_topics_and_types",
+        "get_metadata",
+        "has_next",
+        "open",
+        "open_uri",
+        "read_next",
+        "reset_filter",
+        "seek",
+        "set_filter",
+        "set_read_order"
+      ]
+    }
+  }
+}

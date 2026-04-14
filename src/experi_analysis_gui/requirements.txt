@@ -1,0 +1,31 @@
+# ============================================
+# Core (required)
+# ============================================
+numpy>=1.21.0
+scipy>=1.7.0
+PyQt5>=5.15.0
+pyqtgraph>=0.13.3
+PyOpenGL>=3.1.0
+matplotlib>=3.5.0
+
+# ============================================
+# Optional - point cloud formats
+# ============================================
+# open3d>=0.17.0    # PCD/PLY via open3d (optional, fallback to manual PCD parser)
+# laspy[laszip]>=2.3.0  # LAS/LAZ support (install if needed)
+
+# ============================================
+# ROS2 (provided by ROS2 installation, do NOT pip install)
+#   source /opt/ros/{humble,iron,jazzy,kilted}/setup.bash
+# ============================================
+# rosbag2_py        -- from ros-{distro}-rosbag2
+# sensor_msgs_py    -- from ros-{distro}-sensor-msgs-py
+# rclpy             -- from ros-{distro}-rclpy
+#
+# Humble (22.04):  Python 3.10, numpy<=1.26
+# Iron   (22.04):  Python 3.10
+# Jazzy  (24.04):  Python 3.12
+# Kilted (24.04):  Python 3.12
+#
+# If sensor_msgs_py is missing:
+#   sudo apt install ros-${ROS_DISTRO}-sensor-msgs-py

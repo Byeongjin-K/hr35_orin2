@@ -1,0 +1,11 @@
+# pts_main에서 Z값 기준으로 추출하는 서비스
+
+
+# Request
+float32 z_min
+float32 z_max
+---
+# Response
+bool result
+
+

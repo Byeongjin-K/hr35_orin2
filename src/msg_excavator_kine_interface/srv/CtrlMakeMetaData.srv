@@ -1,0 +1,14 @@
+#
+#   [숙련자 과제용]
+#   학습데이터 생성 제어 서비스
+#
+#   flags:
+
+
+# Request
+bool do_refresh
+bool do_hold
+---
+# Response
+bool do_refresh
+bool do_hold
