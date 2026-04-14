@@ -158,9 +158,8 @@ class LAZWriterThread(QThread):
         return x, y, z, intensity
     
     def enqueue(self, payload: PointCloud2Payload) -> bool:
-        """Add payload to queue. Returns False if dropped."""
         try:
-            self._queue.put(payload, block=True, timeout=1.0)
+            self._queue.put_nowait(payload)
             return True
         except Full:
             self._drop_count += 1

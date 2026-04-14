@@ -172,20 +172,35 @@ class TopicListWidget(QWidget):
             self._create_topic_item(topic, self.tree)
             
     def _create_topic_item(self, topic: Dict, parent):
-        """Helper to create a topic item and add it to a parent (tree or item)."""
+        hz = topic.get('hz', 0.0)
+        hz_text = f"{hz:.1f}" if hz > 0 else "--"
         item = QTreeWidgetItem([
             topic['name'],
             topic['type'],
-            f"{topic.get('hz', 0):.1f}"
+            hz_text,
         ])
         item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
         item.setCheckState(0, Qt.CheckState.Unchecked)
         item.setData(0, Qt.ItemDataRole.UserRole, topic['name'])
-        
+
         if isinstance(parent, QTreeWidget):
             parent.addTopLevelItem(item)
         else:
             parent.addChild(item)
+
+    def update_hz(self, hz_map: Dict[str, float]):
+        def update_item(item):
+            if item.childCount() == 0:
+                name = item.data(0, Qt.ItemDataRole.UserRole)
+                if name and name in hz_map:
+                    hz = hz_map[name]
+                    item.setText(2, f"{hz:.1f}" if hz > 0 else "--")
+            else:
+                for i in range(item.childCount()):
+                    update_item(item.child(i))
+
+        for i in range(self.tree.topLevelItemCount()):
+            update_item(self.tree.topLevelItem(i))
     
     def _on_view_changed(self, checked: bool):
         """Handle view toggle between Group and List."""

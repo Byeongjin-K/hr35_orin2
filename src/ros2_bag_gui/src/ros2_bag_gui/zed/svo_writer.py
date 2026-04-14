@@ -31,12 +31,12 @@ COMPRESSION_NAMES = ("H264", "H265", "H264_LOSSLESS", "H265_LOSSLESS", "LOSSLESS
 class SVO2Config:
     """Configuration for a single SVO2 recording session."""
 
-    output_path: str              # Full path to .svo2 file
-    camera_serial: str = ""       # Serial number (empty = auto-detect)
-    camera_index: int = 0         # Camera index if multiple cameras
-    resolution: str = "HD720"     # Resolution name (see RESOLUTION_NAMES)
-    fps: int = 30                 # Camera FPS
-    compression: str = "H265"     # Compression mode (see COMPRESSION_NAMES)
+    output_path: str
+    camera_serial: str = ""
+    camera_index: int = 0
+    resolution: str = "HD1200"
+    fps: int = 15
+    compression: str = "H265"
 
 
 class SVO2WriterThread(QThread):
@@ -116,11 +116,9 @@ class SVO2WriterThread(QThread):
         camera = sl.Camera()
 
         try:
-            # ---- Init parameters ----
             init_params = sl.InitParameters()
-            init_params.camera_resolution = self._get_resolution(sl)
             init_params.camera_fps = self._config.fps
-            init_params.depth_mode = sl.DEPTH_MODE.NONE  # Recording only
+            init_params.depth_mode = sl.DEPTH_MODE.NONE
 
             if self._config.camera_serial:
                 init_params.set_from_serial_number(
@@ -129,8 +127,22 @@ class SVO2WriterThread(QThread):
             elif self._config.camera_index != 0:
                 init_params.input.setFromCameraID(self._config.camera_index)
 
-            # ---- Open camera ----
-            status = camera.open(init_params)
+            resolutions_to_try = self._build_resolution_fallback(sl)
+            status = None
+            used_resolution = None
+            for res_name, res_enum in resolutions_to_try:
+                init_params.camera_resolution = res_enum
+                status = camera.open(init_params)
+                if status == sl.ERROR_CODE.SUCCESS:
+                    used_resolution = res_name
+                    break
+                logger.warning("ZED resolution %s failed (%s), trying next", res_name, status)
+                try:
+                    camera.close()
+                except Exception:
+                    pass
+                camera = sl.Camera()
+
             if status != sl.ERROR_CODE.SUCCESS:
                 self.error_occurred.emit(
                     f"Failed to open ZED camera: {status} "
@@ -138,6 +150,10 @@ class SVO2WriterThread(QThread):
                     f"index={self._config.camera_index})"
                 )
                 return
+
+            if used_resolution and used_resolution != self._config.resolution:
+                logger.info("ZED opened with fallback resolution %s (requested %s)",
+                            used_resolution, self._config.resolution)
 
             # ---- Ensure output directory exists ----
             os.makedirs(os.path.dirname(self._config.output_path), exist_ok=True)
@@ -210,12 +226,23 @@ class SVO2WriterThread(QThread):
     # ------------------------------------------------------------------
 
     def _get_resolution(self, sl):
-        """Resolve the configured resolution string to an sl enum value."""
         return getattr(
             sl.RESOLUTION,
             self._config.resolution,
-            sl.RESOLUTION.HD720,
+            sl.RESOLUTION.HD1200,
         )
+
+    def _build_resolution_fallback(self, sl):
+        preferred = self._config.resolution
+        fallback_order = list(RESOLUTION_NAMES)
+        if preferred in fallback_order:
+            fallback_order.remove(preferred)
+            fallback_order.insert(0, preferred)
+        return [
+            (name, getattr(sl.RESOLUTION, name))
+            for name in fallback_order
+            if hasattr(sl.RESOLUTION, name)
+        ]
 
     def _get_compression(self, sl):
         """Resolve the configured compression string to an sl enum value."""
