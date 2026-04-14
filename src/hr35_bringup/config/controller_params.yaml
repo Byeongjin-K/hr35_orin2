@@ -1,0 +1,20 @@
+/**:
+  ros__parameters:
+    Swing_Kp: 0.4
+    Swing_Ki: 0.0
+    Boom_Kp: 0.5
+    Boom_Ki: 0.0
+    Arm_Kp: -0.5
+    Arm_Ki: -0.0
+    Bucket_Kp: 0.5
+    Bucket_Ki: 0.0
+    dt: 0.02
+    threshold: 0.0
+    directionAngle_Swing_deg: -1
+    directionAngle_Boom_deg: -1
+    directionAngle_Arm_deg: -1
+    directionAngle_Bucket_deg: -1
+    offsetAngle_Swing_deg: 90.0
+    offsetAngle_Boom_deg: 55.0
+    offsetAngle_Arm_deg: -125.0
+    offsetAngle_Bucket_deg: 270.0

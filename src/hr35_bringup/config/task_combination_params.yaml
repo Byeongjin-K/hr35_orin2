@@ -1,0 +1,4 @@
+/**:
+  ros__parameters:
+    dig_task_arrays: ["swingDig","swinglessDig","dig"] #3, 4, 1, 4 
+    dump_task_arrays: ["swingDump","swinglessDump","dump"] # 3, 4, 2, 4

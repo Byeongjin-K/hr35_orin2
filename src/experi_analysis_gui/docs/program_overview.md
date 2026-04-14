@@ -11,7 +11,7 @@
 | 개발 환경 | Python 3.10+, PyQt5, ROS2 (Humble/Kilted) |
 | 입력 데이터 | ROS2 bag (PointCloud2), PCD, CSV, LAS/LAZ, NPY |
 | 출력 | 텍스트 리포트, 히트맵/차트, PDF, CSV 비교표 |
-| 실행 | `python3 main.py` (ROS2 sourced 상태 권장) |
+| 실행 | `python3 run_experi_analysis.py` (ROS2 sourced 상태 권장) |
 
 ---
 
@@ -112,7 +112,7 @@ Before 데이터의 **실제 지면 높이**(RANSAC 추정)를 기준으로 이�
 
 ```
 experi_analysis_gui/
-├── main.py                          ← 실행 진입점
+├── run_experi_analysis.py            ← 실행 진입점
 ├── core/                            ← 핵심 알고리즘
 │   ├── data_loader.py               ← 다중 포맷 점군 I/O
 │   ├── rosbag_loader.py             ← ROS2 bag PointCloud2/GridMap 추출

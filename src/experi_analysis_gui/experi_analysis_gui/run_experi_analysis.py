@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
 import sys
-import os
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import Qt
@@ -130,7 +127,7 @@ def main():
         QFrame[frameShape="4"], QFrame[frameShape="5"] { color: #555; }
     """)
 
-    from gui.main_window import MainWindow
+    from experi_analysis_gui.gui.main_window import MainWindow
     window = MainWindow()
     window.show()
 

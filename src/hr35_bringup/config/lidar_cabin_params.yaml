@@ -1,0 +1,63 @@
+lidar_cabin:
+  os_driver:
+    ros__parameters:
+      # sensor_hostname[required]: hostname or IP address of the sensor (IP4 or IP6).
+      sensor_hostname: '192.168.0.3'
+      # udp_dest[optional]: hostname or multicast group IP where the sensor will send UDP data packets.
+      udp_dest: ''
+      # mtp_dest[optional]: hostname IP address for receiving data packets via multicast
+      mtp_dest: ''
+      # mtp_main[optional]: if true, then configure and reinit the sensor
+      mtp_main: false
+      # lidar_mode[optional]: resolution and rate
+      lidar_mode: ''
+      # timestamp_mode[optional]: method used to timestamp measurements
+      timestamp_mode: ''
+      # ptp_utc_tai_offset[optional]: UTC/TAI offset in seconds
+      ptp_utc_tai_offset: -37.0
+      # udp_profile_lidar[optional]: lidar packet profile
+      udp_profile_lidar: ''
+      # metadata[optional]: path to save metadata file to
+      metadata: ''
+      # lidar_port[optional]: port value should be in the range [0, 65535]
+      lidar_port: 7502
+      # imu_port[optional]: port value should be in the range [0, 65535]
+      imu_port: 7503
+      # sensor_frame[optional]: name to use when referring to the sensor frame
+      sensor_frame: lidar_cabin/os_sensor
+      # lidar_frame[optional]: name to use when referring to the lidar frame
+      lidar_frame: lidar_cabin/os_lidar
+      # imu_frame[optional]: name to use when referring to the imu frame
+      imu_frame: lidar_cabin/os_imu
+      # point_cloud_frame[optional]: which frame of reference to use
+      point_cloud_frame: lidar_cabin/os_lidar
+      # pub_static_tf[optional]: when this flag is set to True, the driver will broadcast the TF transforms
+      pub_static_tf: true
+      # proc_mask[optional]: use any combination of the 4 flags IMG, PCL, IMU and SCAN
+      proc_mask: IMU|PCL|SCAN|IMG|RAW
+      # scan_ring[optional]: select which beam of the LidarScan to use
+      scan_ring: 0
+      # use_system_default_qos[optional]: if false, data are published with sensor data QoS
+      use_system_default_qos: false
+      # point_type[optional]: choose from: {original, native, xyz, xyzi, xyzir}
+      point_type: original
+      # azimuth window start[optional]: values range [0, 360000] millidegrees
+      azimuth_window_start: 0
+      # azimuth_window_end[optional]: values range [0, 360000] millidegrees
+      azimuth_window_end: 360000
+      # persist_config[optional]: request the sensor to persist settings
+      persist_config: false
+      # attempt_config[optional]: attempting to reconnect to the sensor after connection loss
+      attempt_reconnect: false
+      # dormant_period_between_reconnects[optional]: wait time in seconds between reconnection attempts
+      dormant_period_between_reconnects: 1.0
+      # max_failed_reconnect_attempts[optional]: maximum number of attempts
+      max_failed_reconnect_attempts: 2147483647
+      # organized[optional]: whether to generate an organized point cloud
+      organized: true
+      # destagger[optional]: enable or disable point cloud destaggering
+      destagger: true
+      # min_range[optional]: minimum lidar range to consider (meters)
+      min_range: 0.0
+      # max_range[optional]: maximum lidar range to consider (meters)
+      max_range: 1000.0 

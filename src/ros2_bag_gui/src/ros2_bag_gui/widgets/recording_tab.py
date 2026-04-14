@@ -214,18 +214,20 @@ class RecordingTab(QWidget):
     def _update_recording_stats(self):
         if not self._recorder.is_recording:
             return
-        
+
         counts = self._recorder.topic_counts
+        hz_map = self._recorder.get_topic_hz()
         stats = {}
         for topic_name, msg_count in counts.items():
-            stats[topic_name] = {'count': msg_count, 'hz': 0.0}
+            stats[topic_name] = {'count': msg_count, 'hz': hz_map.get(topic_name, 0.0)}
         self.status_panel.update_topic_stats(stats)
-        
+        self.topic_list.update_hz(hz_map)
+
         session_path = self._recorder._generate_session_path()
         if session_path:
             rosbag_dir = os.path.join(session_path, 'rosbag')
             pc_dir = os.path.join(session_path, 'pointcloud')
-            
+
             rosbag_bytes = self._dir_size(rosbag_dir)
             pc_bytes = self._dir_size(pc_dir)
             self.status_panel.update_storage_sizes(rosbag_bytes, pc_bytes, 0)

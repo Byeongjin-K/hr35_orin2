@@ -8,11 +8,11 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt
 import numpy as np
 
-from gui.data_panel import DataPanel
-from gui.viewer_3d import PointCloudViewer3D
-from gui.analysis_panel import AnalysisPanel
-from gui.comparison_panel import ComparisonPanel
-from gui.gridmap_viewer import GridMapViewer
+from experi_analysis_gui.gui.data_panel import DataPanel
+from experi_analysis_gui.gui.viewer_3d import PointCloudViewer3D
+from experi_analysis_gui.gui.analysis_panel import AnalysisPanel
+from experi_analysis_gui.gui.comparison_panel import ComparisonPanel
+from experi_analysis_gui.gui.gridmap_viewer import GridMapViewer
 
 
 class MainWindow(QMainWindow):

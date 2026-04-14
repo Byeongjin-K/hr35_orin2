@@ -10,7 +10,8 @@ class TestAppSettings:
         settings = AppSettings()
         assert settings.split_mode == "size"
         assert settings.split_size_gb == 3.0
-        assert settings.include_images_without_sdk == True
+        assert settings.lidar_mode == "bag"
+        assert settings.camera_mode == "bag"
 
 class TestSettingsManager:
     def test_save_and_load(self, tmp_path, monkeypatch):

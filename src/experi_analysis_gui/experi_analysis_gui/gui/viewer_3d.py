@@ -7,7 +7,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QVector3D
 
-from utils.helpers import apply_jet_colormap_fast, downsample_points
+from experi_analysis_gui.utils.helpers import apply_jet_colormap_fast, downsample_points
 
 
 class PointCloudViewer3D(QWidget):
