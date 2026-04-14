@@ -1,0 +1,15 @@
+/**:
+  ros__parameters:
+    bucket_default_direction: 1
+    
+    dig_publish_interval: 0.08
+    dig_num_points: 300
+
+    dump_publish_interval: 0.1
+    dump_num_points: 100
+
+    swing_publish_interval: 0.5
+    swing_num_points: 15
+
+    swingless_publish_interval: 0.2
+    swingless_num_points: 15

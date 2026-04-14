@@ -1,0 +1,9 @@
+# grid_map_params.yaml
+
+grid_map_node:
+  ros__parameters:
+    pointcloud_topic: "/lidar_boom/points"  # 포인트 클라우드 토픽
+    resolution: 0.5                    # 그리드 맵의 해상도 (미터 단위)
+    length_x: 100.0                    # 그리드 맵의 X축 길이 (미터 단위)
+    length_y: 100.0                    # 그리드 맵의 Y축 길이 (미터 단위)
+    frame_id: "map"                    # 그리드 맵의 프레임 ID

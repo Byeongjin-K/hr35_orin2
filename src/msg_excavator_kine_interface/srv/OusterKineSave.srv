@@ -1,0 +1,11 @@
+#
+# Ouster lidar의 point cloud를 화일에 저장하기 위한 서비스
+#
+
+# Request
+bool run
+bool reset
+bool save_accumulatedpc
+---
+# Response
+bool response

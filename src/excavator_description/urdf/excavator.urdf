@@ -1,0 +1,215 @@
+<?xml version="1.0"?>
+<robot name="excavator_robot">
+
+    <!-- Material definitions for various parts -->
+    <material name="yellow">
+        <color rgba="1 1 0 1" />
+    </material>
+
+    <material name="gray">
+        <color rgba="0.5 0.5 0.5 1" />
+    </material>
+
+    <material name="white">
+        <color rgba="1 1 1 1" />
+    </material>
+
+    <material name="red">
+        <color rgba="1 0 0 1" />
+    </material>
+
+    <material name="blue">
+        <color rgba="0 0 1 1" />
+    </material>
+
+    <material name="black">
+        <color rgba="0.2 0.2 0.2 1" />
+    </material>
+
+    <!-- Link for the mobile base -->
+    <link name="lower_frame">
+        <visual>
+            <geometry>
+                <!-- Base size definition -->
+                <box size="5 5 1" />
+            </geometry>
+            <origin rpy="0 0 0" xyz="0 0 0.5" />
+            <material name="gray" />
+        </visual>
+        <collision>
+            <geometry>
+                <!-- Collision size definition -->
+                <box size="6 4 1" />
+            </geometry>
+            <origin rpy="0 0 0" xyz="0 0 0" />
+            <contact_coefficients mu="0" />
+        </collision>
+        <inertial>
+            <mass value="200.0" />
+            <inertia ixx="1.0" ixy="1.0" ixz="1.0" iyy="1.0" iyz="1.0" izz="1.0" />
+            <origin rpy="0 0 0" xyz="0 0 0" />
+        </inertial>
+    </link>
+
+    <!-- Link for the body (main chassis_frame) -->
+    <link name="chassis_frame">
+        <visual>
+            <geometry>
+                <!-- chassis_frame size definition -->
+                <box size="3 3 2" />
+            </geometry>
+            <origin rpy="0 0 0" xyz="-2 0 1.5" />
+            <material name="blue" />
+        </visual>
+        <collision>
+            <geometry>
+                <!-- Collision size definition -->
+                <box size="3 3 3" />
+            </geometry>
+            <origin rpy="0 0 0" xyz="0 0 0" />
+            <contact_coefficients mu="1.5" />
+        </collision>
+        <inertial>
+            <mass value="300.0" />
+            <inertia ixx="2.0" ixy="0.0" ixz="0.0" iyy="2.0" iyz="0.0" izz="2.0" />
+            <origin rpy="0 0 0" xyz="0 0.2 0" />
+        </inertial>
+    </link>
+
+    <!-- Joint between mobile base and chassis_frame -->
+    <joint name="base_to_chassis_frame_joint" type="revolute">
+        <parent link="lower_frame" />
+        <child link="chassis_frame" />
+        <axis xyz="0 0 1" />
+        <limit effort="1000.0" lower="-3.1415927" upper="3.1415927" velocity="0.0" />
+        <origin rpy="0 0 0" xyz="0 0 2" />
+    </joint>
+
+    <!-- Link for the boom -->
+    <link name="boom_frame">
+        <visual>
+            <geometry>
+                <!-- boom size definition -->
+                <box size="8 1 1" />
+            </geometry>
+            <origin rpy="0 -0.6 0" xyz="1.5 0 1.75" />
+            <material name="yellow" />
+        </visual>
+        <collision>
+            <geometry>
+                <!-- Collision size definition -->
+                <box size="3 1 1" />
+            </geometry>
+            <origin rpy="0 0 0" xyz="1.75 0 0" />
+            <contact_coefficients mu="1.5" />
+        </collision>
+        <inertial>
+            <mass value="150.0" />
+            <inertia ixx="1.0" ixy="0.0" ixz="0.0" iyy="1.0" iyz="0.0" izz="1.0" />
+            <origin rpy="0 0 0" xyz="0 0 0" />
+        </inertial>
+    </link>
+    <!-- Link for the boom -->
+    <link name="boom_child">
+ 
+        <collision>
+            <geometry>
+                <!-- Collision size definition -->
+                <box size="3 1 1" />
+            </geometry>
+            <origin rpy="0 0 0" xyz="1.75 0 0" />
+            <contact_coefficients mu="1.5" />
+        </collision>
+        <inertial>
+            <mass value="150.0" />
+            <inertia ixx="1.0" ixy="0.0" ixz="0.0" iyy="1.0" iyz="0.0" izz="1.0" />
+            <origin rpy="0 0 0" xyz="0 0 0" />
+        </inertial>
+    </link>
+    <!-- Joint between chassis_frame and boom -->
+    <joint name="combind_boom" type="fixed">
+        <parent link="boom_frame" />
+        <child link="boom_child" />
+        <axis xyz="1 0 0" />
+        <limit effort="1000.0" lower="-1.5707963" upper="1.5707963" velocity="0.0" />
+        <origin rpy="0 0.78 0" xyz="3.25 0 0" />
+    </joint>
+
+    <!-- Joint between chassis_frame and boom -->
+    <joint name="chassis_frame_to_boom_joint" type="revolute">
+        <parent link="chassis_frame" />
+        <child link="boom_frame" />
+        <axis xyz="0 1 0" />
+        <limit effort="1000.0" lower="-1.5707963" upper="1.5707963" velocity="0.0" />
+        <origin rpy="0 -0.78 0" xyz="1 0 1" />
+    </joint>
+
+
+    <!-- Link for the arm_frame -->
+    <link name="arm_frame">
+        <visual>
+            <geometry>
+                <!-- boom size definition -->
+                <box size="4 1 1" />
+            </geometry>
+            <origin rpy="0 1.57 0" xyz="0 0 -2" />
+            <material name="gray" />
+        </visual>
+        <collision>
+            <geometry>
+                <!-- Collision size definition -->
+                <box size="3 1 1" />
+            </geometry>
+            <origin rpy="0 1.57 0" xyz="0 0 0" />
+            <contact_coefficients mu="1.5" />
+        </collision>
+        <inertial>
+            <mass value="150.0" />
+            <inertia ixx="1.0" ixy="0.0" ixz="0.0" iyy="1.0" iyz="0.0" izz="1.0" />
+            <origin rpy="0 0 0" xyz="0 0 0" />
+        </inertial>
+    </link>
+
+    <!-- Joint between chassis_frame and boom -->
+    <joint name="boom_to_arm_frame_joint" type="revolute">
+        <parent link="boom_child" />
+        <child link="arm_frame" />
+        <axis xyz="0 1 0" />
+        <limit effort="1000.0" lower="-1.5707963" upper="1.5707963" velocity="0.0" />
+        <origin rpy="0 0.98 0" xyz="3.5 0 0" />
+    </joint>
+
+    <!-- Link for the arm_frame -->
+    <link name="bucket_frame">
+        <visual>
+            <geometry>
+                <!-- boom size definition -->
+                <box size="0.5 3 2.5" />
+            </geometry>
+            <origin rpy="0 0 0" xyz="0.75 0 -0.5" />
+            <material name="red" />
+        </visual>
+        <collision>
+            <geometry>
+                <!-- Collision size definition -->
+                <box size="0.5 1.5 2.5" />
+            </geometry>
+            <origin rpy="0 0 0" xyz="0.75 0 -0.5" />
+            <contact_coefficients mu="1.5" />
+        </collision>
+        <inertial>
+            <mass value="150.0" />
+            <inertia ixx="1.0" ixy="0.0" ixz="0.0" iyy="1.0" iyz="0.0" izz="1.0" />
+            <origin rpy="0 0 0" xyz="0 0 0" />
+        </inertial>
+    </link>
+
+    <!-- Joint between chassis_frame and boom -->
+    <joint name="arm_frame_to_bucket_frame_joint" type="revolute">
+        <parent link="arm_frame" />
+        <child link="bucket_frame" />
+        <axis xyz="0 1 0" />
+        <limit effort="1000.0" lower="-1.5707963" upper="1.5707963" velocity="0.0" />
+        <origin rpy="0 0 0" xyz="3.5 0 0" />
+    </joint>
+</robot>

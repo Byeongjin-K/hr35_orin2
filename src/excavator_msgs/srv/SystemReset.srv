@@ -1,0 +1,32 @@
+# 시스템 리셋 서비스 요청
+
+# 리셋 타입 (0: 소프트 리셋, 1: 하드 리셋, 2: 센서 리셋)
+uint8 reset_type
+
+# 특정 서브시스템 리셋 플래그
+bool reset_can_bridge
+bool reset_sensors
+bool reset_controllers
+bool reset_safety_systems
+
+# 리셋 사유
+string reason
+
+---
+
+# 시스템 리셋 서비스 응답
+
+# 요청 처리 성공 여부
+bool success
+
+# 리셋된 서브시스템들
+string[] reset_systems
+
+# 리셋 후 시스템 상태
+uint8 system_status        # 0: OK, 1: Warning, 2: Error, 3: Critical
+
+# 응답 메시지
+string message
+
+# 리셋 소요 시간 (초)
+float32 reset_duration 

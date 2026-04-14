@@ -1,0 +1,11 @@
+# config/grid_map_extractor_params.yaml
+
+grid_map_extractor:
+  ros__parameters:
+    front_cells: 20          # 로봇 앞쪽으로 추출할 셀 수
+    side_cells: 40           # 로봇 좌우로 추출할 셀 수
+    layer: "elevation"      # 사용할 그리드맵 레이어
+    # robot_frame: "lower_frame" # 로봇의 프레임 이름 (예: "base_link")
+    robot_frame: "lidar_cabin/os_sensor"
+    map_frame: "map"
+    grid_map_x_offset: 00

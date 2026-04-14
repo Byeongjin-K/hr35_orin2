@@ -1,0 +1,3 @@
+geometry_msgs/Point position
+float64 bucket_orientation
+builtin_interfaces/Duration time_from_start 

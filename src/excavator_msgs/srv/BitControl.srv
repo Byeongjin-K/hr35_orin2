@@ -1,0 +1,9 @@
+# Bit Control Service
+# Request: 비트 제어 명령 (rpm_up, rpm_down, dozer_up, dozer_down)
+string command
+
+---
+# Response
+bool success                 # 명령 실행 성공 여부
+string message               # 상태 메시지
+int8 current_rpm             # 현재 RPM 레벨 (0-17)

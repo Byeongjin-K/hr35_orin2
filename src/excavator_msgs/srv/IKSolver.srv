@@ -1,0 +1,27 @@
+# Request: Target position and orientation
+geometry_msgs/Point target_position   # Target position (x, y, z) in m
+float64 bucket_orientation            # Target bucket orientation in degrees
+float32 swing_angle                   # Swing angle in degrees
+bool use_current_params               # Use current excavator parameters or custom
+
+# Optional custom parameters (if use_current_params is false)
+float64 boom_length                   # L1 in m (optional)
+float64 arm_length                    # L2 in m (optional) 
+float64 bucket_length                 # L3 in m (optional)
+float64 base_offset_x                 # a1 in m (optional)
+float64 base_offset_y                 # h1 in m (optional)
+
+---
+# Response: Joint angles and status
+bool success                          # True if solution found
+bool reachable                        # True if target is reachable
+string message                        # Status message
+
+# Joint angles (in degrees)
+float64 boom_joint_angle              # θ1 - Boom joint angle
+float64 arm_joint_angle               # θ2 - Arm joint angle (internal)
+float64 bucket_joint_angle            # θ3 - Bucket joint angle (output)
+
+# Computed end effector pose for verification
+geometry_msgs/Point computed_position # Computed position in m
+float64 computed_bucket_orientation   # Computed bucket orientation 

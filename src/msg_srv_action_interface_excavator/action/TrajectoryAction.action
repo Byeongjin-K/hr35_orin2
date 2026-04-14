@@ -1,0 +1,14 @@
+# Goal Definition
+float64 theta_swing_rad
+float64 x_distal_coordinate
+float64 x_proximal_coordinate
+float64 y_height_coordinate
+float64 depth
+
+---
+# Result Definition
+bool success
+
+---
+# Feedback Definition
+uint32 current_index

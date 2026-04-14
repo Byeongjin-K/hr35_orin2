@@ -1,0 +1,10 @@
+# Request
+bool run
+bool hold
+bool reset
+bool ftpupload
+bool do_ftpupload   # 즉시 FTP 무한서버에 업로드
+float32 grid_size
+---
+# Response
+bool response

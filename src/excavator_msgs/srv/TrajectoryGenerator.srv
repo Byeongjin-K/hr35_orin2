@@ -1,0 +1,18 @@
+# Request: Trajectory generation parameters
+string trajectory_type                # "dig", "dump", "swing", "leveling"
+geometry_msgs/Point start_position    # Start position (x, y) in m (z ignored)
+geometry_msgs/Point end_position      # End position (x, y) in m (z ignored)
+int32 num_points                      # Number of trajectory points
+float64 task_depth                    # Task depth in m (for dig trajectory)
+float64 ground_offset                 # Ground reference offset in m
+
+# Trajectory generation parameters
+float64 max_speed                     # Maximum speed in m/s (optional)
+float64 acceleration                  # Acceleration in m/s² (optional)
+float64 time_step                     # Time step in seconds (optional)
+
+---
+# Response: Generated trajectory (PRD Section 4.1.2 compliant)
+bool success                          # True if trajectory generated successfully
+string message                        # Status message
+excavator_msgs/BucketTrajectory trajectory  # Complete bucket trajectory (PRD compliant) 

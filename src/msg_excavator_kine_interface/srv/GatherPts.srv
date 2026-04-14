@@ -1,0 +1,7 @@
+# Request
+bool run
+bool reset
+
+---
+# Response
+bool response
