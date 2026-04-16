@@ -157,29 +157,47 @@ class SettingsPanel(QWidget):
         self.settings_changed.emit()
     
     def _load_settings(self):
-        """Load settings into UI."""
+        """Load settings into UI.
+
+        Signals are blocked during bulk loading to prevent premature saves
+        that could overwrite persisted values (e.g. output_path, lidar_mode)
+        before all widgets are updated.
+        """
         s = self._settings_manager.settings
+
+        widgets = [
+            self.session_name_edit, self.split_combo,
+            self.split_size_spin, self.split_time_spin,
+            self.lidar_mode_combo, self.camera_mode_combo,
+        ]
+        for w in widgets:
+            w.blockSignals(True)
+
         self.path_edit.setText(s.output_path)
         self.session_name_edit.setText(s.session_name)
-        
-        # Split mode
+
         mode_map = {"size": 0, "time": 1, "none": 2}
         self.split_combo.setCurrentIndex(mode_map.get(s.split_mode, 0))
-        
+
         self.split_size_spin.setValue(s.split_size_gb)
         self.split_time_spin.setValue(s.split_time_minutes)
-        # LiDAR mode
+
         lidar_mode_map = {"bag": 0, "laz": 1, "both": 2}
         self.lidar_mode_combo.setCurrentIndex(lidar_mode_map.get(s.lidar_mode, 0))
-        
-        # Camera mode
+
         camera_mode_map = {"bag": 0, "svo2": 1, "both": 2}
         idx = camera_mode_map.get(s.camera_mode, 0)
         if not self._zed_available and idx > 0:
-            idx = 0  # Fallback to bag if SDK not available
+            idx = 0
         self.camera_mode_combo.setCurrentIndex(idx)
-        
-        self._on_split_mode_changed(self.split_combo.currentIndex())
+
+        for w in widgets:
+            w.blockSignals(False)
+
+        # Enable/disable split controls without triggering save
+        split_idx = self.split_combo.currentIndex()
+        self.split_size_spin.setEnabled(split_idx == 0)
+        self.split_time_spin.setEnabled(split_idx == 1)
     
     def _save_settings(self):
         """Save UI state to settings."""
