@@ -151,6 +151,7 @@ class RecordingTab(QWidget):
     def _setup_ros2(self):
         self._ros2_thread = ROS2Thread(self)
         self._ros2_thread.connection_status_changed.connect(self._on_connection_changed)
+        self._ros2_thread.hz_updated.connect(self.topic_list.update_hz)
         
         self._discovery = TopicDiscoveryManager(self._ros2_thread, self)
         self._discovery.topics_discovered.connect(self._on_topics_discovered)
@@ -199,6 +200,7 @@ class RecordingTab(QWidget):
     
     def _on_recorder_started(self):
         logger.info("Recorder started successfully")
+        self._ros2_thread.set_hz_active(False)
         self._stats_timer = QTimer(self)
         self._stats_timer.timeout.connect(self._update_recording_stats)
         self._stats_timer.start(1000)
@@ -207,6 +209,7 @@ class RecordingTab(QWidget):
         logger.info("Recorder stopped")
         if hasattr(self, '_stats_timer'):
             self._stats_timer.stop()
+        self._ros2_thread.set_hz_active(True)
     
     def _on_message_recorded(self, topic_name: str, count: int):
         pass
