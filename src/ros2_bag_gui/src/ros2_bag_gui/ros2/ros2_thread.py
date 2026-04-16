@@ -1,10 +1,23 @@
 """ROS2 thread for running rclpy in background."""
+import time
+import threading
+
 from PySide6.QtCore import QThread, Signal
 import rclpy
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
-from typing import List, Optional
-import threading
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
+from rosidl_runtime_py.utilities import get_message
+from typing import List, Dict, Optional
+
+_HZ_QOS = QoSProfile(
+    depth=1,
+    reliability=QoSReliabilityPolicy.BEST_EFFORT,
+    history=QoSHistoryPolicy.KEEP_LAST,
+)
+
+_HZ_WINDOW = 5.0
 
 
 class ROS2Thread(QThread):
@@ -12,6 +25,7 @@ class ROS2Thread(QThread):
     topic_list_updated = Signal(list)
     connection_status_changed = Signal(bool)
     error_occurred = Signal(str)
+    hz_updated = Signal(dict)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -21,6 +35,12 @@ class ROS2Thread(QThread):
         self._command_lock = threading.Lock()
         self._pending_command: Optional[str] = None
 
+        self._hz_lock = threading.Lock()
+        self._hz_timestamps: Dict[str, List[float]] = {}
+        self._hz_subs: List = []
+        self._hz_subscribed: set = set()
+        self._hz_active = False
+
     def run(self):
         try:
             rclpy.init()
@@ -29,6 +49,7 @@ class ROS2Thread(QThread):
             self._executor.add_node(self._node)
 
             self._node.create_timer(0.2, self._process_command)
+            self._node.create_timer(1.0, self._emit_hz)
 
             self._running = True
             self.connection_status_changed.emit(True)
@@ -48,6 +69,8 @@ class ROS2Thread(QThread):
 
         if cmd == 'discover_topics':
             self._do_discover_topics()
+        elif cmd == 'stop_hz':
+            self._destroy_hz_subs()
 
     def _do_discover_topics(self):
         try:
@@ -62,11 +85,12 @@ class ROS2Thread(QThread):
                 topics.append({
                     'name': name,
                     'type': topic_type,
-                    'hz': 0.0,
-                    'category': category
+                    'hz': self._cached_hz(name),
+                    'category': category,
                 })
 
             self.topic_list_updated.emit(topics)
+            self._update_hz_subs(topics)
 
         except Exception as e:
             self.error_occurred.emit(f"Discovery error: {e}")
@@ -89,6 +113,93 @@ class ROS2Thread(QThread):
         with self._command_lock:
             self._pending_command = 'discover_topics'
 
+    def _cached_hz(self, topic_name: str) -> float:
+        with self._hz_lock:
+            ts_list = self._hz_timestamps.get(topic_name)
+            if ts_list and len(ts_list) >= 2:
+                span = ts_list[-1] - ts_list[0]
+                return (len(ts_list) - 1) / span if span > 0 else 0.0
+        return 0.0
+
+    def _update_hz_subs(self, topics: List[Dict]):
+        new_names = {t['name'] for t in topics}
+        if new_names == self._hz_subscribed and self._hz_active:
+            return
+
+        self._destroy_hz_subs()
+
+        cb_group = ReentrantCallbackGroup()
+        for topic in topics:
+            try:
+                msg_class = get_message(topic['type'])
+            except Exception:
+                continue
+
+            def raw_cb(_raw, t=topic['name']):
+                self._hz_tick(t)
+
+            try:
+                sub = self._node.create_subscription(
+                    msg_class, topic['name'], raw_cb, _HZ_QOS,
+                    callback_group=cb_group, raw=True,
+                )
+                self._hz_subs.append(sub)
+            except Exception:
+                pass
+
+        self._hz_subscribed = new_names
+        self._hz_active = True
+
+    def _hz_tick(self, topic_name: str):
+        if not self._hz_active:
+            return
+        now = time.monotonic()
+        with self._hz_lock:
+            ts_list = self._hz_timestamps.setdefault(topic_name, [])
+            ts_list.append(now)
+            cutoff = now - _HZ_WINDOW
+            while ts_list and ts_list[0] < cutoff:
+                ts_list.pop(0)
+
+    def _emit_hz(self):
+        if not self._hz_active:
+            return
+        now = time.monotonic()
+        result: Dict[str, float] = {}
+        with self._hz_lock:
+            for topic, ts_list in self._hz_timestamps.items():
+                cutoff = now - _HZ_WINDOW
+                while ts_list and ts_list[0] < cutoff:
+                    ts_list.pop(0)
+                if len(ts_list) >= 2:
+                    span = ts_list[-1] - ts_list[0]
+                    result[topic] = (len(ts_list) - 1) / span if span > 0 else 0.0
+                else:
+                    result[topic] = 0.0
+        if result:
+            self.hz_updated.emit(result)
+
+    def _destroy_hz_subs(self):
+        for sub in self._hz_subs:
+            try:
+                self._node.destroy_subscription(sub)
+            except Exception:
+                pass
+        self._hz_subs.clear()
+        self._hz_subscribed.clear()
+        self._hz_active = False
+        with self._hz_lock:
+            self._hz_timestamps.clear()
+
+    def set_hz_active(self, active: bool):
+        if active:
+            with self._command_lock:
+                self._pending_command = 'discover_topics'
+        else:
+            self._hz_active = False
+            with self._command_lock:
+                self._pending_command = 'stop_hz'
+
     def stop(self):
         self._running = False
         if self._executor is not None:
@@ -96,6 +207,7 @@ class ROS2Thread(QThread):
         self.wait(5000)
 
     def _cleanup(self):
+        self._destroy_hz_subs()
         if self._node is not None:
             self._node.destroy_node()
         try:
