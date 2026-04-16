@@ -147,7 +147,27 @@ class ExportWorker(QThread):
                 return True, f"Image export complete ({result.image_count} images)"
             else:
                 return False, result.error or "Image export failed"
-        
+
+        elif task.task_type == "laz_to_rosbag":
+            from ros2_bag_gui.export.laz_exporter import LAZExporter
+            exporter = LAZExporter()
+            result = exporter.export_to_rosbag(task.config, progress_callback)
+
+            if result.success:
+                return True, f"LAZ to Rosbag complete ({result.file_count} frames)"
+            else:
+                return False, result.error or "LAZ to Rosbag conversion failed"
+
+        elif task.task_type == "svo_to_images":
+            from ros2_bag_gui.export.image_exporter import ImageExporter
+            exporter = ImageExporter()
+            result = exporter.export_standalone_svo(task.config, progress_callback)
+
+            if result.success:
+                return True, f"SVO to Images complete ({result.image_count} images)"
+            else:
+                return False, result.error or "SVO to Images export failed"
+
         else:
             return False, f"Unknown task type: {task.task_type}"
     
