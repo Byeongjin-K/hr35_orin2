@@ -49,6 +49,12 @@ class ImageExportResult:
     error: Optional[str] = None
 
 
+@dataclass
+class StandaloneSVOExportConfig:
+    svo_path: str
+    output_dir: str
+
+
 class ImageExporter:
     """Exports images from recording sessions."""
     
@@ -147,6 +153,53 @@ class ImageExporter:
                 error="No image source available"
             )
     
+    def export_standalone_svo(
+        self,
+        config: StandaloneSVOExportConfig,
+        progress_callback: Optional[Callable[[int, int], None]] = None
+    ) -> ImageExportResult:
+        sl = get_sl_module()
+        if sl is None:
+            return ImageExportResult(
+                success=False,
+                output_dir=config.output_dir,
+                image_count=0,
+                source_used=ImageSource.SVO,
+                error="ZED SDK (pyzed) is not available"
+            )
+
+        if not os.path.exists(config.svo_path):
+            return ImageExportResult(
+                success=False,
+                output_dir=config.output_dir,
+                image_count=0,
+                source_used=ImageSource.SVO,
+                error=f"SVO file not found: {config.svo_path}"
+            )
+
+        os.makedirs(config.output_dir, exist_ok=True)
+
+        try:
+            count = self._extract_svo_images(
+                sl, config.svo_path, config.output_dir,
+                None, None,
+                progress_callback,
+            )
+            return ImageExportResult(
+                success=count > 0,
+                output_dir=config.output_dir,
+                image_count=count,
+                source_used=ImageSource.SVO,
+            )
+        except Exception as e:
+            return ImageExportResult(
+                success=False,
+                output_dir=config.output_dir,
+                image_count=0,
+                source_used=ImageSource.SVO,
+                error=f"SVO export failed: {e}"
+            )
+
     def _export_from_svo(
         self, 
         config: ImageExportConfig, 
@@ -449,15 +502,12 @@ class ImageExporter:
             
             # Determine output format and filename
             if 'depth' in msg.encoding.lower() or msg.encoding in ['32FC1', '16UC1']:
-                # Depth image
                 filename = f"{timestamp}_depth.png"
                 is_depth = True
-            elif msg.encoding in ['mono8', 'mono16']:
-                # Mono image
+            elif msg.encoding in ['mono8', 'mono16', '8UC1']:
                 filename = f"{timestamp}.png"
                 is_depth = False
             else:
-                # Color image
                 filename = f"{timestamp}.jpg"
                 is_depth = False
             
@@ -487,10 +537,14 @@ class ImageExporter:
         ENCODING_MAP = {
             'bgr8': (np.uint8, 3),
             'rgb8': (np.uint8, 3),
+            'bgra8': (np.uint8, 4),
+            'rgba8': (np.uint8, 4),
             'mono8': (np.uint8, 1),
             'mono16': (np.uint16, 1),
             '32FC1': (np.float32, 1),
             '16UC1': (np.uint16, 1),
+            '8UC1': (np.uint8, 1),
+            '8UC3': (np.uint8, 3),
         }
         
         if msg.encoding not in ENCODING_MAP:
@@ -535,10 +589,13 @@ class ImageExporter:
                 # Scale to 16-bit range (assuming meters, scale to mm)
                 img = (img * 1000).astype(np.uint16)
             
-            # BGR/RGB conversion for color images
-            if encoding == 'rgb8':
+            if encoding == 'bgra8':
+                img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+            elif encoding == 'rgba8':
+                img = cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)
+            elif encoding == 'rgb8' or encoding == '8UC3':
                 img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-            
+
             cv2.imwrite(output_path, img)
             return
             
@@ -553,11 +610,13 @@ class ImageExporter:
             if is_depth and img.dtype == np.float32:
                 img = (img * 1000).astype(np.uint16)
             
-            # Convert BGR to RGB for PIL
-            if encoding == 'bgr8':
-                img = img[:, :, ::-1]  # BGR to RGB
-            
-            # Create PIL image
+            if encoding in ('bgra8', 'rgba8'):
+                img = img[:, :, :3]
+                if encoding == 'bgra8':
+                    img = img[:, :, ::-1]
+            elif encoding == 'bgr8':
+                img = img[:, :, ::-1]
+
             if len(img.shape) == 2:
                 # Grayscale
                 if img.dtype == np.uint16:
