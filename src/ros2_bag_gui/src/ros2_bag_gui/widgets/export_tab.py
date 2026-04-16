@@ -11,8 +11,10 @@ import os
 
 from ros2_bag_gui.export.bag_loader import BagLoader, BagSessionInfo, TopicInfo
 from ros2_bag_gui.export.csv_exporter import CSVExportConfig
-from ros2_bag_gui.export.laz_exporter import LAZExportConfig, LAZFromBagConfig
-from ros2_bag_gui.export.image_exporter import ImageExportConfig, ImageExporter, ImageSource
+from ros2_bag_gui.export.laz_exporter import LAZExportConfig, LAZFromBagConfig, LAZToRosbagConfig
+from ros2_bag_gui.export.image_exporter import (
+    ImageExportConfig, ImageExporter, ImageSource, StandaloneSVOExportConfig
+)
 from ros2_bag_gui.export.sync_generator import SyncGenerator, SyncGeneratorConfig
 from ros2_bag_gui.widgets.time_range import TimeRangeSelector
 from ros2_bag_gui.widgets.export_progress import ExportProgressDialog, ExportTask
@@ -142,7 +144,90 @@ class ExportTab(QWidget):
         options_layout.addWidget(output_group, 40)
         
         layout.addLayout(options_layout)
-    
+
+        separator = QLabel("Standalone Converters")
+        separator.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        separator.setStyleSheet("color: gray; margin-top: 8px; font-weight: bold;")
+        layout.addWidget(separator)
+
+        standalone_layout = QHBoxLayout()
+
+        laz_rosbag_group = QGroupBox("LAZ Folder -> Rosbag")
+        laz_rosbag_vl = QVBoxLayout(laz_rosbag_group)
+
+        laz_src_hl = QHBoxLayout()
+        laz_src_hl.addWidget(QLabel("LAZ Folder:"))
+        self.laz_folder_edit = QLineEdit()
+        self.laz_folder_edit.setPlaceholderText("Select folder with .laz files...")
+        laz_src_hl.addWidget(self.laz_folder_edit)
+        self.laz_folder_browse_btn = QPushButton("Browse...")
+        self.laz_folder_browse_btn.clicked.connect(self._on_browse_laz_folder)
+        laz_src_hl.addWidget(self.laz_folder_browse_btn)
+        laz_rosbag_vl.addLayout(laz_src_hl)
+
+        laz_out_hl = QHBoxLayout()
+        laz_out_hl.addWidget(QLabel("Output Dir:"))
+        self.laz_rosbag_output_edit = QLineEdit()
+        self.laz_rosbag_output_edit.setPlaceholderText("Output directory for rosbag...")
+        laz_out_hl.addWidget(self.laz_rosbag_output_edit)
+        self.laz_rosbag_output_browse = QPushButton("Browse...")
+        self.laz_rosbag_output_browse.clicked.connect(self._on_browse_laz_rosbag_output)
+        laz_out_hl.addWidget(self.laz_rosbag_output_browse)
+        laz_rosbag_vl.addLayout(laz_out_hl)
+
+        topic_hl = QHBoxLayout()
+        topic_hl.addWidget(QLabel("Topic:"))
+        self.laz_topic_edit = QLineEdit("/pointcloud")
+        topic_hl.addWidget(self.laz_topic_edit)
+        laz_rosbag_vl.addLayout(topic_hl)
+
+        self.laz_rosbag_status = QLabel("")
+        laz_rosbag_vl.addWidget(self.laz_rosbag_status)
+
+        self.laz_rosbag_btn = QPushButton("Convert to Rosbag")
+        self.laz_rosbag_btn.clicked.connect(self._on_laz_to_rosbag)
+        laz_rosbag_vl.addWidget(self.laz_rosbag_btn)
+
+        standalone_layout.addWidget(laz_rosbag_group)
+
+        svo_group = QGroupBox("SVO File -> Images")
+        svo_vl = QVBoxLayout(svo_group)
+
+        svo_src_hl = QHBoxLayout()
+        svo_src_hl.addWidget(QLabel("SVO File:"))
+        self.svo_file_edit = QLineEdit()
+        self.svo_file_edit.setPlaceholderText("Select .svo2 file...")
+        svo_src_hl.addWidget(self.svo_file_edit)
+        self.svo_file_browse_btn = QPushButton("Browse...")
+        self.svo_file_browse_btn.clicked.connect(self._on_browse_svo_file)
+        svo_src_hl.addWidget(self.svo_file_browse_btn)
+        svo_vl.addLayout(svo_src_hl)
+
+        svo_out_hl = QHBoxLayout()
+        svo_out_hl.addWidget(QLabel("Output Dir:"))
+        self.svo_output_edit = QLineEdit()
+        self.svo_output_edit.setPlaceholderText("Output directory for images...")
+        svo_out_hl.addWidget(self.svo_output_edit)
+        self.svo_output_browse = QPushButton("Browse...")
+        self.svo_output_browse.clicked.connect(self._on_browse_svo_output)
+        svo_out_hl.addWidget(self.svo_output_browse)
+        svo_vl.addLayout(svo_out_hl)
+
+        self.svo_export_status = QLabel("")
+        svo_vl.addWidget(self.svo_export_status)
+
+        self.svo_export_btn = QPushButton("Export Images")
+        self.svo_export_btn.clicked.connect(self._on_svo_to_images)
+        svo_vl.addWidget(self.svo_export_btn)
+
+        if not ImageExporter.is_zed_sdk_available():
+            self.svo_export_btn.setEnabled(False)
+            self.svo_export_status.setText("ZED SDK not available")
+
+        standalone_layout.addWidget(svo_group)
+
+        layout.addLayout(standalone_layout)
+
     def _connect_signals(self):
         """Connect internal signals."""
         pass
@@ -461,3 +546,111 @@ class ExportTab(QWidget):
                 "Sync Generation Failed",
                 f"Failed to generate timestamps.csv: {result.error}"
             )
+
+    def _on_browse_laz_folder(self):
+        directory = QFileDialog.getExistingDirectory(
+            self, "Select LAZ Folder", "",
+            QFileDialog.Option.ShowDirsOnly
+        )
+        if directory:
+            self.laz_folder_edit.setText(directory)
+            laz_count = len([f for f in os.listdir(directory) if f.endswith('.laz')])
+            self.laz_rosbag_status.setText(f"{laz_count} LAZ files found")
+
+    def _on_browse_laz_rosbag_output(self):
+        directory = QFileDialog.getExistingDirectory(
+            self, "Select Output Directory", "",
+            QFileDialog.Option.ShowDirsOnly
+        )
+        if directory:
+            self.laz_rosbag_output_edit.setText(directory)
+
+    def _on_laz_to_rosbag(self):
+        laz_folder = self.laz_folder_edit.text().strip()
+        output_dir = self.laz_rosbag_output_edit.text().strip()
+        topic_name = self.laz_topic_edit.text().strip() or "/pointcloud"
+
+        if not laz_folder:
+            QMessageBox.warning(self, "No Input", "Please select a LAZ folder.")
+            return
+        if not os.path.isdir(laz_folder):
+            QMessageBox.warning(self, "Invalid Path", f"Folder does not exist: {laz_folder}")
+            return
+        if not output_dir:
+            QMessageBox.warning(self, "No Output", "Please select an output directory.")
+            return
+
+        bag_path = os.path.join(output_dir, "laz_rosbag")
+        counter = 1
+        while os.path.exists(bag_path):
+            bag_path = os.path.join(output_dir, f"laz_rosbag_{counter}")
+            counter += 1
+
+        config = LAZToRosbagConfig(
+            laz_folder=laz_folder,
+            output_bag_path=bag_path,
+            topic_name=topic_name,
+        )
+
+        tasks = [ExportTask(
+            task_type="laz_to_rosbag",
+            description="Convert LAZ files to Rosbag",
+            config=config,
+        )]
+
+        dialog = ExportProgressDialog(tasks, self)
+        dialog.export_finished.connect(self._on_standalone_finished)
+        dialog.start_export()
+
+    def _on_browse_svo_file(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Select SVO2 File", "",
+            "SVO2 Files (*.svo2);;All Files (*)"
+        )
+        if file_path:
+            self.svo_file_edit.setText(file_path)
+
+    def _on_browse_svo_output(self):
+        directory = QFileDialog.getExistingDirectory(
+            self, "Select Output Directory", "",
+            QFileDialog.Option.ShowDirsOnly
+        )
+        if directory:
+            self.svo_output_edit.setText(directory)
+
+    def _on_svo_to_images(self):
+        svo_path = self.svo_file_edit.text().strip()
+        output_dir = self.svo_output_edit.text().strip()
+
+        if not svo_path:
+            QMessageBox.warning(self, "No Input", "Please select an SVO2 file.")
+            return
+        if not os.path.exists(svo_path):
+            QMessageBox.warning(self, "Invalid Path", f"File does not exist: {svo_path}")
+            return
+        if not output_dir:
+            QMessageBox.warning(self, "No Output", "Please select an output directory.")
+            return
+
+        os.makedirs(output_dir, exist_ok=True)
+
+        config = StandaloneSVOExportConfig(
+            svo_path=svo_path,
+            output_dir=output_dir,
+        )
+
+        tasks = [ExportTask(
+            task_type="svo_to_images",
+            description=f"Export images from {os.path.basename(svo_path)}",
+            config=config,
+        )]
+
+        dialog = ExportProgressDialog(tasks, self)
+        dialog.export_finished.connect(self._on_standalone_finished)
+        dialog.start_export()
+
+    def _on_standalone_finished(self, success: bool, summary: str):
+        if success:
+            QMessageBox.information(self, "Export Complete", summary)
+        else:
+            QMessageBox.warning(self, "Export Failed", summary)
