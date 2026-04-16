@@ -38,6 +38,13 @@ class LAZFromBagConfig:
     end_time_ns: Optional[int] = None
 
 
+@dataclass
+class LAZToRosbagConfig:
+    laz_folder: str
+    output_bag_path: str
+    topic_name: str = "/pointcloud"
+
+
 class LAZExporter:
     """Exports LAZ files from recording sessions with time filtering."""
     
@@ -349,7 +356,155 @@ class LAZExporter:
             file_count=file_count,
             total_size_bytes=total_size_bytes,
         )
-    
+
+    def export_to_rosbag(
+        self,
+        config: LAZToRosbagConfig,
+        progress_callback: Optional[Callable[[int, int], None]] = None
+    ) -> LAZExportResult:
+        try:
+            import laspy
+            import rosbag2_py
+            from rclpy.serialization import serialize_message
+            from sensor_msgs.msg import PointCloud2, PointField
+            from std_msgs.msg import Header
+            from builtin_interfaces.msg import Time
+        except ImportError as e:
+            return LAZExportResult(
+                success=False,
+                output_dir=config.output_bag_path,
+                file_count=0,
+                total_size_bytes=0,
+                error=f"Missing dependency: {e}"
+            )
+
+        if not os.path.isdir(config.laz_folder):
+            return LAZExportResult(
+                success=False,
+                output_dir=config.output_bag_path,
+                file_count=0,
+                total_size_bytes=0,
+                error=f"LAZ folder does not exist: {config.laz_folder}"
+            )
+
+        laz_files = self.get_laz_files_in_range(config.laz_folder)
+        if not laz_files:
+            return LAZExportResult(
+                success=False,
+                output_dir=config.output_bag_path,
+                file_count=0,
+                total_size_bytes=0,
+                error="No LAZ files found in folder"
+            )
+
+        writer = rosbag2_py.SequentialWriter()
+        storage_options = rosbag2_py.StorageOptions(
+            uri=config.output_bag_path, storage_id='sqlite3'
+        )
+        converter_options = rosbag2_py.ConverterOptions('cdr', 'cdr')
+
+        try:
+            writer.open(storage_options, converter_options)
+        except Exception as e:
+            return LAZExportResult(
+                success=False,
+                output_dir=config.output_bag_path,
+                file_count=0,
+                total_size_bytes=0,
+                error=f"Failed to open rosbag writer: {e}"
+            )
+
+        topic_meta = rosbag2_py.TopicMetadata(
+            name=config.topic_name,
+            type='sensor_msgs/msg/PointCloud2',
+            serialization_format='cdr',
+        )
+        writer.create_topic(topic_meta)
+
+        total_files = len(laz_files)
+        file_count = 0
+        total_size_bytes = 0
+
+        for idx, (laz_path, timestamp_ns) in enumerate(laz_files):
+            if progress_callback:
+                progress_callback(idx, total_files)
+
+            try:
+                las = laspy.read(laz_path)
+
+                x = np.array(las.x, dtype=np.float32)
+                y = np.array(las.y, dtype=np.float32)
+                z = np.array(las.z, dtype=np.float32)
+                num_points = len(x)
+                if num_points == 0:
+                    continue
+
+                intensity: Optional[np.ndarray] = None
+                try:
+                    raw_intensity = np.array(las.intensity, dtype=np.float32)
+                    if len(raw_intensity) == num_points:
+                        intensity = raw_intensity
+                except Exception:
+                    pass
+
+                msg = PointCloud2()
+                msg.header = Header()
+                msg.header.stamp = Time()
+                msg.header.stamp.sec = int(timestamp_ns // 10**9)
+                msg.header.stamp.nanosec = int(timestamp_ns % 10**9)
+                msg.header.frame_id = 'map'
+                msg.height = 1
+                msg.width = num_points
+                msg.is_bigendian = False
+                msg.is_dense = True
+
+                field_offset = 0
+                fields = []
+                for name in ('x', 'y', 'z'):
+                    fields.append(PointField(
+                        name=name, offset=field_offset,
+                        datatype=PointField.FLOAT32, count=1
+                    ))
+                    field_offset += 4
+                if intensity is not None:
+                    fields.append(PointField(
+                        name='intensity', offset=field_offset,
+                        datatype=PointField.FLOAT32, count=1
+                    ))
+                    field_offset += 4
+
+                msg.fields = fields
+                msg.point_step = field_offset
+                msg.row_step = field_offset * num_points
+
+                if intensity is not None:
+                    packed = np.column_stack([x, y, z, intensity])
+                else:
+                    packed = np.column_stack([x, y, z])
+
+                msg.data = packed.astype(np.float32).tobytes()
+
+                serialized = serialize_message(msg)
+                writer.write(config.topic_name, serialized, timestamp_ns)
+
+                file_count += 1
+                total_size_bytes += os.path.getsize(laz_path)
+
+            except Exception as e:
+                logger.warning("Failed to convert LAZ %s: %s", laz_path, e)
+
+        if progress_callback:
+            progress_callback(total_files, total_files)
+
+        del writer
+
+        return LAZExportResult(
+            success=file_count > 0,
+            output_dir=config.output_bag_path,
+            file_count=file_count,
+            total_size_bytes=total_size_bytes,
+        )
+
     @staticmethod
     def get_laz_files_in_range(
         pointcloud_dir: str, 
