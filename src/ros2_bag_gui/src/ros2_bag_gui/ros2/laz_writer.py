@@ -1,5 +1,6 @@
 """Real-time LAZ conversion for PointCloud2 messages."""
 import os
+import time
 import numpy as np
 import laspy
 from queue import Queue, Full, Empty
@@ -40,6 +41,13 @@ class PointCloud2Payload:
     is_dense: bool
     timestamp_ns: int
 
+
+@dataclass
+class RawCloudItem:
+    """Raw CDR-serialized PointCloud2 for off-executor deserialization."""
+    serialized: bytes
+    msg_class: type
+
 class LAZWriterThread(QThread):
     """Worker thread for LAZ file writing."""
     
@@ -62,23 +70,41 @@ class LAZWriterThread(QThread):
         """Process queue and write LAZ files."""
         os.makedirs(self._output_dir, exist_ok=True)
         self._running = True
-        
-        while self._running:
+
+        while True:
             try:
-                # Wait for item with timeout
-                payload = self._queue.get(block=True, timeout=0.1)
-                
-                if payload is None:  # Shutdown signal
+                item = self._queue.get(block=True, timeout=0.5)
+                if item is None:
                     break
-                
-                self._process_payload(payload)
+                self._handle_item(item)
                 self._queue.task_done()
-                
             except Empty:
-                # Timeout, continue loop
-                pass
+                if not self._running:
+                    break
     
-    def _process_payload(self, payload: PointCloud2Payload):
+    def _handle_item(self, item):
+        if isinstance(item, RawCloudItem):
+            payload = self._deserialize_raw(item)
+            if payload is None:
+                return
+        else:
+            payload = item
+        self._write_laz(payload)
+
+    def _deserialize_raw(self, item: RawCloudItem) -> Optional[PointCloud2Payload]:
+        try:
+            from rclpy.serialization import deserialize_message
+            msg = deserialize_message(item.serialized, item.msg_class)
+            if hasattr(msg, 'header') and hasattr(msg.header, 'stamp'):
+                ts = msg.header.stamp.sec * 10**9 + msg.header.stamp.nanosec
+            else:
+                ts = time.time_ns()
+            return create_payload_from_msg(msg, ts)
+        except Exception as e:
+            self.error_occurred.emit(f"LAZ deserialize error: {e}")
+            return None
+
+    def _write_laz(self, payload: PointCloud2Payload):
         """Convert PointCloud2 payload to LAZ file."""
         try:
             # Parse point cloud
@@ -165,12 +191,20 @@ class LAZWriterThread(QThread):
             self._drop_count += 1
             self.dropped.emit(self._drop_count)
             return False
-    
+
+    def enqueue_raw(self, serialized: bytes, msg_class: type) -> bool:
+        try:
+            self._queue.put_nowait(RawCloudItem(serialized=serialized, msg_class=msg_class))
+            return True
+        except Full:
+            self._drop_count += 1
+            self.dropped.emit(self._drop_count)
+            return False
+
     def stop(self):
-        """Signal thread to stop."""
         self._running = False
-        self._queue.put(None)  # Shutdown signal
-        self.wait(5000)  # Wait up to 5 seconds
+        self._queue.put(None)
+        self.wait(10000)
     
     @property
     def file_count(self) -> int:

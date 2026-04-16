@@ -14,7 +14,7 @@ from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 from rosidl_runtime_py.utilities import get_message
 
 from ros2_bag_gui.ros2.bag_process import BagProcess
-from ros2_bag_gui.ros2.laz_writer import LAZWriterThread, create_payload_from_msg
+from ros2_bag_gui.ros2.laz_writer import LAZWriterThread
 from ros2_bag_gui.zed.svo_writer import SVO2WriterThread, SVO2Config
 from ros2_bag_gui.zed.sdk_check import is_zed_sdk_available
 
@@ -113,11 +113,6 @@ class Recorder(QObject):
                 rosbag_path, bag_topics, max_bag_size=config.max_bagfile_size
             )
 
-            cb_group = ReentrantCallbackGroup()
-
-            for topic in config.topics:
-                self._create_hz_subscription(node, topic['name'], topic['type'], cb_group)
-
             if config.lidar_mode in ("laz", "both"):
                 pointcloud_dir = os.path.join(session_folder, 'pointcloud')
                 self._laz_writer = LAZWriterThread(pointcloud_dir, parent=None)
@@ -126,10 +121,6 @@ class Recorder(QObject):
                 )
                 self._laz_writer.start()
                 logger.info("LAZ writer started: %s", pointcloud_dir)
-
-                for topic in config.topics:
-                    if should_record_lidar_laz(topic['name'], config.lidar_mode):
-                        self._create_laz_subscription(node, topic['name'], topic['type'], cb_group)
 
             if config.camera_mode in ("svo2", "both") and is_zed_sdk_available():
                 svo2_path = os.path.join(session_folder, 'camera_0.svo2')
@@ -143,6 +134,17 @@ class Recorder(QObject):
                 logger.info("SVO2 writer started: %s", svo2_path)
 
             self._recording = True
+
+            cb_group = ReentrantCallbackGroup()
+
+            if config.lidar_mode in ("laz", "both"):
+                for topic in config.topics:
+                    if should_record_lidar_laz(topic['name'], config.lidar_mode):
+                        self._create_laz_subscription(node, topic['name'], topic['type'], cb_group)
+
+            for topic in config.topics:
+                self._create_hz_subscription(node, topic['name'], topic['type'], cb_group)
+
             self.recording_started.emit()
             return True
 
@@ -169,12 +171,12 @@ class Recorder(QObject):
         try:
             msg_class = get_message(topic_type)
 
-            def typed_cb(msg, topic=topic_name):
-                self._on_laz_message(topic, msg)
+            def raw_cb(raw_bytes, topic=topic_name, cls=msg_class):
+                self._on_laz_raw(topic, raw_bytes, cls)
 
             sub = node.create_subscription(
-                msg_class, topic_name, typed_cb, SENSOR_QOS,
-                callback_group=cb_group,
+                msg_class, topic_name, raw_cb, SENSOR_QOS,
+                callback_group=cb_group, raw=True,
             )
             self._laz_subscriptions.append(sub)
         except Exception as e:
@@ -192,24 +194,13 @@ class Recorder(QObject):
             while ts_list and ts_list[0] < cutoff:
                 ts_list.pop(0)
 
-    def _on_laz_message(self, topic_name: str, msg):
+    def _on_laz_raw(self, topic_name: str, raw_bytes, msg_class):
         if not self._recording or self._laz_writer is None:
             return
         try:
-            timestamp_ns = self._get_timestamp_ns(msg)
-            laz_payload = create_payload_from_msg(msg, timestamp_ns)
-            self._laz_writer.enqueue(laz_payload)
+            self._laz_writer.enqueue_raw(bytes(raw_bytes), msg_class)
         except Exception as e:
             logger.debug("LAZ enqueue error for %s: %s", topic_name, e)
-
-    def _get_timestamp_ns(self, msg) -> int:
-        if hasattr(msg, 'header') and hasattr(msg.header, 'stamp'):
-            return msg.header.stamp.sec * 10**9 + msg.header.stamp.nanosec
-        elif hasattr(msg, 'transforms') and len(msg.transforms) > 0:
-            stamp = msg.transforms[0].header.stamp
-            return stamp.sec * 10**9 + stamp.nanosec
-        else:
-            return time.time_ns()
 
     def stop_recording(self, node) -> str:
         if not self._recording:
@@ -219,22 +210,6 @@ class Recorder(QObject):
         session_folder = ""
 
         try:
-            if self._bag_proc is not None:
-                self._bag_proc.stop()
-                logger.info("ros2 bag record stopped")
-                self._bag_proc = None
-
-            if self._laz_writer is not None:
-                self._laz_writer.stop()
-                logger.info("LAZ writer stopped: %d files", self._laz_writer.file_count)
-                self._laz_writer = None
-
-            for writer in self._svo2_writers:
-                writer.stop()
-                logger.info("SVO2 writer stopped: %d frames at %s",
-                            writer.frame_count, writer._config.output_path)
-            self._svo2_writers.clear()
-
             for sub in self._hz_subscriptions + self._laz_subscriptions:
                 try:
                     node.destroy_subscription(sub)
@@ -242,6 +217,22 @@ class Recorder(QObject):
                     pass
             self._hz_subscriptions.clear()
             self._laz_subscriptions.clear()
+
+            if self._laz_writer is not None:
+                self._laz_writer.stop()
+                logger.info("LAZ writer stopped: %d files", self._laz_writer.file_count)
+                self._laz_writer = None
+
+            if self._bag_proc is not None:
+                self._bag_proc.stop()
+                logger.info("ros2 bag record stopped")
+                self._bag_proc = None
+
+            for writer in self._svo2_writers:
+                writer.stop()
+                logger.info("SVO2 writer stopped: %d frames at %s",
+                            writer.frame_count, writer._config.output_path)
+            self._svo2_writers.clear()
 
             if self._config:
                 session_folder = self._generate_session_path()
