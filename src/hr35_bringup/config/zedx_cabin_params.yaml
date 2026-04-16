@@ -7,9 +7,9 @@ zed_node:
           camera_model: 'zedx'
           camera_name: 'zedx_cabin' # usually overwritten by launch file
           serial_number: 49749405  # ← 실제 왼쪽 카메라의 SN으로 바꾸세요
-          grab_resolution: 'HD1200' # The native camera grab resolution. 'HD1200', 'HD1080', 'SVGA', 'AUTO'
-          grab_frame_rate: 15                # 처리 가능한 수준
-          pub_frame_rate: 5                  # 퍼블리시 주기 줄이기
+          grab_resolution: 'HD720'   # HD1200→HD720 (픽셀 54% 감소)
+          grab_frame_rate: 10        # 15→10
+          pub_frame_rate: 2.0        # 5→2
           gpu_id: 1                          # 하나의 GPU 사용할 경우 명시
           base_frame: 'zedx_cabin_base_link'
           tf_prefix: 'zedx_cabin'
@@ -26,7 +26,7 @@ zed_node:
           digital_gain: 1 # Defines the real digital gain (ISP) as a factor. Range [1-256]. Recommended to control manual ISP gain (instead of `video.gain` setting)
           auto_digital_gain_range_min: 1 # Defines the minimum range of digital ISP gain in automatic control
           auto_digital_gain_range_max: 256 # Defines the maximum range of digital ISP gain in automatic control
-          denoising: 50 # Defines the level of denoising applied on both left and right images. Range [0-100]
+          denoising: 0  # 50→0 (CPU 절약)
 
         depth:
           depth_mode: 0       

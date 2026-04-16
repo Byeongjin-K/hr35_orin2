@@ -18,7 +18,7 @@ def generate_launch_description():
                 'serial_number': '45233238',
                 'base_frame': 'zedx_boom_base_link',
                 'node_name': 'zedx_boom_node',
-                'params_file': config_path,
+                'ros_params_override_path': config_path,
             }.items(),
         ),
     ])

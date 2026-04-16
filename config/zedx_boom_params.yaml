@@ -40,7 +40,9 @@
 
     object_detection:
       od_enabled: false
+      detection_model: 'MULTI_CLASS_BOX_FAST'
       enable_tracking: false
+      filtering_mode: 'NMS3D'
 
     body_tracking:
       bt_enabled: false
