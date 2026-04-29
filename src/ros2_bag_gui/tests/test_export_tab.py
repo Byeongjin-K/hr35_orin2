@@ -165,7 +165,7 @@ def test_laz_status_shows_count(export_tab, mock_session_dir, monkeypatch):
     export_tab.session_path_edit.setText(str(mock_session_dir))
     export_tab._on_load_session()
     
-    assert "5 files" in export_tab.laz_status_label.text()
+    assert "5 LAZ files" in export_tab.laz_status_label.text()
     assert export_tab.laz_checkbox.isEnabled()
 
 

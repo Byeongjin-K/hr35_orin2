@@ -1,10 +1,10 @@
 """Subprocess wrapper for ros2 bag record."""
-import logging
 from typing import List
 
 from PySide6.QtCore import QObject, QProcess, Signal
+from ros2_bag_gui.logging_config import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class BagProcess(QObject):

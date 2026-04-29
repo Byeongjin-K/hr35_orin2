@@ -91,35 +91,46 @@ class LAZWriterThread(QThread):
             payload = item
         self._write_laz(payload)
 
+    # Minimum epoch-ns value (year 2000) — below this, header.stamp is
+    # sensor-relative (e.g. Ouster uptime) and unusable as a filename.
+    _MIN_EPOCH_NS = 946684800 * 10**9
+
     def _deserialize_raw(self, item: RawCloudItem) -> Optional[PointCloud2Payload]:
         try:
             from rclpy.serialization import deserialize_message
             msg = deserialize_message(item.serialized, item.msg_class)
+            ts = time.time_ns()
             if hasattr(msg, 'header') and hasattr(msg.header, 'stamp'):
-                ts = msg.header.stamp.sec * 10**9 + msg.header.stamp.nanosec
-            else:
-                ts = time.time_ns()
+                header_ts = msg.header.stamp.sec * 10**9 + msg.header.stamp.nanosec
+                if header_ts >= self._MIN_EPOCH_NS:
+                    ts = header_ts
             return create_payload_from_msg(msg, ts)
         except Exception as e:
             self.error_occurred.emit(f"LAZ deserialize error: {e}")
             return None
 
     def _write_laz(self, payload: PointCloud2Payload):
-        """Convert PointCloud2 payload to LAZ file."""
         try:
-            # Parse point cloud
             x, y, z, intensity = self._parse_pointcloud(payload)
             
             if len(x) == 0:
-                return  # Skip empty clouds
-            
-            # Create LAZ file
+                return
+
+            valid_mask = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
+            x = x[valid_mask]
+            y = y[valid_mask]
+            z = z[valid_mask]
+            if intensity is not None:
+                intensity = intensity[valid_mask]
+
+            if len(x) == 0:
+                return
+
             output_path = os.path.join(
                 self._output_dir,
                 f"{payload.timestamp_ns}.laz"
             )
             
-            # Determine point format
             point_format = 1 if intensity is not None else 0
             
             header = laspy.LasHeader(point_format=point_format, version="1.4")
@@ -131,9 +142,8 @@ class LAZWriterThread(QThread):
             las.y = y
             las.z = z
             
-            if intensity is not None and intensity.max() > 0:
-                # Normalize intensity to uint16
-                las.intensity = (intensity * 65535 / intensity.max()).astype(np.uint16)
+            if intensity is not None and len(intensity) > 0 and np.nanmax(intensity) > 0:
+                las.intensity = (intensity * 65535 / np.nanmax(intensity)).astype(np.uint16)
             
             las.write(output_path)
             self._file_count += 1
@@ -178,7 +188,7 @@ class LAZWriterThread(QThread):
         if 'intensity' in fields:
             try:
                 intensity = extract_field('intensity').astype(np.float32)
-            except:
+            except Exception:
                 pass
         
         return x, y, z, intensity

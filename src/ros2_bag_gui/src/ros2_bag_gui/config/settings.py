@@ -4,6 +4,9 @@ import json
 from pathlib import Path
 from dataclasses import dataclass, asdict, field
 from typing import Optional
+from ros2_bag_gui.logging_config import get_logger
+
+_logger = get_logger(__name__)
 
 @dataclass
 class AppSettings:
@@ -38,7 +41,7 @@ class SettingsManager:
                     filtered_data = {k: v for k, v in data.items() if k in valid_keys}
                     self._settings = AppSettings(**filtered_data)
         except Exception as e:
-            print(f"Failed to load settings: {e}")
+            _logger.error("Failed to load settings: %s", e)
             self._settings = AppSettings()
     
     def save(self):
@@ -48,7 +51,7 @@ class SettingsManager:
             with open(self.CONFIG_FILE, 'w') as f:
                 json.dump(asdict(self._settings), f, indent=2)
         except Exception as e:
-            print(f"Failed to save settings: {e}")
+            _logger.error("Failed to save settings: %s", e)
     
     @property
     def settings(self) -> AppSettings:

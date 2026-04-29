@@ -14,7 +14,10 @@ class TestBagLoader:
     @pytest.fixture
     def sample_session_path(self):
         test_dir = Path(__file__).parent
-        return str(test_dir / "fixtures" / "sample_60s")
+        bag_path = test_dir / "fixtures" / "sample_60s"
+        if not bag_path.exists():
+            pytest.skip("Bag fixture tests/fixtures/sample_60s not available")
+        return str(bag_path)
     
     def test_load_session_standard_format(self, sample_session_path):
         session = BagLoader.load_session(sample_session_path)
@@ -363,11 +366,14 @@ class TestBagLoader:
             db3_files=[],
             storage_identifier="sqlite3",
             has_pointcloud=False,
+            has_pointcloud_topics=False,
             has_svo=False,
             pointcloud_files=[],
+            pointcloud_topic_names=[],
             svo_files=[]
         )
         
         assert session.session_path == "/path/to/session"
         assert session.duration_ns == 1000000000
         assert session.has_pointcloud is False
+        assert session.has_pointcloud_topics is False

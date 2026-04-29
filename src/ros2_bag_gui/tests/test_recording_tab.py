@@ -3,9 +3,20 @@ import pytest
 from pathlib import Path
 from PySide6.QtCore import Qt
 from ros2_bag_gui.widgets.recording_tab import RecordingTab
-from ros2_bag_gui.widgets.topic_list import MOCK_TOPICS
 from ros2_bag_gui.widgets.recording_status import RecordingState
 from ros2_bag_gui.config.profiles import RecordingProfile
+
+
+MOCK_TOPICS = [
+    {'name': '/excavator/sensors/gnss_position', 'type': 'sensor_msgs/msg/NavSatFix', 'hz': 10.0, 'category': 'excavator'},
+    {'name': '/excavator/status', 'type': 'std_msgs/msg/String', 'hz': 1.0, 'category': 'excavator'},
+    {'name': '/lidar_boom/points', 'type': 'sensor_msgs/msg/PointCloud2', 'hz': 7.7, 'category': 'lidar'},
+    {'name': '/lidar_boom/imu', 'type': 'sensor_msgs/msg/Imu', 'hz': 97.3, 'category': 'lidar'},
+    {'name': '/zedx_boom/left/image', 'type': 'sensor_msgs/msg/Image', 'hz': 30.0, 'category': 'zed'},
+    {'name': '/zedx_cabin/left/image', 'type': 'sensor_msgs/msg/Image', 'hz': 30.0, 'category': 'zed'},
+    {'name': '/tf', 'type': 'tf2_msgs/msg/TFMessage', 'hz': 273.6, 'category': 'system'},
+    {'name': '/gps_interface/position', 'type': 'sensor_msgs/msg/NavSatFix', 'hz': 5.0, 'category': 'gps'},
+]
 
 
 @pytest.fixture

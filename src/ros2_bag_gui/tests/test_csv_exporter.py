@@ -20,7 +20,10 @@ class TestCSVExporter:
     @pytest.fixture
     def sample_bag_path(self):
         test_dir = Path(__file__).parent
-        return str(test_dir / "fixtures" / "sample_60s")
+        bag_path = test_dir / "fixtures" / "sample_60s"
+        if not bag_path.exists():
+            pytest.skip("Bag fixture tests/fixtures/sample_60s not available")
+        return str(bag_path)
     
     @pytest.fixture
     def temp_output_path(self):

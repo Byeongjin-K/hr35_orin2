@@ -41,6 +41,8 @@ class RecordingTab(QWidget):
         self._load_profile_list()
         self._setup_ros2()
         self._setup_auto_refresh()
+        self._stats_timer = QTimer(self)
+        self._stats_timer.timeout.connect(self._update_recording_stats)
     
     def _setup_ui(self):
         """Setup the UI layout."""
@@ -201,14 +203,11 @@ class RecordingTab(QWidget):
     def _on_recorder_started(self):
         logger.info("Recorder started successfully")
         self._ros2_thread.set_hz_active(False)
-        self._stats_timer = QTimer(self)
-        self._stats_timer.timeout.connect(self._update_recording_stats)
         self._stats_timer.start(1000)
     
     def _on_recorder_stopped(self):
         logger.info("Recorder stopped")
-        if hasattr(self, '_stats_timer'):
-            self._stats_timer.stop()
+        self._stats_timer.stop()
         self._ros2_thread.set_hz_active(True)
     
     def _on_message_recorded(self, topic_name: str, count: int):
@@ -226,7 +225,7 @@ class RecordingTab(QWidget):
         self.status_panel.update_topic_stats(stats)
         self.topic_list.update_hz(hz_map)
 
-        session_path = self._recorder._generate_session_path()
+        session_path = self._recorder.session_path
         if session_path:
             rosbag_dir = os.path.join(session_path, 'rosbag')
             pc_dir = os.path.join(session_path, 'pointcloud')
@@ -255,8 +254,16 @@ class RecordingTab(QWidget):
             node = self._ros2_thread.node
             if node is not None:
                 self._recorder.stop_recording(node)
+        self._stats_timer.stop()
         self._refresh_timer.stop()
         self._ros2_thread.stop()
+        try:
+            self._recorder.recording_started.disconnect()
+            self._recorder.recording_stopped.disconnect()
+            self._recorder.message_recorded.disconnect()
+            self._recorder.error_occurred.disconnect()
+        except RuntimeError:
+            pass
     
     def _on_settings_changed(self):
         """Handle settings changes."""
