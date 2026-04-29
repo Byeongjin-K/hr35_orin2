@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Optional
 import os
 
-from PySide6.QtCore import QThread, Signal, QMutex
+from PySide6.QtCore import QThread, Signal, QMutex, QMutexLocker
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QProgressBar, QLabel, 
     QPushButton, QTextEdit, QHBoxLayout
@@ -172,22 +172,13 @@ class ExportWorker(QThread):
             return False, f"Unknown task type: {task.task_type}"
     
     def cancel(self):
-        """Request cancellation (checked between tasks)."""
-        self._mutex.lock()
-        self._cancelled = True
-        self._mutex.unlock()
+        with QMutexLocker(self._mutex):
+            self._cancelled = True
     
     @property
     def is_cancelled(self) -> bool:
-        """Check if cancellation was requested.
-        
-        Returns:
-            True if cancelled, False otherwise
-        """
-        self._mutex.lock()
-        cancelled = self._cancelled
-        self._mutex.unlock()
-        return cancelled
+        with QMutexLocker(self._mutex):
+            return self._cancelled
 
 
 class ExportProgressDialog(QDialog):
@@ -313,12 +304,12 @@ class ExportProgressDialog(QDialog):
         self.log_text.append(f"ERROR: {error_message}")
     
     def _on_cancel_clicked(self):
-        """Handle cancel button - request worker cancellation."""
         if self.worker and self.worker.isRunning():
             self.cancel_button.setEnabled(False)
             self.cancel_button.setText("Cancelling...")
             self.task_label.setText("Cancelling export...")
             self.worker.cancel()
+            self.worker.wait(5000)
         else:
             self.reject()
     

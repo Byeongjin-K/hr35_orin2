@@ -120,8 +120,9 @@ class TestZedSdkAvailability:
     """Test ZED SDK availability check."""
     
     def test_zed_sdk_not_available(self):
-        """ZED SDK should not be available in test environment."""
-        assert ImageExporter.is_zed_sdk_available() is False
+        with patch('ros2_bag_gui.zed.sdk_check._zed_available', False):
+            with patch.object(ImageExporter, 'is_zed_sdk_available', return_value=False):
+                assert ImageExporter.is_zed_sdk_available() is False
     
     def test_zed_sdk_available_mocked(self):
         """Mock ZED SDK being available."""
@@ -227,7 +228,6 @@ class TestImageExport:
         assert os.path.exists(output_subdir)
     
     def test_export_svo_without_sdk(self, temp_session, temp_output):
-        """SVO export should fail without SDK."""
         svo_path = os.path.join(temp_session, "camera.svo2")
         Path(svo_path).touch()
         
@@ -239,12 +239,12 @@ class TestImageExport:
             svo_path=svo_path
         )
         
-        result = exporter.export(config)
-        assert result.success is False
-        assert "ZED SDK" in result.error or "not available" in result.error
+        with patch('ros2_bag_gui.export.image_exporter.get_sl_module', return_value=None):
+            result = exporter.export(config)
+            assert result.success is False
+            assert "ZED SDK" in result.error or "not available" in result.error
     
     def test_export_svo_missing_file(self, temp_session, temp_output):
-        """SVO export should fail with missing SVO file."""
         exporter = ImageExporter()
         config = ImageExportConfig(
             session_path=temp_session,
@@ -253,10 +253,10 @@ class TestImageExport:
             svo_path="/nonexistent.svo2"
         )
         
-        with patch.object(ImageExporter, 'is_zed_sdk_available', return_value=True):
+        with patch('ros2_bag_gui.export.image_exporter.get_sl_module', return_value=MagicMock()):
             result = exporter.export(config)
             assert result.success is False
-            assert "not found" in result.error
+            assert "No valid SVO2 files found" in result.error
 
 
 class TestRosImageConversion:

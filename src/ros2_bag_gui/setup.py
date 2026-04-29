@@ -12,6 +12,10 @@ setup(
     ],
     install_requires=[
         'setuptools',
+        'PySide6',
+        'laspy',
+        'numpy',
+        'pyyaml',
     ],
     entry_points={
         'console_scripts': [

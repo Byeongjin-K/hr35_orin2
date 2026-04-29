@@ -99,6 +99,17 @@ class CSVExporter:
         
         # Set topic filter
         reader.set_filter(StorageFilter(topics=[config.topic_name]))
+
+        # Get total message count from metadata for accurate progress
+        total_messages = 0
+        try:
+            metadata = reader.get_metadata()
+            for topic_info in metadata.topics_with_message_count:
+                if topic_info.topic_metadata.name == config.topic_name:
+                    total_messages = topic_info.message_count
+                    break
+        except Exception:
+            pass
         
         # Write to temporary file first
         temp_path = config.output_path + '.tmp'
@@ -140,9 +151,8 @@ class CSVExporter:
                     writer.writerow(row)
                     message_count += 1
                     
-                    # Progress callback
                     if progress_callback is not None:
-                        progress_callback(message_count, message_count)
+                        progress_callback(message_count, total_messages if total_messages > 0 else message_count)
             
             # If no messages were written, create empty CSV with just timestamp columns
             if message_count == 0:

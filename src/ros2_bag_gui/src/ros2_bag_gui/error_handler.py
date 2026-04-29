@@ -1,14 +1,14 @@
 from dataclasses import dataclass
 from typing import Optional, Callable
 from enum import Enum
-import logging
 import shutil
 import time
 import traceback
 
 from PySide6.QtCore import QObject, Signal, QTimer
+from ros2_bag_gui.logging_config import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class DiskState(Enum):

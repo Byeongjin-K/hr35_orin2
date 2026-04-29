@@ -1,13 +1,13 @@
 from dataclasses import dataclass
 from typing import Optional, Callable
-import logging
 import os
 import shutil
 from pathlib import Path
 import numpy as np
 
+from ros2_bag_gui.logging_config import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 @dataclass

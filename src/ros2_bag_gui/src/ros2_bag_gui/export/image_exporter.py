@@ -8,13 +8,13 @@ from typing import Optional, Callable, List
 from enum import Enum
 import os
 import json
-import logging
 import numpy as np
 from pathlib import Path
 
 from ros2_bag_gui.zed.sdk_check import is_zed_sdk_available, get_sl_module
+from ros2_bag_gui.logging_config import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 class ImageSource(Enum):
     """Available image export sources."""

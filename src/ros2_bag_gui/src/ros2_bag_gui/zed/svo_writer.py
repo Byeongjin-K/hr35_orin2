@@ -5,7 +5,6 @@ Supports multiple simultaneous cameras (one SVO2WriterThread per camera).
 Requires ZED SDK (pyzed) — gracefully degrades if not available.
 """
 import os
-import logging
 import threading
 from dataclasses import dataclass
 from typing import Optional
@@ -13,8 +12,9 @@ from typing import Optional
 from PySide6.QtCore import QThread, Signal
 
 from ros2_bag_gui.zed.sdk_check import is_zed_sdk_available, get_sl_module
+from ros2_bag_gui.logging_config import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Resolution / compression helpers
@@ -97,8 +97,11 @@ class SVO2WriterThread(QThread):
 
     @property
     def is_recording(self) -> bool:
-        """Whether the recording loop is active."""
         return self._running and self.isRunning()
+
+    @property
+    def output_path(self) -> str:
+        return self._config.output_path
 
     # ------------------------------------------------------------------
     # QThread entry point

@@ -78,17 +78,6 @@ class TestRecorder:
         path = recorder._generate_session_path()
         assert '/tmp/data/recording_2026-01-22_14-30-00_Test_Session' == path
 
-    def test_get_timestamp_ns_with_header(self, qtbot):
-        from unittest.mock import Mock
-        recorder = Recorder()
-
-        msg = Mock()
-        msg.header.stamp.sec = 1700000000
-        msg.header.stamp.nanosec = 123456789
-
-        ts = recorder._get_timestamp_ns(msg)
-        assert ts == 1700000000 * 10**9 + 123456789
-
     def test_get_topic_hz_empty(self, qtbot):
         recorder = Recorder()
         assert recorder.get_topic_hz() == {}

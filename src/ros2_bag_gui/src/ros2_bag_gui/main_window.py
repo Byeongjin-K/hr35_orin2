@@ -7,6 +7,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QAction
 from .widgets.recording_tab import RecordingTab
 from .widgets.export_tab import ExportTab
+from .shortcuts import ShortcutManager
 from .error_handler import ErrorHandler
 from .logging_config import get_logger
 
@@ -77,7 +78,7 @@ class MainWindow(QMainWindow):
         recording_menu.addAction(self.start_recording_action)
         
         self.stop_recording_action = QAction("S&top Recording", self)
-        self.stop_recording_action.setShortcut("Ctrl+T")
+        self.stop_recording_action.setShortcut("Ctrl+S")
         self.stop_recording_action.triggered.connect(self.recording_tab._on_stop_clicked)
         recording_menu.addAction(self.stop_recording_action)
         
@@ -93,8 +94,21 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage("Ready")
     
     def _setup_shortcuts(self):
-        pass
+        self.shortcut_manager = ShortcutManager(self)
+        self.shortcut_manager.setup_shortcuts(
+            start_recording_callback=self._on_start_recording,
+            stop_recording_callback=self._on_stop_recording,
+            quit_callback=self.close,
+        )
     
+    def _on_start_recording(self):
+        self.recording_started.emit()
+        self.status_bar.showMessage("Recording started")
+
+    def _on_stop_recording(self):
+        self.recording_stopped.emit()
+        self.status_bar.showMessage("Recording stopped")
+
     def _on_recording_start_requested(self, config):
         """Handle recording start request from RecordingTab."""
         logger.info(f"Recording started with config: {config}")
@@ -125,7 +139,10 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(self, title, message)
     
     def closeEvent(self, event):
-        self.recording_tab.cleanup()
+        try:
+            self.recording_tab.cleanup()
+        except Exception:
+            logger.exception("Error during cleanup")
         super().closeEvent(event)
     
     def _show_about(self):

@@ -2,9 +2,9 @@
 import re
 import os
 import time
-import logging
 import threading
 from datetime import datetime
+from collections import deque
 from typing import List, Dict, Optional
 from dataclasses import dataclass
 from PySide6.QtCore import QObject, Signal
@@ -17,8 +17,9 @@ from ros2_bag_gui.ros2.bag_process import BagProcess
 from ros2_bag_gui.ros2.laz_writer import LAZWriterThread
 from ros2_bag_gui.zed.svo_writer import SVO2WriterThread, SVO2Config
 from ros2_bag_gui.zed.sdk_check import is_zed_sdk_available
+from ros2_bag_gui.logging_config import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 LIDAR_TOPICS = [r'^/lidar_boom/points$', r'^/ouster/points$']
 CAMERA_IMAGE_TOPICS = [
@@ -80,14 +81,14 @@ class Recorder(QObject):
         self._bag_proc: Optional[BagProcess] = None
         self._config: Optional[RecordingConfig] = None
         self._topic_counts: Dict[str, int] = {}
-        self._topic_timestamps: Dict[str, List[float]] = {}
+        self._topic_timestamps: Dict[str, deque] = {}
         self._counts_lock = threading.Lock()
         self._hz_subscriptions: List[object] = []
         self._laz_subscriptions: List[object] = []
         self._laz_writer: Optional[LAZWriterThread] = None
         self._svo2_writers: List[SVO2WriterThread] = []
         self._session_start_time: Optional[datetime] = None
-        self._recording = False
+        self._recording = threading.Event()
 
     def start_recording(self, config: RecordingConfig, node) -> bool:
         try:
@@ -133,7 +134,7 @@ class Recorder(QObject):
                 self._svo2_writers.append(writer)
                 logger.info("SVO2 writer started: %s", svo2_path)
 
-            self._recording = True
+            self._recording.set()
 
             cb_group = ReentrantCallbackGroup()
 
@@ -165,7 +166,7 @@ class Recorder(QObject):
             )
             self._hz_subscriptions.append(sub)
         except Exception as e:
-            logger.debug("Hz subscription failed for %s: %s", topic_name, e)
+            logger.warning("Hz subscription failed for %s: %s", topic_name, e)
 
     def _create_laz_subscription(self, node, topic_name: str, topic_type: str, cb_group):
         try:
@@ -183,19 +184,19 @@ class Recorder(QObject):
             logger.error("LAZ subscription failed for %s: %s", topic_name, e)
 
     def _on_raw_tick(self, topic_name: str):
-        if not self._recording:
+        if not self._recording.is_set():
             return
         now = time.monotonic()
         with self._counts_lock:
             self._topic_counts[topic_name] = self._topic_counts.get(topic_name, 0) + 1
-            ts_list = self._topic_timestamps.setdefault(topic_name, [])
+            ts_list = self._topic_timestamps.setdefault(topic_name, deque())
             ts_list.append(now)
             cutoff = now - 3.0
             while ts_list and ts_list[0] < cutoff:
-                ts_list.pop(0)
+                ts_list.popleft()
 
     def _on_laz_raw(self, topic_name: str, raw_bytes, msg_class):
-        if not self._recording or self._laz_writer is None:
+        if not self._recording.is_set() or self._laz_writer is None:
             return
         try:
             self._laz_writer.enqueue_raw(bytes(raw_bytes), msg_class)
@@ -203,10 +204,10 @@ class Recorder(QObject):
             logger.debug("LAZ enqueue error for %s: %s", topic_name, e)
 
     def stop_recording(self, node) -> str:
-        if not self._recording:
+        if not self._recording.is_set():
             return ""
 
-        self._recording = False
+        self._recording.clear()
         session_folder = ""
 
         try:
@@ -231,7 +232,7 @@ class Recorder(QObject):
             for writer in self._svo2_writers:
                 writer.stop()
                 logger.info("SVO2 writer stopped: %d frames at %s",
-                            writer.frame_count, writer._config.output_path)
+                            writer.frame_count, writer.output_path)
             self._svo2_writers.clear()
 
             if self._config:
@@ -284,7 +285,11 @@ class Recorder(QObject):
 
     @property
     def is_recording(self) -> bool:
-        return self._recording
+        return self._recording.is_set()
+
+    @property
+    def session_path(self) -> str:
+        return self._generate_session_path()
 
     @property
     def topic_counts(self) -> Dict[str, int]:
@@ -299,7 +304,7 @@ class Recorder(QObject):
             for topic, ts_list in self._topic_timestamps.items():
                 cutoff = now - window
                 while ts_list and ts_list[0] < cutoff:
-                    ts_list.pop(0)
+                    ts_list.popleft()
                 if len(ts_list) >= 2:
                     span = ts_list[-1] - ts_list[0]
                     result[topic] = (len(ts_list) - 1) / span if span > 0 else 0.0

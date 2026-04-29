@@ -16,7 +16,8 @@ class TestRecordingProfile:
         assert profile.save_path == ""
         assert profile.session_name_template == ""
         assert profile.max_bag_size_gb == 3.0
-        assert profile.include_images_without_sdk is True
+        assert profile.lidar_mode == "bag"
+        assert profile.camera_mode == "bag"
         assert profile.created_at == ""
         assert profile.updated_at == ""
     
@@ -27,14 +28,16 @@ class TestRecordingProfile:
             save_path="/home/user/data",
             session_name_template="session_{timestamp}",
             max_bag_size_gb=5.0,
-            include_images_without_sdk=False
+            lidar_mode="laz",
+            camera_mode="svo2",
         )
         assert profile.name == "custom"
         assert profile.selected_topics == ["/topic1", "/topic2"]
         assert profile.save_path == "/home/user/data"
         assert profile.session_name_template == "session_{timestamp}"
         assert profile.max_bag_size_gb == 5.0
-        assert profile.include_images_without_sdk is False
+        assert profile.lidar_mode == "laz"
+        assert profile.camera_mode == "svo2"
 
 
 class TestProfileManager:
@@ -276,7 +279,8 @@ class TestProfileManager:
                 save_path="/path",
                 session_name_template="session",
                 max_bag_size_gb=5.0,
-                include_images_without_sdk=False
+                lidar_mode="laz",
+                camera_mode="svo2",
             )
             filepath = manager.save_profile(profile)
             
@@ -288,7 +292,8 @@ class TestProfileManager:
             assert 'save_path' in data
             assert 'session_name_template' in data
             assert 'max_bag_size_gb' in data
-            assert 'include_images_without_sdk' in data
+            assert 'lidar_mode' in data
+            assert 'camera_mode' in data
             assert 'created_at' in data
             assert 'updated_at' in data
     

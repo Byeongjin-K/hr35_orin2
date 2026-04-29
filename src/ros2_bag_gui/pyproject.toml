@@ -1,3 +1,15 @@
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[project]
+name = "ros2_bag_gui"
+version = "0.1.0"
+description = "ROS2 Bag GUI for recording and exporting sensor data"
+requires-python = ">=3.10"
+dependencies = [
+    "PySide6",
+    "laspy",
+    "numpy",
+    "pyyaml",
+]
