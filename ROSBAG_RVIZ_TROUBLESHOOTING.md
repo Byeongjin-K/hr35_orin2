@@ -68,11 +68,11 @@ ros2 bag record \
 
 ZED 카메라 파라미터 수정:
 
-**파일**: `/home/kimm/robot_ws/config/zedx_boom_params.yaml`
+**파일**: `/home/kimm/robot_ws/src/hr35_bringup/config/zedx_boom_params.yaml`
 
 ```yaml
 general:
-  pub_frame_rate: 2.0  # 5.0 → 2.0으로 감소 (60% 대역폭 절감)
+  pub_frame_rate: 10.0  # 현재값. 낮추면 대역폭이 비례해 줄어듦
 ```
 
 **효과**: 대역폭 감소하지만 영상 끊김
