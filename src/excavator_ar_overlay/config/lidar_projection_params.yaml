@@ -1,0 +1,92 @@
+# Stage 1 AR overlay: LiDAR reprojection onto the ZED X boom camera.
+#
+# Every topic name lives here rather than in code, per the project SSOT rule.
+#
+# extrinsic.xyz / extrinsic.rpy are the ONLY values that need field calibration.
+# They are dynamic parameters, so the loop is:
+#
+#   ros2 param set /lidar_projection_node extrinsic.xyz "[0.10, 0.0, -0.05]"
+#   ros2 param set /lidar_projection_node extrinsic.rpy "[-1.5708, 0.0, -1.5708]"
+#
+# and watch /excavator/perception/dig_overlay/compressed until the coloured
+# points sit on the real contours of the scene. Once converged, move the final
+# value into a static_transform_publisher or the URDF and set
+# extrinsic.publish_static_tf to false here.
+/**:
+  ros__parameters:
+
+    topics:
+      image_in: '/zedx_boom/zedx_boom_node/rgb/image_rect_color/compressed'
+      camera_info_in: '/zedx_boom/zedx_boom_node/rgb/camera_info'
+      points_in: '/lidar_boom/points'
+      overlay_out: '/excavator/perception/dig_overlay/compressed'
+      ai_action_in: '/ai_status/action'
+      grid_map_in: '/rn/grid_map'
+
+    layers:
+      lidar_points: true     # stage 1: extrinsic verification
+      dig_plan: true         # stage 2: AI selected cells
+
+    # AI[i, j] = GUI[swing_axis_row_in_gui_grid + i, j]. Declared at the top
+    # level with this exact name so the shared SSOT file
+    #   excavator_task_config_gui/config/ai_grid_calibration.yaml
+    # can be passed to this node unchanged:
+    #   ros2 launch excavator_ar_overlay lidar_projection.launch.py \
+    #     params_file:=/home/kimm/hr35/src/excavator_task_config_gui/config/ai_grid_calibration.yaml
+    # Field calibration procedure: docs/guides/ai_coordinate_diagnostic_calibration.md
+    swing_axis_row_in_gui_grid: -2
+
+    grid:
+      # +x forward, +y lateral-left. Established from the live TF tree, not
+      # assumed: gm_boom_link (0.860, 0.017, 1.273) and gm_lidar_mount
+      # (2.201, 0.065, 2.119) are both boom-mounted and differ from the swing
+      # axis almost purely in +x.
+      anchor_frame: 'gm_swing_axis'
+      elevation_layer: 'elevation'
+      # /rn/grid_map is currently silent (its upstream voxelizer emits empty
+      # clouds), so the overlay falls back to a flat plane at this height
+      # rather than dropping the dig layer entirely.
+      fallback_height_m: 0.0
+
+    dig:
+      fill_alpha: 0.35
+      outline_thickness: 1
+      start_marker_radius_px: 7
+
+    publish:
+      rate_hz: 2.0
+      width: 640
+      height: 400
+      jpeg_quality: 80
+
+    lidar:
+      near_m: 1.0            # colour ramp near end (blue)
+      far_m: 15.0            # colour ramp far end (red)
+      min_depth_m: 0.3       # cull points at/behind the camera plane
+      max_points: 40000      # cloud is 512x128 = 65536; stride down to this
+      point_radius_px: 0     # 0 = single pixel scatter (fast); 1..2 = fatter dots
+
+    hud:
+      font_scale: 0.5        # raise if text is unreadable in the 360 px GUI panel
+
+    tf:
+      lookup_timeout_s: 1.0
+
+    extrinsic:
+      publish_static_tf: true
+      parent_frame: 'lidar_boom/os_lidar'
+      child_frame: 'zedx_boom_left_camera_optical_frame'
+      # COARSE, NOT FINAL. Fitted by edge alignment on a single static scene
+      # (pallet + stairs + fence, 2026-08-12). Restarting the fit from five
+      # different azimuths gave a rotation spread of 2.9 deg mean / 4.3 deg max
+      # and |t| pinned at the search bound, so a single viewpoint does not
+      # determine translation. Requirement is 0.72 deg / 0.075 m, so this is
+      # 4-6x short: good enough to make the projection legible and to seed a
+      # proper multi-viewpoint solve, not good enough to trust a dig overlay.
+      #
+      # Note the LiDAR frame is NOT the usual x-forward/y-left/z-up: the fitted
+      # ground normal is [-0.258, +0.966, -0.015], i.e. up is +y, with the
+      # sensor 1.789 m above the ground. The old default assumed z-up and was
+      # therefore wrong from the start.
+      xyz: [0.5509, -0.1690, -0.0748]
+      rpy: [-2.387037, 1.512683, 0.920061]
