@@ -8,12 +8,12 @@
       base_frame: 'zedx_boom_base_link'
       tf_prefix: 'zedx_boom'
       gpu_id: 0
-      # Argus/드라이버 타이밍 완화
-      grab_resolution: 'SVGA'          # HD720→SVGA (960x600, 픽셀 40% 감소)
-      grab_frame_rate: 15              # SVGA는 15/30/60만 지원
-      pub_frame_rate: 2.0              # 5→2 (원격 모니터링용 충분)
-      pub_resolution: 'NATIVE'
-      pub_downscale_factor: 1.0
+      # 해상도/레이트: ZED X는 HD1200/HD1080/SVGA + 15/30/60fps(SVGA는 120도)만 지원
+      grab_resolution: 'HD1200'        # SVGA(960x600 비닝)→네이티브 1920x1200 전체 화소 사용
+      grab_frame_rate: 15              # grab 비용은 pub_frame_rate와 무관한 고정비. 15 유지
+      pub_frame_rate: 10.0             # 2→10 (실측: zed_node CPU 1코어의 +11%p = 전체의 +0.9%)
+      pub_resolution: 'CUSTOM'         # 그랩은 풀해상도, 발행만 축소해 대역폭 관리
+      pub_downscale_factor: 1.5        # 1920x1200 / 1.5 = 1280x800 발행
       camera_flip: false
       self_calib: false               # 초기화 시간 단축/요인 제거
 
@@ -25,8 +25,8 @@
       # analog_gain: 1255
       # digital_gain: 1
       # auto_*_range_*: (범위들도 일단 기본값으로)
-      denoising: 0                    # 임시로 해제
-      exposure_compensation: 0        # 임시로 0
+      denoising: 50                   # 0→50 (ZED 기본값). 실측 노이즈 -40%, 엣지는 유지
+      exposure_compensation: 50       # 0→50 (ZED 기본값=중립). 0은 -EV 바이어스라 항상 어둡게 찍힘
       auto_whitebalance: true
 
     depth:
