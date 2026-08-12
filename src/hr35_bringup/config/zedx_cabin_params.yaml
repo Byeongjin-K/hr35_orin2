@@ -1,48 +1,108 @@
-# config/zedx.yaml
-# Parameters for Stereolabs ZED X camera
----
-zed_node: 
-    ros__parameters:
-        general:
-          camera_model: 'zedx'
-          camera_name: 'zedx_cabin' # usually overwritten by launch file
-          serial_number: 49749405  # ← 실제 왼쪽 카메라의 SN으로 바꾸세요
-          grab_resolution: 'HD720'   # HD1200→HD720 (픽셀 54% 감소)
-          grab_frame_rate: 10        # 15→10
-          pub_frame_rate: 2.0        # 5→2
-          gpu_id: 1                          # 하나의 GPU 사용할 경우 명시
-          base_frame: 'zedx_cabin_base_link'
-          tf_prefix: 'zedx_cabin'
+# Parameters for Stereolabs ZED X camera (cabin)
+# 주의: 루트 키는 반드시 '/**:' 여야 한다.
+#   노드 FQN이 /zedx_cabin/zedx_cabin_node 라서 'zed_node:' 로는 매칭되지 않아
+#   파일 전체가 조용히 무시된다(=래퍼 기본값 NEURAL_LIGHT depth + 15Hz로 동작).
+/**:
+  ros__parameters:
 
+    general:
+      serial_number: 49749405
+      camera_model: 'zedx'
+      camera_name: 'zedx_cabin'
+      base_frame: 'zedx_cabin_base_link'
+      tf_prefix: 'zedx_cabin'
+      gpu_id: 0                        # Orin은 GPU가 0번 하나뿐 (1은 무효값이었음)
+      # 해상도/레이트: ZED X는 HD1200/HD1080/SVGA + 15/30/60fps(SVGA는 120도)만 지원
+      grab_resolution: 'HD1200'        # HD720은 ZED X 무효값 → 경고 후 AUTO로 폴백했었음
+      grab_frame_rate: 15              # 10은 SDK 미지원 레이트
+      pub_frame_rate: 10.0
+      pub_resolution: 'CUSTOM'
+      pub_downscale_factor: 1.5        # 1920x1200 / 1.5 = 1280x800 발행
+      camera_flip: false
+      self_calib: false
 
-        video:
-          exposure_time: 16000 # Defines the real exposure time in microseconds. Recommended to control manual exposure (instead of `video.exposure` setting)
-          auto_exposure_time_range_min: 28 # Defines the minimum range of exposure auto control in micro seconds
-          auto_exposure_time_range_max: 30000 # Defines the maximum range of exposure auto control in micro seconds
-          exposure_compensation: 50 # Defines the Exposure-target compensation made after auto exposure. Reduces the overall illumination target by factor of F-stops. Values range is [0 - 100]. Default value is 50, i.e. no compensation applied
-          analog_gain: 1255 # Defines the real analog gain (sensor) in mDB. Range [1000-16000]. Recommended to control manual sensor gain (instead of `video.gain` setting)
-          auto_analog_gain_range_min: 1000 # Defines the minimum range of sensor gain in automatic control
-          auto_analog_gain_range_max: 16000 # Defines the maximum range of sensor gain in automatic control
-          digital_gain: 1 # Defines the real digital gain (ISP) as a factor. Range [1-256]. Recommended to control manual ISP gain (instead of `video.gain` setting)
-          auto_digital_gain_range_min: 1 # Defines the minimum range of digital ISP gain in automatic control
-          auto_digital_gain_range_max: 256 # Defines the maximum range of digital ISP gain in automatic control
-          denoising: 0  # 50→0 (CPU 절약)
+    video:
+      auto_exposure_gain: true
+      auto_whitebalance: true
+      denoising: 50                    # ZED 기본값
+      exposure_compensation: 50        # ZED 기본값=중립. 0은 -EV 바이어스라 어둡게 찍힘
 
-        depth:
-          depth_mode: 0       
-          # min_depth: 0.3 # Min: 0.3, Max: 3.0
-          # max_depth: 10.0 # Max: 20.0
+    depth:
+      depth_mode: "NONE"               # 문자열이어야 함. 정수 0은 타입 불일치로 무시됨
+      point_cloud_freq: 0.0
 
-        pos_tracking:
-          enable_pos_tracking: false   # 🚫 Position tracking 비활성화
-          publish_tf: false
+    pos_tracking:
+      pos_tracking_enabled: false      # 'enable_pos_tracking' 아님
+      publish_tf: false
+      publish_map_tf: false
 
-        object_detection:
-          enable_obj_det: false        # 🚫 Object Detection 비활성화
+    object_detection:
+      od_enabled: false                # 'enable_obj_det' 아님
+      detection_model: 'MULTI_CLASS_BOX_FAST'
+      enable_tracking: false
+      filtering_mode: 'NMS3D'
 
-        body:
-          enable_body: false           # 🚫 Body Tracking 비활성화
-          tracking: false
-          enable_body_fitting: false
+    body_tracking:                     # 섹션명은 'body'가 아니라 'body_tracking'
+      bt_enabled: false
+      enable_tracking: false
+      enable_body_fitting: false
 
+    sensors:
+      publish_imu_tf: false
+      sensors_image_sync: false
+      sensors_pub_rate: 10.0
 
+    debug:
+      sdk_verbose: 1
+      debug_common: false
+      debug_video_depth: false
+      debug_positional_tracking: false
+      debug_object_detection: false
+      debug_body_tracking: false
+
+    # ── image_transport 플러그인 제한 ──────────────────────────
+    # Humble의 image_transport는 파라미터명에 node_name을 포함.
+    # 파라미터: <node_name>.<topic_path>.enable_pub_plugins
+    zedx_cabin_node:
+      rgb:
+        image_rect_color:
+          enable_pub_plugins: ["image_transport/raw", "image_transport/compressed"]
+      rgb_gray:
+        image_rect_gray:
+          enable_pub_plugins: ["image_transport/raw", "image_transport/compressed"]
+      rgb_raw:
+        image_raw_color:
+          enable_pub_plugins: ["image_transport/raw", "image_transport/compressed"]
+      rgb_raw_gray:
+        image_raw_gray:
+          enable_pub_plugins: ["image_transport/raw", "image_transport/compressed"]
+      left:
+        image_rect_color:
+          enable_pub_plugins: ["image_transport/raw", "image_transport/compressed"]
+      left_gray:
+        image_rect_gray:
+          enable_pub_plugins: ["image_transport/raw", "image_transport/compressed"]
+      left_raw:
+        image_raw_color:
+          enable_pub_plugins: ["image_transport/raw", "image_transport/compressed"]
+      left_raw_gray:
+        image_raw_gray:
+          enable_pub_plugins: ["image_transport/raw", "image_transport/compressed"]
+      right:
+        image_rect_color:
+          enable_pub_plugins: ["image_transport/raw", "image_transport/compressed"]
+      right_gray:
+        image_rect_gray:
+          enable_pub_plugins: ["image_transport/raw", "image_transport/compressed"]
+      right_raw:
+        image_raw_color:
+          enable_pub_plugins: ["image_transport/raw", "image_transport/compressed"]
+      right_raw_gray:
+        image_raw_gray:
+          enable_pub_plugins: ["image_transport/raw", "image_transport/compressed"]
+      stereo:
+        image_rect_color:
+          enable_pub_plugins: ["image_transport/raw", "image_transport/compressed"]
+      stereo_raw:
+        image_raw_color:
+          enable_pub_plugins: ["image_transport/raw", "image_transport/compressed"]
