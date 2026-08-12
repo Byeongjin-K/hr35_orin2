@@ -20,7 +20,7 @@ def generate_launch_description():
                 'serial_number': '45233238',
                 'base_frame': 'zedx_boom_base_link',
                 'node_name': 'zedx_boom_node',
-                'params_file': boom_yaml,
+                'ros_params_override_path': boom_yaml,
             }.items(),
         ),
         IncludeLaunchDescription(
@@ -31,7 +31,7 @@ def generate_launch_description():
                 'serial_number': '49749405',
                 'base_frame': 'zedx_cabin_base_link',
                 'node_name': 'zedx_cabin_node',
-                'params_file': cabin_yaml,
+                'ros_params_override_path': cabin_yaml,
             }.items(),
         ),
     ])
