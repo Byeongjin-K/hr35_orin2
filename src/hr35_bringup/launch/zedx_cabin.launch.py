@@ -18,7 +18,7 @@ def generate_launch_description():
                 'serial_number': '49749405',
                 'base_frame': 'zedx_cabin_base_link',
                 'node_name': 'zedx_cabin_node',
-                'params_file': config_path,
+                'ros_params_override_path': config_path,
             }.items(),
         ),
     ])
