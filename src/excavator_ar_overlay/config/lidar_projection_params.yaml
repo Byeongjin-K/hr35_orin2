@@ -22,6 +22,10 @@
       overlay_out: '/excavator/perception/dig_overlay/compressed'
       ai_action_in: '/ai_status/action'
       grid_map_in: '/rn/grid_map'
+      # Colour source only. current-target is a difference, so it is independent
+      # of the datum those heights share; absolute height for 3D placement still
+      # comes from grid_map_in, whose frame is known.
+      task_info_in: '/task_info'
 
     layers:
       lidar_points: true     # stage 1: extrinsic verification

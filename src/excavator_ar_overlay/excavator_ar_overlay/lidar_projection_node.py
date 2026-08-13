@@ -45,8 +45,10 @@ from excavator_ar_overlay.dig_plan import (
     CENTER_COL,
     cell_corners,
     remaining_to_color,
+    remaining_to_colors,
 )
 from excavator_ar_overlay.grid_elevation import ElevationGrid
+from excavator_ar_overlay.task_info import TerrainState
 
 try:  # grid_map_msgs ships with the workspace; treat it as optional anyway.
     from grid_map_msgs.msg import GridMap
@@ -60,6 +62,11 @@ try:
     from excavator_msgs.msg import AiActionStatus
 except ImportError:  # pragma: no cover - depends on which overlay is sourced
     AiActionStatus = None
+
+try:
+    from excavator_msgs.msg import TaskInfo
+except ImportError:  # pragma: no cover - depends on which overlay is sourced
+    TaskInfo = None
 
 _SENSOR_QOS = QoSProfile(
     depth=1,
@@ -101,6 +108,7 @@ class LidarProjectionNode(Node):
         self._info_warning: "str | None" = None
         self._actions = ActionRetainer()
         self._grid: "ElevationGrid | None" = None
+        self._terrain: "TerrainState | None" = None
         self._action_support = "ok" if AiActionStatus is not None else "missing msg"
 
         self._tf_buffer = Buffer()
@@ -132,6 +140,10 @@ class LidarProjectionNode(Node):
         if GridMap is not None:
             self.create_subscription(
                 GridMap, self._p("topics.grid_map_in"), self._on_grid, _GRID_QOS
+            )
+        if TaskInfo is not None:
+            self.create_subscription(
+                TaskInfo, self._p("topics.task_info_in"), self._on_task_info, _GRID_QOS
             )
         self._pub = self.create_publisher(
             CompressedImage, self._p("topics.overlay_out"), _OVERLAY_QOS
@@ -165,6 +177,16 @@ class LidarProjectionNode(Node):
     def _on_action(self, msg) -> None:
         """Event-driven: only arrives on phase transitions, so retain it."""
         self._actions.update(DigAction.from_message(msg))
+
+    def _on_task_info(self, msg) -> None:
+        terrain = TerrainState.from_message(msg)
+        if terrain is None:
+            self.get_logger().warn(
+                "task_info payload does not match its declared grid dimensions",
+                throttle_duration_sec=_LOG_THROTTLE_MS / 1000.0,
+            )
+            return
+        self._terrain = terrain
 
     def _on_grid(self, msg) -> None:
         grid = ElevationGrid.from_message(msg, self._p("grid.elevation_layer"))
@@ -399,15 +421,13 @@ class LidarProjectionNode(Node):
         if not cell_ok.any():
             return [f"dig plan: {action.phase}, {n_cells} cells off-screen"]
 
-        color = remaining_to_color(action.mean_remaining_delta_units)
-        polygons = [
-            cell_uv[i].round().astype(np.int32)
-            for i in np.flatnonzero(cell_ok)
-        ]
+        shown = np.flatnonzero(cell_ok)
+        colors, color_note = self._cell_colors(action, shown)
+        polygons = [cell_uv[i].round().astype(np.int32) for i in shown]
         rendering.draw_filled_polygons(
             frame,
             polygons,
-            [color] * len(polygons),
+            colors,
             float(self._p("dig.fill_alpha")),
             int(self._p("dig.outline_thickness")),
         )
@@ -415,7 +435,30 @@ class LidarProjectionNode(Node):
 
         lines = action.hud_lines()
         lines.append(f"cells drawn: {int(cell_ok.sum())}/{n_cells}  {height_note}")
+        lines.append(f"colour: {color_note}")
         return lines
+
+    def _cell_colors(self, action, shown: np.ndarray) -> "tuple[list, str]":
+        """Per-cell colour from TaskInfo, falling back to the action-wide mean.
+
+        current-target is a difference, so it does not care what datum the two
+        heights share. That is why colour can come from TaskInfo even though the
+        3D placement height deliberately does not.
+        """
+        if self._terrain is None:
+            color = remaining_to_color(action.mean_remaining_delta_units)
+            return [color] * shown.size, "action mean (no task_info)"
+
+        values, valid = self._terrain.remaining_units(
+            action.rows[shown], action.cols[shown]
+        )
+        if not valid.any():
+            color = remaining_to_color(action.mean_remaining_delta_units)
+            return [color] * shown.size, "action mean (cells outside work mask)"
+
+        rgb = remaining_to_colors(values, valid)
+        colors = [tuple(int(c) for c in row) for row in rgb]
+        return colors, f"per-cell ({int(valid.sum())}/{valid.size})"
 
     def _cell_heights(self, action, anchor: str) -> "tuple[np.ndarray, str]":
         """Per-cell z, from the grid map when available, else a flat fallback."""

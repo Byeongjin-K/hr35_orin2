@@ -134,3 +134,40 @@ def remaining_to_color(remaining_units: float) -> "tuple[int, int, int]":
         strength = min(1.0, -remaining_units / 3.0)
         return (int(120 + 135 * strength), int(90 * strength), 0)
     return (90, 220, 90)
+
+
+def remaining_to_colors(
+    remaining_units: np.ndarray, valid: "np.ndarray | None" = None
+) -> np.ndarray:
+    """Vectorised per-cell version of `remaining_to_color`, returning (N, 3) BGR.
+
+    Per-cell colour is the point of the encoding: AiActionStatus only carries one
+    scalar mean for the whole selection, so colouring from that paints every cell
+    the same and hides the distribution the operator is looking for. Cells with
+    `valid` False fall back to neutral grey rather than to a misleading colour.
+    """
+    values = np.asarray(remaining_units, dtype=np.float64)
+    out = np.full((values.size, 3), 150, dtype=np.uint8)
+    if values.size == 0:
+        return out
+
+    usable = np.isfinite(values)
+    if valid is not None:
+        usable &= np.asarray(valid, dtype=bool)
+
+    dig = usable & (values > 0.1)
+    over = usable & (values < -0.1)
+    near = usable & ~dig & ~over
+
+    if np.any(dig):
+        s = np.clip(values[dig] / 3.0, 0.0, 1.0)
+        out[dig] = np.stack(
+            (np.zeros_like(s), 140 + 115 * s, 255 * s), axis=1
+        ).astype(np.uint8)
+    if np.any(over):
+        s = np.clip(-values[over] / 3.0, 0.0, 1.0)
+        out[over] = np.stack(
+            (120 + 135 * s, 90 * s, np.zeros_like(s)), axis=1
+        ).astype(np.uint8)
+    out[near] = (90, 220, 90)
+    return out
