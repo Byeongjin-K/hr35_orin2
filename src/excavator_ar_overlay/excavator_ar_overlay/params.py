@@ -50,6 +50,15 @@ SCHEMA: "tuple[tuple[str, object, str], ...]" = (
         "/rn/grid_map",
         "Terrain heights (grid_map_msgs/GridMap) used to place dig cells in 3D.",
     ),
+    (
+        "topics.task_info_in",
+        "/task_info",
+        "Per-cell current/target terrain (excavator_msgs/TaskInfo). Used only "
+        "for the dig-cell COLOUR: current-target is a difference, so it is "
+        "independent of whatever datum the heights are measured from. Absolute "
+        "height for 3D placement still comes from the grid map, whose frame is "
+        "known.",
+    ),
     ("layers.lidar_points", True, "Draw the reprojected LiDAR cloud."),
     ("layers.dig_plan", True, "Draw the AI-selected dig cells."),
     (
