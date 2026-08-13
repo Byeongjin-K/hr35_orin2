@@ -140,21 +140,41 @@ HUD에 `dig plan: <phase>`와 `colour: per-cell (n/m)`이 뜨면 배선이 살�
 
 ---
 
-## D. GUI 표시 패널 【의뢰서 전제가 틀렸던 부분】
+## D. GUI 연결 【파라미터 1줄 — 구현 불필요】
 
-의뢰서 §2·§9는 "GUI 표시 패널이 이미 구현되어 있고 파라미터 1개 추가로 연결된다"고
-했으나 **사실이 아니다.** 확인 결과:
-- `ai_camera_panel_widget.py`는 hr35 어디에도 없음
-- `CompressedImage`를 구독하는 GUI 위젯 없음
-- 현재 GUI 경로는 GridMap + `AiActionStatus`뿐
+> **정정 (2026-08-13).** 이 항목은 처음에 "GUI 패널이 없으니 새로 만들어야 한다"고
+> 적었으나 **틀렸다.** hr35 소스 트리 grep으로는 안 나왔는데, 이 머신의 hr35 체크아웃이
+> 8개월 낡아서였다. 실행 중인 GUI 노드를 직접 조회하니 패널이 이미 있고 토픽까지
+> 파라미터화되어 있다. 의뢰서 §2의 주장이 맞았다.
 
-### 필요한 것
-`/excavator/perception/dig_overlay/compressed`를 구독해 AI Monitor 탭 하단에 그리는 Qt
-위젯. 폭 360 px 제약은 이미 오버레이 쪽에서 범례·텍스트를 구워 넣어 대응해 두었다.
+### 실제 상태
+```
+$ ros2 param get /task_config_gui_node ai_camera_image_topic
+/zedx_boom/zedx_boom_node/left/image_rect_color/compressed
+$ ros2 param get /task_config_gui_node ai_camera_max_fps
+10.0
+```
+`ros2 param describe` 결과 read_only 표시가 없으므로 런타임 설정을 받는다.
+오버레이는 2 Hz라 `ai_camera_max_fps: 10.0` 상한에 걸리지 않는다.
 
-### 왜 아직 안 했나
-hr35는 **별도 저장소**이고 해당 GUI는 다른 장비에서 돌고 있다. 남의 저장소를 무단
-수정하지 않았다. 진행하려면 승인이 필요하다 — 실험은 필요 없고 순수 구현이다.
+### 연결 방법
+```bash
+ros2 param set /task_config_gui_node ai_camera_image_topic \
+  /excavator/perception/dig_overlay/compressed
+```
+값은 받아들여지지만 **GUI가 콜백에서 실제로 재구독하는지는 확인되지 않았다.** 화면이
+안 바뀌면 GUI 설정 파일을 고치고 재시작해야 한다. 되돌리려면 위 기본값을 다시 넣으면 된다.
+
+### 주의 — 입력 토픽 계열 불일치
+GUI 파라미터 설명에 이런 실측 기록이 있다:
+
+> rgb/ 계열은 ZED 노드가 살아있어도 프레임을 발행하지 않는 것이 실측돼(18초 0장)
+> left/ 를 기본값으로 쓴다. 둘은 동일 센서다.
+
+그런데 이 오버레이 노드는 `topics.image_in`에 **rgb/ 계열**을 쓰고 있고, 2026-08-12~13
+실측에서는 정상 수신됐다(2 Hz, 프레임 캡처 성공). 두 관측이 엇갈리므로, GUI 연결 시점에
+오버레이 입력이 비면 `topics.image_in`을 left/ 계열로 바꿔 볼 것. 파라미터라 재빌드는
+필요 없다.
 
 ---
 
@@ -171,10 +191,11 @@ hr35는 **별도 저장소**이고 해당 GUI는 다른 장비에서 돌고 있�
 ## 권장 순서
 
 ```
-1. A 캡처 (현장 20분)          ← 임계경로. 나머지 대부분이 여기 걸림
-2. A 후처리 + B 판정 (코드)     ← 같은 데이터로 둘 다 해결
-3. C 수용 검증
-4. D GUI 패널 (승인 필요)
+0. D 연결 (파라미터 1줄)     ← 가장 싸다. C-4를 GUI에서 보려면 선행 필요
+1. C-4 phase 전이 검증       ← A와 무관. 지금 가능
+2. A 캡처 (현장 20분)        ← 임계경로. 나머지 대부분이 여기 걸림
+3. A 후처리 + B 판정 (코드)   ← 같은 데이터로 둘 다 해결
+4. C-2, C-3 수용 검증
 5. E 정리
 ```
 
