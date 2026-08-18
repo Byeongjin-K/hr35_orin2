@@ -71,12 +71,22 @@
       min_depth_m: 0.3       # cull points at/behind the camera plane
       max_points: 40000      # cloud is 512x128 = 65536; stride down to this
       point_radius_px: 0     # 0 = single pixel scatter (fast); 1..2 = fatter dots
-      # 비움 수 있음. 클라우드를 다른 프레임으로 재해석한다.
-      # 같은 Ouster가 트리에 두 번 나타난다 — lidar_boom/os_lidar는 bringup
-      # 하드코딩(map -> lidar_boom/os_sensor [0,0,2])에, gm_os_lidar는 붐 기구학에
-      # 매달려 있고 둘은 2.141 m / 17.2 deg 어깼다. 'gm_os_lidar'로 두고
-      # 비교해 보는 것이 어느 체인이 진짜인지 가리는 가장 싸 방법이다.
-      override_frame: ''
+      # 클라우드를 다른 프레임으로 재해석한다. 비우면 헤더 프레임을 쓴다.
+      #
+      # 2026-08-18 보정 캐프처 8포즈(붐 -61.5 ~ -5.7도)로 판정 완료.
+      # 지면은 움직이지 않으므로 맵 프레임에서 본 지면 평면은 붐 각도와
+      # 무관해야 한다. 실측:
+      #                       높이편차   기울기편차   붐각 상관
+      #   gm_os_lidar          0.029 m     0.50 deg    r=+0.32  (+0.2 mm/deg)
+      #   lidar_boom/os_lidar  3.128 m    50.37 deg    r=+0.98 (+53.9 mm/deg)
+      #
+      # placeholder 체인은 붐각과 거의 완벽한 선형 상관을 보인다 — 붐 회전이
+      # 통째로 빠진 서명이다. TF 자체로도 확인된다: 55.8도 스윈 동안
+      # gm_os_lidar 는 수직 1.223 m 움직였고 lidar_boom/os_lidar 는 0 m 였다.
+      #
+      # 근본 수정은 hr35_bringup 의 static_transform_publisher 이지만 다른
+      # 소비자 영향을 확인해야 하므로, 여기서는 올바른 체인을 명시한다.
+      override_frame: 'gm_os_lidar'
 
     hud:
       font_scale: 0.5        # raise if text is unreadable in the 360 px GUI panel
