@@ -21,12 +21,14 @@ from rcl_interfaces.msg import ParameterDescriptor
 SCHEMA: "tuple[tuple[str, object, str], ...]" = (
     (
         "topics.image_in",
-        "/zedx_boom/zedx_boom_node/rgb/image_rect_color/compressed",
-        "Input camera image (sensor_msgs/CompressedImage, JPEG).",
+        "/zedx_cabin/zedx_cabin_node/rgb/image_rect_color/compressed",
+        "Input camera image (sensor_msgs/CompressedImage, JPEG). The cabin "
+        "camera looks down at the work area; the boom camera's angle misses "
+        "most of where the bucket actually reaches.",
     ),
     (
         "topics.camera_info_in",
-        "/zedx_boom/zedx_boom_node/rgb/camera_info",
+        "/zedx_cabin/zedx_cabin_node/rgb/camera_info",
         "Intrinsics for the input image.",
     ),
     (
@@ -116,6 +118,17 @@ SCHEMA: "tuple[tuple[str, object, str], ...]" = (
         0,
         "0 draws single pixels (fast). >0 draws filled circles of that radius.",
     ),
+    (
+        "lidar.override_frame",
+        "",
+        "Reinterpret the incoming cloud as being in this frame instead of its "
+        "own header frame. Empty keeps the header. This exists because the same "
+        "physical Ouster appears twice in the tree: lidar_boom/os_lidar hangs "
+        "off a hardcoded placeholder (map -> lidar_boom/os_sensor [0,0,2]) "
+        "while gm_os_lidar comes from the boom kinematics, and the two differ "
+        "by 2.141 m and 17.2 deg. Setting this to 'gm_os_lidar' and comparing "
+        "the two overlays is the cheapest way to decide which chain is real.",
+    ),
     ("hud.font_scale", 0.5, "OpenCV font scale for HUD and legend text."),
     ("tf.lookup_timeout_s", 1.0, "Blocking timeout for each TF lookup."),
     (
@@ -127,26 +140,38 @@ SCHEMA: "tuple[tuple[str, object, str], ...]" = (
     ),
     (
         "extrinsic.parent_frame",
-        "lidar_boom/os_lidar",
-        "Parent frame of the published extrinsic.",
+        "gm_swing_axis",
+        "Parent frame of the published extrinsic. This MUST be a cabin-rigid "
+        "frame, not a boom-rigid one: the camera is mounted on the cabin while "
+        "the LiDAR rides the boom, so a camera-to-LiDAR transform is not "
+        "constant. Measured live, gm_swing_axis and gm_boom_hinge hold the same "
+        "attitude (-4.68 vs -4.74 deg pitch) while gm_boom_link and "
+        "gm_lidar_mount swing with the boom (-44.25 / -44.20 deg at the same "
+        "instant). gm_swing_axis is chosen over gm_boom_hinge because the dig "
+        "cells are already computed in it, so cell-to-pixel collapses to one "
+        "constant transform and boom kinematics errors cannot leak into the "
+        "overlay at all.",
     ),
     (
         "extrinsic.child_frame",
-        "zedx_boom_left_camera_optical_frame",
+        "zedx_cabin_left_camera_optical_frame",
         "Child frame of the published extrinsic (the camera optical frame).",
     ),
     (
         "extrinsic.xyz",
         [0.0, 0.0, 0.0],
-        "Camera optical frame origin in the parent frame [m]. MUST be calibrated.",
+        "Camera optical frame origin in the parent frame [m]. UNCALIBRATED. The "
+        "earlier coarse fit was for the boom camera against the LiDAR and does "
+        "not transfer, so this is back to zero.",
     ),
     (
         "extrinsic.rpy",
         [-math.pi / 2.0, 0.0, -math.pi / 2.0],
         "Fixed-axis roll/pitch/yaw [rad] of the camera optical frame in the "
-        "parent frame. The default maps an x-forward/y-left/z-up parent onto the "
-        "optical x-right/y-down/z-forward convention, i.e. rotation only, and is "
-        "a starting point for calibration rather than a measured value.",
+        "parent frame. UNCALIBRATED. The default maps an x-forward/y-left/z-up "
+        "parent onto the optical x-right/y-down/z-forward convention, i.e. "
+        "rotation only. A cabin camera looking down at the work area will need "
+        "a substantial pitch on top of that.",
     ),
 )
 

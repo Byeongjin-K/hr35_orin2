@@ -16,8 +16,10 @@
   ros__parameters:
 
     topics:
-      image_in: '/zedx_boom/zedx_boom_node/rgb/image_rect_color/compressed'
-      camera_info_in: '/zedx_boom/zedx_boom_node/rgb/camera_info'
+      # 캐빈 상단 카메라. 붐 하단 카메라는 각도상 버킷이 닿는 작업영역을 대부분
+      # 보지 못해 2026-08-13에 교체했다.
+      image_in: '/zedx_cabin/zedx_cabin_node/rgb/image_rect_color/compressed'
+      camera_info_in: '/zedx_cabin/zedx_cabin_node/rgb/camera_info'
       points_in: '/lidar_boom/points'
       overlay_out: '/excavator/perception/dig_overlay/compressed'
       ai_action_in: '/ai_status/action'
@@ -69,6 +71,12 @@
       min_depth_m: 0.3       # cull points at/behind the camera plane
       max_points: 40000      # cloud is 512x128 = 65536; stride down to this
       point_radius_px: 0     # 0 = single pixel scatter (fast); 1..2 = fatter dots
+      # 비움 수 있음. 클라우드를 다른 프레임으로 재해석한다.
+      # 같은 Ouster가 트리에 두 번 나타난다 — lidar_boom/os_lidar는 bringup
+      # 하드코딩(map -> lidar_boom/os_sensor [0,0,2])에, gm_os_lidar는 붐 기구학에
+      # 매달려 있고 둘은 2.141 m / 17.2 deg 어깼다. 'gm_os_lidar'로 두고
+      # 비교해 보는 것이 어느 체인이 진짜인지 가리는 가장 싸 방법이다.
+      override_frame: ''
 
     hud:
       font_scale: 0.5        # raise if text is unreadable in the 360 px GUI panel
@@ -78,19 +86,17 @@
 
     extrinsic:
       publish_static_tf: true
-      parent_frame: 'lidar_boom/os_lidar'
-      child_frame: 'zedx_boom_left_camera_optical_frame'
-      # COARSE, NOT FINAL. Fitted by edge alignment on a single static scene
-      # (pallet + stairs + fence, 2026-08-12). Restarting the fit from five
-      # different azimuths gave a rotation spread of 2.9 deg mean / 4.3 deg max
-      # and |t| pinned at the search bound, so a single viewpoint does not
-      # determine translation. Requirement is 0.72 deg / 0.075 m, so this is
-      # 4-6x short: good enough to make the projection legible and to seed a
-      # proper multi-viewpoint solve, not good enough to trust a dig overlay.
-      #
-      # Note the LiDAR frame is NOT the usual x-forward/y-left/z-up: the fitted
-      # ground normal is [-0.258, +0.966, -0.015], i.e. up is +y, with the
-      # sensor 1.789 m above the ground. The old default assumed z-up and was
-      # therefore wrong from the start.
-      xyz: [0.5509, -0.1690, -0.0748]
-      rpy: [-2.387037, 1.512683, 0.920061]
+      # parent 는 반드시 캐빈 강체 프레임이어야 한다. 카메라는 캐빈에, LiDAR는
+      # 붐에 있어서 카메라↔LiDAR 변환은 상수가 아니다. 동일 시각 실측:
+      #   gm_swing_axis  -4.68 deg   gm_boom_hinge  -4.74 deg   ← 캐빈 강체
+      #   gm_boom_link  -44.25 deg   gm_lidar_mount -44.20 deg   ← 붐 강체
+      # gm_swing_axis 를 고른 이유: dig 셀이 이미 이 프레임에서 계산되므로
+      # 셀→픽셀이 상수 변환 하나로 줄고, 붐 기구학 오차가 오버레이로 새지 않는다.
+      parent_frame: 'gm_swing_axis'
+      child_frame: 'zedx_cabin_left_camera_optical_frame'
+      # UNCALIBRATED. 2026-08-12의 coarse 값은 붐 카메라↔LiDAR 것이라 이전되지
+      # 않아 0으로 되돌렸다. rpy 는 x-forward/y-left/z-up parent → optical
+      # 규약 매핑일 뿐이며, 작업면을 내려다보는 캐빈 카메라는 여기에 상당한
+      # pitch 가 더 붙을 것이다.
+      xyz: [0.0, 0.0, 0.0]
+      rpy: [-1.5707963267948966, 0.0, -1.5707963267948966]
