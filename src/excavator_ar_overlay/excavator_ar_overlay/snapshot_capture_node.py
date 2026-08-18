@@ -156,6 +156,12 @@ class SnapshotCaptureNode(Node):
                 "A new pose must be at least this far from every captured one.",
             ),
             (
+                "capture.interval_seconds",
+                12.0,
+                "Seconds between shots in interval mode. Long enough to place "
+                "or move a target and get clear before the next one.",
+            ),
+            (
                 "capture.still_tolerance_m",
                 0.03,
                 "Bucket movement under this counts as still.",
@@ -202,7 +208,40 @@ class SnapshotCaptureNode(Node):
             return None
         return np.array([pitch]), "boom"
 
+    def _tick_interval(self) -> None:
+        """Fire on a timer so a person or object can be moved between shots.
+
+        Needed because nothing on the machine can place a 3D point off the boom's
+        sagittal plane: boom, arm and bucket all move within it, and swinging
+        turns the camera with them so the bucket never shifts in the image. A
+        target that moves independently of the machine is the only way to get
+        lateral spread, and its motion cannot be detected from the machine's own
+        state, so the trigger has to be time based.
+        """
+        now = self.get_clock().now().nanoseconds / 1e9
+        period = float(self._p("capture.interval_seconds"))
+        if self._still_since is None:
+            self._still_since = now
+            self.get_logger().info(
+                f"interval mode: a shot every {period:.0f}s. "
+                f"Move the target between shots, then stand clear."
+            )
+            return
+        remaining = period - (now - self._still_since)
+        if remaining > 0:
+            if abs(remaining - round(remaining)) < 0.13 and remaining >= 1:
+                self.get_logger().info(f"  {int(round(remaining))}...")
+            return
+        self._still_since = now
+        index = len(self._captured_keys)
+        key = np.array([float(index)])
+        if self._save(key, "interval"):
+            self._captured_keys.append(key)
+
     def _tick(self) -> None:
+        if self._p("capture.mode") == "interval":
+            self._tick_interval()
+            return
         got = self._pose_key()
         if got is None:
             self.get_logger().warn(
@@ -258,6 +297,10 @@ class SnapshotCaptureNode(Node):
         index = len(self._captured_keys)
         if mode == "bucket":
             stem = self._out / f"pose{index:02d}_bucket{key[0]:+05.2f}_{key[1]:+05.2f}"
+        elif mode == "interval":
+            boom = self._boom_pitch_deg()
+            tag = "na" if boom is None else f"{boom:+06.1f}"
+            stem = self._out / f"shot{index:02d}_boom{tag}"
         else:
             stem = self._out / f"pose{index:02d}_boom{key[0]:+06.1f}"
         points = extract_xyz(self._cloud, 0)
