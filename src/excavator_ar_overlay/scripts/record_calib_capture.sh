@@ -18,10 +18,19 @@ OUT="${OUT_ROOT}/${STAMP}_${LABEL}"
 
 TOPICS=(
   /lidar_boom/points
-  /zedx_boom/zedx_boom_node/rgb/image_rect_color/compressed
-  /zedx_boom/zedx_boom_node/rgb/camera_info
+  # Cabin camera, not boom: the boom camera's angle misses the work area.
+  /zedx_cabin/zedx_cabin_node/rgb/image_rect_color/compressed
+  /zedx_cabin/zedx_cabin_node/rgb/camera_info
+  # TF carries the boom angle, which is what makes each capture's
+  # camera-to-LiDAR transform different now that the two are on separate
+  # rigid bodies. Without it the captures cannot be related to each other.
   /tf
   /tf_static
+  # Raw joint readings as a cross-check on the TF chain: the frame-duplication
+  # question is settled by testing whether ground height depends on boom angle,
+  # and that must not be argued using only the chain under suspicion.
+  /excavator/sensors/joint_boom
+  /excavator/sensors/swing_angle
 )
 
 echo "=============================================================="
