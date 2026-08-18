@@ -340,10 +340,14 @@ class LidarProjectionNode(Node):
             return 0, "waiting for LiDAR cloud"
 
         cloud = self._cloud
+        # The cloud's own header frame hangs off a hardcoded placeholder in
+        # bringup; override_frame lets the kinematic frame be substituted so the
+        # two chains can be compared without touching the driver.
+        source_frame = self._p("lidar.override_frame") or cloud.header.frame_id
         try:
             transform = self._tf_buffer.lookup_transform(
                 self._p("extrinsic.child_frame"),
-                cloud.header.frame_id,
+                source_frame,
                 Time(),
                 timeout=rclpy.duration.Duration(
                     seconds=float(self._p("tf.lookup_timeout_s"))
@@ -351,7 +355,7 @@ class LidarProjectionNode(Node):
             )
         except TransformException as exc:
             self.get_logger().warn(
-                f"TF {cloud.header.frame_id} -> "
+                f"TF {source_frame} -> "
                 f"{self._p('extrinsic.child_frame')} unavailable: {exc}",
                 throttle_duration_sec=_LOG_THROTTLE_MS / 1000.0,
             )
@@ -374,7 +378,7 @@ class LidarProjectionNode(Node):
             depths, float(self._p("lidar.near_m")), float(self._p("lidar.far_m"))
         )
         rendering.draw_points(frame, uv, colors, int(self._p("lidar.point_radius_px")))
-        return int(uv.shape[0]), f"TF ok: {cloud.header.frame_id}"
+        return int(uv.shape[0]), f"TF ok: {source_frame}"
 
     def _draw_dig_plan(self, frame: np.ndarray, model: PinholeModel) -> "list[str]":
         """Project the retained AI dig cells and fill them by remaining depth."""
