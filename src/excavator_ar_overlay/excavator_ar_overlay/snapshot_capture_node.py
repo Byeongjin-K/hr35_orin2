@@ -27,6 +27,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
+from geometry_msgs.msg import PointStamped
 from sensor_msgs.msg import CameraInfo, CompressedImage, PointCloud2
 from tf2_ros import TransformException
 from tf2_ros.buffer import Buffer
@@ -70,9 +71,10 @@ class SnapshotCaptureNode(Node):
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self)
 
+        self._bucket: "PointStamped | None" = None
         self._still_since: "float | None" = None
-        self._last_pitch: "float | None" = None
-        self._captured_pitches: "list[float]" = []
+        self._last_key: "np.ndarray | None" = None
+        self._captured_keys: "list[np.ndarray]" = []
 
         self.create_subscription(
             CompressedImage, self._p("topics.image_in"), self._on_image, _SENSOR_QOS
@@ -83,14 +85,28 @@ class SnapshotCaptureNode(Node):
         self.create_subscription(
             PointCloud2, self._p("topics.points_in"), self._on_cloud, _SENSOR_QOS
         )
+        self.create_subscription(
+            PointStamped, self._p("capture.bucket_topic"), self._on_bucket, 10
+        )
         self.create_timer(0.25, self._tick)
 
-        self.get_logger().info(
-            f"snapshot capture ready -> {self._out}\n"
-            f"  sweep the boom, pause ~{self._p('capture.still_seconds'):.0f}s, repeat.\n"
-            f"  poses at least {self._p('capture.min_pitch_step_deg'):.0f} deg apart "
-            f"are kept; target {self._p('capture.target_poses')}."
-        )
+        if self._p("capture.mode") == "bucket":
+            self.get_logger().info(
+                f"snapshot capture ready (BUCKET mode) -> {self._out}\n"
+                f"  rest the bucket tip on the ground, hold "
+                f"~{self._p('capture.still_seconds'):.0f}s, move, repeat.\n"
+                f"  swing as well as boom: positions at least "
+                f"{self._p('capture.min_bucket_step_m'):.1f} m apart are kept; "
+                f"target {self._p('capture.target_poses')}."
+            )
+        else:
+            self.get_logger().info(
+                f"snapshot capture ready (BOOM mode) -> {self._out}\n"
+                f"  sweep the boom, pause "
+                f"~{self._p('capture.still_seconds'):.0f}s, repeat.\n"
+                f"  poses at least {self._p('capture.min_pitch_step_deg'):.0f} deg "
+                f"apart are kept; target {self._p('capture.target_poses')}."
+            )
 
     def _declare_capture_params(self) -> None:
         from rcl_interfaces.msg import ParameterDescriptor
@@ -116,6 +132,34 @@ class SnapshotCaptureNode(Node):
                 "gm_boom_link",
                 "Frame watched for stillness and pose spacing.",
             ),
+            (
+                "capture.mode",
+                "bucket",
+                "'bucket' triggers on the bucket tip holding still and spaces "
+                "poses by 3D distance, which is what lets swing contribute "
+                "lateral spread; boom pitch alone cannot. 'boom' keeps the "
+                "original pitch-stepped behaviour.",
+            ),
+            (
+                "capture.bucket_topic",
+                "/excavator/kinematics/bucket_position",
+                "Bucket tip from forward kinematics. Measured to agree with "
+                "gm_swing_axis to within ~0.3 m, so it supplies the 3D half of "
+                "a correspondence without anyone having to measure anything. "
+                "Its z is always 0, so the bucket must be RESTING ON THE "
+                "GROUND for the pose to be usable; height then comes from the "
+                "fitted ground plane.",
+            ),
+            (
+                "capture.min_bucket_step_m",
+                0.8,
+                "A new pose must be at least this far from every captured one.",
+            ),
+            (
+                "capture.still_tolerance_m",
+                0.03,
+                "Bucket movement under this counts as still.",
+            ),
         )
         for name, default, desc in extra:
             self.declare_parameter(name, default, ParameterDescriptor(description=desc))
@@ -132,6 +176,9 @@ class SnapshotCaptureNode(Node):
     def _on_cloud(self, msg: PointCloud2) -> None:
         self._cloud = msg
 
+    def _on_bucket(self, msg) -> None:
+        self._bucket = msg
+
     def _boom_pitch_deg(self) -> "float | None":
         try:
             tf = self._tf_buffer.lookup_transform(
@@ -143,39 +190,62 @@ class SnapshotCaptureNode(Node):
         sin_pitch = 2.0 * (q.w * q.y - q.z * q.x)
         return math.degrees(math.asin(max(-1.0, min(1.0, sin_pitch))))
 
-    def _tick(self) -> None:
+    def _pose_key(self) -> "tuple[np.ndarray, str] | None":
+        """What identifies a pose, and how far apart two poses must be."""
+        if self._p("capture.mode") == "bucket":
+            if self._bucket is None:
+                return None
+            b = self._bucket.point
+            return np.array([b.x, b.y]), "bucket"
         pitch = self._boom_pitch_deg()
         if pitch is None:
+            return None
+        return np.array([pitch]), "boom"
+
+    def _tick(self) -> None:
+        got = self._pose_key()
+        if got is None:
             self.get_logger().warn(
-                "no TF for the boom frame yet", throttle_duration_sec=5.0
+                "waiting for the bucket position / boom TF",
+                throttle_duration_sec=5.0,
             )
             return
+        key, mode = got
 
         now = self.get_clock().now().nanoseconds / 1e9
-        tol = float(self._p("capture.still_tolerance_deg"))
-        if self._last_pitch is None or abs(pitch - self._last_pitch) > tol:
+        tol = float(
+            self._p("capture.still_tolerance_m")
+            if mode == "bucket"
+            else self._p("capture.still_tolerance_deg")
+        )
+        if self._last_key is None or np.linalg.norm(key - self._last_key) > tol:
             self._still_since = now
-        self._last_pitch = pitch
+        self._last_key = key
 
         if self._still_since is None:
             return
         if now - self._still_since < float(self._p("capture.still_seconds")):
             return
 
-        step = float(self._p("capture.min_pitch_step_deg"))
-        if any(abs(pitch - p) < step for p in self._captured_pitches):
+        step = float(
+            self._p("capture.min_bucket_step_m")
+            if mode == "bucket"
+            else self._p("capture.min_pitch_step_deg")
+        )
+        if any(np.linalg.norm(key - k) < step for k in self._captured_keys):
+            unit = "m" if mode == "bucket" else "deg"
             self.get_logger().info(
-                f"boom still at {pitch:+.1f} deg but too close to an existing pose; "
-                f"move it at least {step:.0f} deg",
+                f"still, but too close to an existing pose; "
+                f"move at least {step:.1f} {unit}",
                 throttle_duration_sec=6.0,
             )
             return
 
-        if self._save(pitch):
-            self._captured_pitches.append(pitch)
+        if self._save(key, mode):
+            self._captured_keys.append(key)
             self._still_since = None
 
-    def _save(self, pitch: float) -> bool:
+    def _save(self, key: np.ndarray, mode: str) -> bool:
         if self._cloud is None or self._image is None or self._info is None:
             self.get_logger().warn(
                 "still, but inputs are incomplete "
@@ -185,14 +255,32 @@ class SnapshotCaptureNode(Node):
             )
             return False
 
-        index = len(self._captured_pitches)
-        stem = self._out / f"pose{index:02d}_boom{pitch:+06.1f}"
+        index = len(self._captured_keys)
+        if mode == "bucket":
+            stem = self._out / f"pose{index:02d}_bucket{key[0]:+05.2f}_{key[1]:+05.2f}"
+        else:
+            stem = self._out / f"pose{index:02d}_boom{key[0]:+06.1f}"
         points = extract_xyz(self._cloud, 0)
         np.save(f"{stem}_cloud.npy", points.astype(np.float32))
         Path(f"{stem}_image.jpg").write_bytes(bytes(self._image.data))
 
         meta = {
-            "boom_pitch_deg": pitch,
+            "mode": mode,
+            "boom_pitch_deg": self._boom_pitch_deg(),
+            "bucket_position": (
+                {
+                    "frame_id": self._bucket.header.frame_id,
+                    "xyz": [
+                        float(self._bucket.point.x),
+                        float(self._bucket.point.y),
+                        float(self._bucket.point.z),
+                    ],
+                    "note": "z is always 0 from this FK; use the fitted ground "
+                            "plane height when the tip is resting on the ground",
+                }
+                if self._bucket is not None
+                else None
+            ),
             "cloud_frame": self._cloud.header.frame_id,
             "cloud_points": int(points.shape[0]),
             "image_topic": self._p("topics.image_in"),
@@ -209,7 +297,8 @@ class SnapshotCaptureNode(Node):
 
         size_mb = (points.nbytes + len(self._image.data)) / 1e6
         self.get_logger().info(
-            f"pose {index} captured at boom {pitch:+.1f} deg "
+            f"pose {index} captured ({mode} "
+            f"{np.array2string(key, precision=2)}) "
             f"({points.shape[0]} pts, {size_mb:.1f} MB) -> {stem.name}  "
             f"[{index + 1}/{self._p('capture.target_poses')}]"
         )
