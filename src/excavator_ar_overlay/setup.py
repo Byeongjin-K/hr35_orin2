@@ -26,6 +26,7 @@ setup(
     entry_points={
         "console_scripts": [
             "lidar_projection_node = excavator_ar_overlay.lidar_projection_node:main",
+            "snapshot_capture_node = excavator_ar_overlay.snapshot_capture_node:main",
         ],
     },
 )
