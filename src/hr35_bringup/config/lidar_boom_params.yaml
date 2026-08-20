@@ -12,7 +12,7 @@ lidar_boom:
       # lidar_mode[optional]: resolution and rate
       lidar_mode: ''
       # timestamp_mode[optional]: method used to timestamp measurements
-      timestamp_mode: ''
+      timestamp_mode: 'TIME_FROM_ROS_TIME'
       # ptp_utc_tai_offset[optional]: UTC/TAI offset in seconds
       ptp_utc_tai_offset: -37.0
       # udp_profile_lidar[optional]: lidar packet profile
