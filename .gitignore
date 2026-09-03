@@ -19,3 +19,97 @@ __pycache__/
 # OS
 .DS_Store
 Thumbs.db
+
+# ══════════════════════════════════════════════════════════════
+# 공통 관리 규약 v1 (2026-09-03)
+# 적용 대상: 본인(Byeongjin-K)이 소유한 repo에만 적용한다.
+#            공유받은 repo에는 절대 적용하지 않는다.
+#
+#   L1 텍스트/코드/노트   → git + GitHub (크기 무관 추적)
+#   L2 대용량 바이너리     → Google Drive (아래 패턴으로 git 제외)
+#   L3 캐시/빌드/시크릿    → 어디에도 동기화하지 않음
+#
+# 예외적으로 꼭 커밋해야 하면: git add -f <파일>
+# ══════════════════════════════════════════════════════════════
+
+# ── L2: 문서 산출물 (원본은 md/tex, 이들은 렌더링 결과물) ──
+*.hwp
+*.hwpx
+*.doc
+*.docx
+*.ppt
+*.pptx
+*.xls
+*.xlsx
+*.pdf
+
+# ── L2: 압축/아카이브 ──
+*.zip
+*.7z
+*.rar
+*.tar
+*.tar.gz
+*.tgz
+
+# ── L2: 미디어 ──
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.wmv
+*.m4a
+*.mp3
+*.wav
+*.flac
+
+# ── L2: 데이터/모델/로봇 산출물 ──
+*.bag
+*.db3
+*.pcd
+*.ply
+*.pth
+*.ckpt
+*.onnx
+*.engine
+*.pkl
+*.npz
+
+# ── L3: 시크릿 (절대 커밋 금지) ──
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+token.json
+
+# ── L3: 파이썬 ──
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+ENV/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ── L3: Node ──
+node_modules/
+.npm/
+
+# ── L3: 빌드 산출물 ──
+build/
+dist/
+install/
+log/
+
+# ── L3: OS / 편집기 임시파일 ──
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+~$*
+*.tmp
+*.bak
