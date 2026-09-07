@@ -110,24 +110,24 @@ python3 src/excavator_ar_overlay/scripts/solve_extrinsic_pnp.py --grid shot00
 # -> ..._grid.png 를 열어 100 px 격자 위에서 좌표를 읽는다
 ```
 
-**3D** — 같은 캡처의 클라우드에서 타깃 클러스터를 잡는다:
+**3D** — 같은 캡처의 클라우드에서 타깃을 잡는다. 대략의 위치만 알려주면 된다:
 ```bash
-python3 - <<'PY'
-import numpy as np, json
-stem = '/home/kimm/data/lidar_cam_calib_YYYYMMDD/shot00_boom-046.0'
-pts = np.load(stem+'_cloud.npy')          # 클라우드는 헤더 프레임(=gm_os_lidar 체인)
-# 대략적인 관심 영역으로 자르고(전방 x, 좌우 y), 지면 위로 솟은 점만 남긴다
-sel = pts[(pts[:,0]>1.5)&(pts[:,0]<9)&(abs(pts[:,1])<4)]
-above = sel[sel[:,2] > np.percentile(sel[:,2], 20) + 0.25]
-print('cluster centroid:', above.mean(axis=0), 'n=', len(above))
-PY
+python3 src/excavator_ar_overlay/scripts/solve_extrinsic_pnp.py \
+    --target shot00 --near 2.5,-1.0 [--radius 1.0]
 ```
-접지점의 z 는 세션에서 적합한 지면 평면 값(2026-08-18 기준 `z = 0.155 m`)을 쓴다.
-클러스터가 여러 개면 예상 위치에 가장 가까운 것을 고른다.
+출력은 이렇게 나온다 — `xyz` 를 그대로 `pairs.json` 에 붙여 넣는다:
+```
+shot00_boom-046.0: 332 points above local ground (z = 0.155 m)
+  ground contact in gm_swing_axis: [2.512, -0.987, 0.155]
+  pairs.json entry: {"px": [?, ?], "xyz": [2.512, -0.987, 0.155], "note": "..."}
+```
+도구가 하는 일: 클라우드를 `gm_os_lidar` → `gm_swing_axis` 로 옮기고(변환은 캡처
+시각에 meta.json 에 얼려져 있다), `--near` 주변 반경 안에서 국소 지면 높이를 잡고,
+그보다 0.25 m 이상 솟은 점 무리의 중심을 타깃으로 본다. 접지점의 z 는 전역 평면이
+아니라 **국소 지면**에서 온다 — 부지가 평평하지 않기 때문이다.
 
-> 클라우드는 라이다 프레임 기준이다. 대응점의 3D 는 **`gm_swing_axis` 기준**이어야
-> 하므로, meta.json 의 `transforms` 에 얼려둔 `map→gm_os_lidar` 와 `map→gm_swing_axis`
-> 로 변환해서 넣는다. 이 변환은 캡처 시각에 고정돼 있으므로 오프라인으로 정확히 된다.
+`no target found within ...` 가 나오면 `--near` 추정이 틀렸거나 타깃이 너무 낮은
+것이다. `--radius` 를 키워 다시 시도한다.
 
 `pairs.json`:
 ```json

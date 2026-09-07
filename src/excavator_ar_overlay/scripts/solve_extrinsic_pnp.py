@@ -74,6 +74,41 @@ def draw_grid(stem: str, step: int = 100) -> str:
     return out
 
 
+def target_3d(stem: str, near_xy, radius: float) -> None:
+    """Print the 3D half of a correspondence for the target near ``near_xy``.
+
+    The cloud is stored in the LiDAR frame, but the extrinsic is solved in
+    gm_swing_axis, so the transform frozen with the capture does the conversion.
+    gm_os_lidar is used rather than the cloud's own header frame: the header
+    hangs off a hardcoded placeholder that the 2026-08-18 session measured as
+    3.128 m of ground-height drift against 0.029 m for the kinematic chain.
+    """
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+    from excavator_ar_overlay.target_pick import find_target, points_between_frames
+
+    meta = json.load(open(f"{stem}_meta.json"))
+    cloud = np.load(f"{stem}_cloud.npy")
+    frames = meta["transforms"]
+    for name in ("gm_os_lidar", "gm_swing_axis"):
+        if "error" in frames.get(name, {"error": "missing"}):
+            sys.exit(f"capture has no usable {name} transform; cannot place the target")
+    anchored = points_between_frames(cloud, frames["gm_os_lidar"], frames["gm_swing_axis"])
+
+    found = find_target(anchored, near_xy, search_radius_m=radius)
+    if found is None:
+        sys.exit(
+            f"no target found within {radius} m of {tuple(near_xy)} in {os.path.basename(stem)}; "
+            f"widen --radius or check the guess"
+        )
+    base = found["base_xyz"]
+    print(f"{os.path.basename(stem)}: {found['n_points']} points above local ground "
+          f"(z = {found['ground_z']:.3f} m)")
+    print(f"  ground contact in gm_swing_axis: "
+          f"[{base[0]:.3f}, {base[1]:.3f}, {base[2]:.3f}]")
+    print(f'  pairs.json entry: {{"px": [?, ?], "xyz": [{base[0]:.3f}, {base[1]:.3f}, '
+          f'{base[2]:.3f}], "note": "{os.path.basename(stem)} target base"}}')
+
+
 def pixel_bounds_error(pairs: "list[dict]", width: int, height: int) -> "str | None":
     """Reject correspondences whose pixel is not inside the image.
 
@@ -176,8 +211,20 @@ def main() -> None:
     ap.add_argument("--grid", metavar="POSE", help="write a coordinate grid overlay")
     ap.add_argument("--pairs", metavar="JSON", help="correspondence file")
     ap.add_argument("--pose", default="pose06", help="capture to solve against")
+    ap.add_argument("--target", metavar="POSE",
+                    help="print the 3D half of a correspondence from this capture")
+    ap.add_argument("--near", metavar="X,Y",
+                    help="rough position of the target in gm_swing_axis, e.g. 2.5,-1.0")
+    ap.add_argument("--radius", type=float, default=1.0,
+                    help="search radius around --near [m]")
     args = ap.parse_args()
 
+    if args.target:
+        if not args.near:
+            ap.error("--target needs --near X,Y")
+        near = [float(v) for v in args.near.split(",")]
+        target_3d(find_pose(args.target), near, args.radius)
+        return
     if args.grid:
         print(draw_grid(find_pose(args.grid)))
         return
