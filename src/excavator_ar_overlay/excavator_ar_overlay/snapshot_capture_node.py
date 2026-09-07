@@ -22,6 +22,7 @@ import json
 import math
 from pathlib import Path
 
+import cv2
 import numpy as np
 import rclpy
 from rclpy.node import Node
@@ -34,6 +35,11 @@ from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
 
 from excavator_ar_overlay import params as ar_params
+from excavator_ar_overlay.capture_trigger import (
+    FreshnessGate,
+    IntervalTrigger,
+    exposure_warning,
+)
 from excavator_ar_overlay.pointcloud import extract_xyz
 
 _SENSOR_QOS = QoSProfile(
@@ -67,6 +73,13 @@ class SnapshotCaptureNode(Node):
         self._image: "CompressedImage | None" = None
         self._info: "CameraInfo | None" = None
         self._cloud: "PointCloud2 | None" = None
+        # Sequence numbers rather than stamps: the two streams run on clocks
+        # 1.787e9 s apart, so "did a new frame arrive" is only answerable by
+        # counting arrivals.
+        self._cloud_seq = 0
+        self._image_seq = 0
+        self._gate = FreshnessGate()
+        self._interval = IntervalTrigger(float(self._p("capture.interval_seconds")))
 
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self)
@@ -175,12 +188,14 @@ class SnapshotCaptureNode(Node):
 
     def _on_image(self, msg: CompressedImage) -> None:
         self._image = msg
+        self._image_seq += 1
 
     def _on_info(self, msg: CameraInfo) -> None:
         self._info = msg
 
     def _on_cloud(self, msg: PointCloud2) -> None:
         self._cloud = msg
+        self._cloud_seq += 1
 
     def _on_bucket(self, msg) -> None:
         self._bucket = msg
@@ -219,24 +234,16 @@ class SnapshotCaptureNode(Node):
         state, so the trigger has to be time based.
         """
         now = self.get_clock().now().nanoseconds / 1e9
-        period = float(self._p("capture.interval_seconds"))
-        if self._still_since is None:
-            self._still_since = now
-            self.get_logger().info(
-                f"interval mode: a shot every {period:.0f}s. "
-                f"Move the target between shots, then stand clear."
-            )
+        result = self._interval.tick(now)
+        if result.announce:
+            self.get_logger().info(result.announce)
+        if not result.fire:
             return
-        remaining = period - (now - self._still_since)
-        if remaining > 0:
-            if abs(remaining - round(remaining)) < 0.13 and remaining >= 1:
-                self.get_logger().info(f"  {int(round(remaining))}...")
-            return
-        self._still_since = now
-        index = len(self._captured_keys)
-        key = np.array([float(index)])
+        key = np.array([float(len(self._captured_keys))])
         if self._save(key, "interval"):
             self._captured_keys.append(key)
+        else:
+            self._interval.defer(now)
 
     def _tick(self) -> None:
         if self._p("capture.mode") == "interval":
@@ -294,6 +301,11 @@ class SnapshotCaptureNode(Node):
             )
             return False
 
+        reason = self._gate.reject_reason(self._cloud_seq, self._image_seq)
+        if reason is not None:
+            self.get_logger().warn(reason, throttle_duration_sec=5.0)
+            return False
+
         index = len(self._captured_keys)
         if mode == "bucket":
             stem = self._out / f"pose{index:02d}_bucket{key[0]:+05.2f}_{key[1]:+05.2f}"
@@ -303,6 +315,14 @@ class SnapshotCaptureNode(Node):
             stem = self._out / f"shot{index:02d}_boom{tag}"
         else:
             stem = self._out / f"pose{index:02d}_boom{key[0]:+06.1f}"
+        frame = cv2.imdecode(
+            np.frombuffer(bytes(self._image.data), np.uint8), cv2.IMREAD_GRAYSCALE
+        )
+        if frame is not None:
+            warning = exposure_warning(float(frame.mean()))
+            if warning is not None:
+                self.get_logger().warn(warning)
+
         points = extract_xyz(self._cloud, 0)
         np.save(f"{stem}_cloud.npy", points.astype(np.float32))
         Path(f"{stem}_image.jpg").write_bytes(bytes(self._image.data))
@@ -337,6 +357,7 @@ class SnapshotCaptureNode(Node):
             "transforms": self._freeze_transforms(),
         }
         Path(f"{stem}_meta.json").write_text(json.dumps(meta, indent=2))
+        self._gate.mark_saved(self._cloud_seq, self._image_seq)
 
         size_mb = (points.nbytes + len(self._image.data)) / 1e6
         self.get_logger().info(
