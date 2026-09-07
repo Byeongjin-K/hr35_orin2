@@ -65,12 +65,13 @@ def join(frame_times, pose_times, tolerance_s):
     return best
 
 
-def posed_frames(cache, name, pose_times, translations, quaternions, time_key, tolerance_s):
+def posed_frames(cache, name, pose_times, translations, quaternions, time_key, tolerance_s,
+                 time_offset=0.0):
     """Every frame of a window, posed into the SLAM world frame."""
     points = cache["points_" + name]
     counts = cache["counts_" + name]
     edges = np.concatenate([[0], np.cumsum(counts)])
-    frame_times = cache[time_key + name]
+    frame_times = cache[time_key + name] + time_offset
 
     matched = join(frame_times, pose_times, tolerance_s)
     posed, machines = [], []
@@ -91,7 +92,12 @@ def main():
     parser.add_argument("--trajectory", required=True, help="TUM file from the SLAM run")
     parser.add_argument("--cache", required=True, help="raw sensor-frame window cache")
     parser.add_argument("--window", action="append", required=True)
-    parser.add_argument("--time-key", choices=("auto", "header", "receive"), default="auto")
+    parser.add_argument("--time-key",
+                        choices=("auto", "header", "receive", "receive_abs"), default="auto")
+    parser.add_argument("--cache-time-offset", type=float, default=0.0,
+                        help="seconds to add to the cache's receive times; use the source "
+                             "bag's first receive timestamp when the trajectory was built "
+                             "from a restamped bag and therefore speaks absolute host time")
     parser.add_argument("--tolerance-s", type=float, default=0.05)
     parser.add_argument("--min-range-m", type=float, default=3.0)
     parser.add_argument("--max-range-m", type=float, default=20.0)
@@ -108,28 +114,36 @@ def main():
 
     # Which clock the trajectory speaks is a property of the SLAM tool's bag reader,
     # not something to assume: the cache carries both, so let the match rate decide.
-    keys = {"header": "t_header_", "receive": "t_"}
+    # Three candidates, because none of them is obviously right. The cache stores frame
+    # times as seconds elapsed from the start of the source bag and, separately, the
+    # sensor's own header stamps; a trajectory built from a RESTAMPED bag speaks absolute
+    # host epoch and matches neither until the bag's start time is added back.
+    keys = {"header": ("t_header_", 0.0),
+            "receive": ("t_", 0.0),
+            "receive_abs": ("t_", args.cache_time_offset)}
     if args.time_key == "auto":
         scored = {}
-        for label, prefix in keys.items():
+        for label, (prefix, offset) in keys.items():
             if prefix + args.window[0] not in cache:
                 continue
-            hits = join(cache[prefix + args.window[0]], pose_times, args.tolerance_s)
+            hits = join(cache[prefix + args.window[0]] + offset, pose_times, args.tolerance_s)
             scored[label] = int((hits >= 0).sum())
-            print("  time key %-8s matches %d/%d"
+            print("  time key %-12s matches %d/%d"
                   % (label, scored[label], cache[prefix + args.window[0]].size))
         if not scored or max(scored.values()) == 0:
-            raise SystemExit("no frame matched any pose on either clock; check the trajectory")
+            raise SystemExit("no frame matched any pose on any clock; check the trajectory "
+                             "and --cache-time-offset")
         chosen = max(scored, key=scored.get)
     else:
         chosen = args.time_key
-    prefix = keys[chosen]
+    prefix, offset = keys[chosen]
     print("using the %s clock" % chosen)
 
     windows = {}
     for name in args.window:
         posed, machines, matched, total = posed_frames(
-            cache, name, pose_times, translations, quaternions, prefix, args.tolerance_s)
+            cache, name, pose_times, translations, quaternions, prefix, args.tolerance_s,
+            time_offset=offset)
         if not posed:
             raise SystemExit("window %s matched no poses" % name)
         windows[name] = (posed, machines)
