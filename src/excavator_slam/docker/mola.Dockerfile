@@ -10,6 +10,12 @@
 FROM ros:humble-ros-base
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+      # The metapackage, not a hand-picked list. MOLA loads map and filter classes as
+      # runtime plugins named inside the pipeline YAML, so a missing package does not
+      # fail at startup - it throws on the first scan, discards every later one, and
+      # still exits 0 with an empty trajectory. Naming packages individually turns that
+      # into a guessing game; pulling the metapackage ends it.
+      ros-humble-mola \
       ros-humble-mola-lidar-odometry \
       # lidar3d-default.yaml builds its local map from a mola_metric_maps voxel class and
       # loads it as a plugin at runtime. Without this package the very first scan throws

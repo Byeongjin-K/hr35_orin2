@@ -93,7 +93,8 @@ def main():
     parser.add_argument("--cache", required=True, help="raw sensor-frame window cache")
     parser.add_argument("--window", action="append", required=True)
     parser.add_argument("--time-key",
-                        choices=("auto", "header", "receive", "receive_abs"), default="auto")
+                        choices=("auto", "header", "receive", "receive_abs", "header_abs"),
+                        default="auto")
     parser.add_argument("--cache-time-offset", type=float, default=0.0,
                         help="seconds to add to the cache's receive times; use the source "
                              "bag's first receive timestamp when the trajectory was built "
@@ -120,7 +121,8 @@ def main():
     # host epoch and matches neither until the bag's start time is added back.
     keys = {"header": ("t_header_", 0.0),
             "receive": ("t_", 0.0),
-            "receive_abs": ("t_", args.cache_time_offset)}
+            "receive_abs": ("t_", args.cache_time_offset),
+            "header_abs": ("t_header_", args.cache_time_offset)}
     if args.time_key == "auto":
         scored = {}
         for label, (prefix, offset) in keys.items():
