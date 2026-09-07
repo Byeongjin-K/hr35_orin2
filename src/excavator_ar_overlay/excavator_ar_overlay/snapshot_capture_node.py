@@ -25,6 +25,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
@@ -391,7 +392,10 @@ def main(args=None) -> None:
     node = SnapshotCaptureNode()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
+        # Ctrl-C is how a session ends, so it is a normal exit, not a crash:
+        # rclpy turns the signal into ExternalShutdownException and an
+        # uncaught one ends a field capture with a traceback and status 1.
         pass
     finally:
         node.destroy_node()
