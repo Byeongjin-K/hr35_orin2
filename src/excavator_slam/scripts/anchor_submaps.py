@@ -38,6 +38,7 @@ from excavator_slam.gnss_anchor import (  # noqa: E402
     map_to_world,
 )
 from excavator_slam.revisit_metric import revisit_consistency  # noqa: E402
+from excavator_slam.submaps import crop_around_machine  # noqa: E402
 
 
 def interpolate_angle(t, samples_t, samples_deg):
@@ -53,24 +54,14 @@ def wrap180(degrees):
     return (np.asarray(degrees, float) + 180.0) % 360.0 - 180.0
 
 
-def crop_map_frame(points, crop):
-    """Keep the terrain, drop the machine, in the gravity-aligned map frame.
-
-    Decided by measurement on window A of the 1104 bag, split in time (crop_study):
-    the HEIGHT BAND is what matters - replacing |z| <= 5 m with -2..+1 m takes the
-    median height disagreement from 0.309 m to 0.211 m and p90 from 1.548 m to
-    0.855 m - because the boom, arm and bucket sit above the terrain and sweep with
-    the cab. Pushing the NEAR crop out instead makes it monotonically worse (0.211 at
-    3 m, 0.260 at 5 m, 0.335 at 8 m, 0.362 at 10 m), so the near field is not the
-    contaminant: range only costs density (14.8 -> 2.3 points per cell) and lets any
-    attitude error grow linearly with distance. Whatever crop is used here must be
-    used for SLAM too, or the comparison is rigged.
-    """
-    min_r, max_r, z_lo, z_hi = crop
-    radius = np.hypot(points[:, 0], points[:, 1])
-    keep = ((radius >= min_r) & (radius <= max_r)
-            & (points[:, 2] >= z_lo) & (points[:, 2] <= z_hi))
-    return points[keep]
+# CROP STUDY (window A of the 1104 bag, split in time). The height band is what
+# matters: replacing |z| <= 5 m with -2..+1 m took the median height disagreement from
+# 0.309 m to 0.211 m and p90 from 1.548 m to 0.855 m, because the boom, arm and bucket
+# sit above the terrain and sweep with the cab. Pushing the NEAR crop out instead made
+# it monotonically worse - 0.211 at 3 m, 0.260 at 5 m, 0.335 at 8 m, 0.362 at 10 m - so
+# the near field is not the contaminant; range only costs density (14.8 -> 2.3 points
+# per cell) and lets attitude error grow with distance. The crop itself lives in
+# excavator_slam.submaps so that SLAM is cropped by the identical code.
 
 
 def frame_slices(counts):
@@ -103,7 +94,8 @@ def to_world(cache, name, params, mirrored, frame_filter=None, crop=None):
         origin, yaw = compute_anchor(antenna, cab, float(swing_deg[index]), params)
         frame = points[span].astype(float)
         if crop is not None:
-            frame = crop_map_frame(frame, crop)
+            # The swing axis is the map frame's origin, so the machine sits at (0, 0).
+            frame = crop_around_machine(frame, (0.0, 0.0), *crop)
         if frame.shape[0] == 0:
             continue
         out.append(map_to_world(frame, origin, yaw))
