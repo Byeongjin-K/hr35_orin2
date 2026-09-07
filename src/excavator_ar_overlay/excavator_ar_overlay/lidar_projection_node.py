@@ -21,6 +21,7 @@ from __future__ import annotations
 import rclpy
 from geometry_msgs.msg import TransformStamped
 from rcl_interfaces.msg import SetParametersResult
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from sensor_msgs.msg import CameraInfo, CompressedImage, PointCloud2
 from tf2_ros import StaticTransformBroadcaster
@@ -207,7 +208,9 @@ def main(args=None) -> None:
     node = LidarProjectionNode()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
+        # Ctrl-C is a normal exit; rclpy raises ExternalShutdownException for it
+        # and an uncaught one leaves a traceback and status 1 behind.
         pass
     finally:
         node.destroy_node()
