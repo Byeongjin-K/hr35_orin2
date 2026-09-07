@@ -227,6 +227,8 @@ def revisit_consistency(
     Returns a dict:
       overlap_cells         cells seen by both passes at zero shift
       cost_cells            reference cells the shift search was scored on
+      saturated             the best offset sits on the search boundary, so the
+                            displacement is a lower bound and the gain is understated
       horizontal_m          xy shift that best re-registers revisit onto first
       shift_xy_m            that shift, signed, as (dx, dy) to apply to revisit
       yaw_deg               yaw of the same re-registration
@@ -274,8 +276,21 @@ def revisit_consistency(
 
     # Reference cells for the search: first-pass cells whose whole search box stays
     # inside the revisit coverage, so every candidate shift is scored on the SAME set.
-    half_span = 0.5 * float(np.hypot(high[0] - low[0], high[1] - low[1]))
-    yaw_swing_m = np.radians(max(yaw_range_deg, 0.0)) * half_span
+    # Rotation is taken about the centroid of the FIRST pass's coverage, not about the
+    # reference set's own mean. The reference set is what erosion produces, and the
+    # erosion margin depends on how far a rotation can move a reference cell - so
+    # deriving the centre from the reference set would make the margin depend on
+    # itself. Anchoring on coverage breaks that loop and bounds the yaw displacement
+    # exactly: no reference cell can lie further from this centre than the coverage
+    # radius. The earlier version used the grid's half diagonal, which over-erodes
+    # badly here, because the grid spans BOTH passes while each pass covers only part
+    # of it.
+    covered_rows, covered_cols = np.nonzero(first_map.covered)
+    centre_x = float(first_map.centres_x[covered_cols].mean())
+    centre_y = float(first_map.centres_y[covered_rows].mean())
+    coverage_radius_m = float(np.hypot(first_map.centres_x[covered_cols] - centre_x,
+                                       first_map.centres_y[covered_rows] - centre_y).max())
+    yaw_swing_m = np.radians(max(yaw_range_deg, 0.0)) * coverage_radius_m
     margin = int(np.ceil((search_radius_m + yaw_swing_m) / cell_m)) + 2
     fixed = first_map.covered & _erode(revisit_map.covered, margin)
     cost_cells = int(fixed.sum())
@@ -291,7 +306,6 @@ def revisit_consistency(
     # Both sides come off the same hole-filled, identically smoothed surface, so the
     # match is like for like; _smooth explains why the kernel has to be shared.
     ref_h = first_map.surface[rows, cols]
-    centre_x, centre_y = float(ref_x.mean()), float(ref_y.mean())
 
     def cost(dx, dy, yaw_deg):
         if yaw_deg == 0.0:
@@ -312,12 +326,23 @@ def revisit_consistency(
     (offset_x, offset_y, offset_yaw), residual = _search_shift(
         cost, cell_m, search_radius_m, yaw_range_deg)
 
+    # An answer pinned against the search wall is a LOWER BOUND, not a measurement,
+    # and it drags the residual gain down with it because the minimum was never
+    # reached. Measured on the real bag, the deployed baseline came back with both
+    # components at the reach and yaw at its range end; read as a number that is a
+    # 1.69 m displacement, read honestly it is "at least 1.69 m". The caller cannot
+    # tell those apart from the numbers alone, so the metric says it.
+    reach_m = float(np.ceil(search_radius_m / cell_m) * cell_m)
+    saturated = bool(max(abs(offset_x), abs(offset_y)) >= reach_m - 1e-9
+                     or (yaw_range_deg > 0.0 and abs(offset_yaw) >= yaw_range_deg - 1e-9))
+
     # The search moves the SAMPLING point; the correction to apply to the revisit
     # pass is the opposite of it.
     nn_distance = cKDTree(first).query(revisit, k=1)[0]
     return {
         "overlap_cells": overlap_cells,
         "cost_cells": cost_cells,
+        "saturated": saturated,
         "horizontal_m": float(np.hypot(offset_x, offset_y)),
         "shift_xy_m": (float(-offset_x), float(-offset_y)),
         "yaw_deg": float(-offset_yaw),

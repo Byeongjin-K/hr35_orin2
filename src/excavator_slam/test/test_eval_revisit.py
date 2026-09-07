@@ -84,3 +84,31 @@ def test_rejects_clouds_without_overlap():
     revisit = _site(np.random.default_rng(2)) + np.array([100.0, 0.0, 0.0])
     with pytest.raises(ValueError, match="overlap"):
         revisit_consistency(first, revisit, cell_m=0.15)
+
+
+def test_a_displacement_beyond_the_search_box_is_flagged_saturated():
+    """An answer pinned against the search wall is a lower bound, not a measurement.
+
+    On the real 1104 bag the baseline came back with both shift components at exactly
+    the box limit and yaw exactly at its range end, which reads like a 1.69 m estimate
+    but is really "at least 1.69 m". A caller that cannot tell the two apart will quote
+    a saturated number as a result, so the metric has to say so itself.
+    """
+    first = _site(np.random.default_rng(1))
+    revisit = _site(np.random.default_rng(2)) + np.array([2.5, 0.0, 0.0])
+    r = revisit_consistency(first, revisit, cell_m=0.15, search_radius_m=1.0)
+    assert r["saturated"] is True
+
+
+def test_a_displacement_inside_the_search_box_is_not_flagged():
+    first = _site(np.random.default_rng(1))
+    revisit = _site(np.random.default_rng(2)) + np.array([0.30, 0.10, 0.04])
+    r = revisit_consistency(first, revisit, cell_m=0.15, search_radius_m=1.0)
+    assert r["saturated"] is False
+
+
+def test_aligned_passes_are_not_flagged_saturated():
+    first = _site(np.random.default_rng(1))
+    revisit = _site(np.random.default_rng(2))
+    r = revisit_consistency(first, revisit, cell_m=0.15, search_radius_m=1.0)
+    assert r["saturated"] is False
