@@ -74,9 +74,37 @@ def draw_grid(stem: str, step: int = 100) -> str:
     return out
 
 
+def pixel_bounds_error(pairs: "list[dict]", width: int, height: int) -> "str | None":
+    """Reject correspondences whose pixel is not inside the image.
+
+    Picked coordinates are typed by hand off the grid overlay, so a transposed
+    or mistyped pair lands outside the frame. solvePnP happily consumes it and
+    returns a plausible-looking pose, which is exactly the failure mode this
+    whole tool exists to avoid.
+    """
+    bad = [
+        (i, p["px"])
+        for i, p in enumerate(pairs)
+        if not (0 <= p["px"][0] <= width - 1 and 0 <= p["px"][1] <= height - 1)
+    ]
+    if not bad:
+        return None
+    listed = ", ".join(f"point {i} at ({px[0]}, {px[1]})" for i, px in bad)
+    return (
+        f"{len(bad)} of {len(pairs)} correspondences fall outside the "
+        f"{width}x{height} image: {listed}. Check for swapped u/v or a typo."
+    )
+
+
 def solve(stem: str, pairs: "list[dict]") -> None:
     meta = json.load(open(f"{stem}_meta.json"))
     K = np.array(meta["camera_info"]["k"], dtype=np.float64).reshape(3, 3)
+    bounds = pixel_bounds_error(
+        pairs, int(meta["camera_info"]["width"]), int(meta["camera_info"]["height"])
+    )
+    if bounds:
+        sys.exit(bounds)
+
     obj = np.array([p["xyz"] for p in pairs], dtype=np.float64)
     img = np.array([p["px"] for p in pairs], dtype=np.float64)
 
