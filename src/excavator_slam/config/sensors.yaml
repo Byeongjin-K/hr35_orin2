@@ -1,0 +1,13 @@
+# Sensor wiring for the SLAM front end. Parameterized so the cabin LiDAR can replace
+# the boom LiDAR without code changes (decision D1). All recorded bags carry the boom
+# LiDAR only, so offline development defaults to it.
+excavator_slam:
+  ros__parameters:
+    points_topic: /lidar_boom/points
+    imu_topic: /lidar_boom/imu
+    lidar_frame: lidar_boom/os_sensor
+    imu_frame: lidar_boom/os_imu
+    gps_topic: /gps_msg
+    gps_att_topic: /gps_att
+    swing_encoder_topic: /excavator/sensors/swing_encoder_output
+    kine_topic: /kine_data
