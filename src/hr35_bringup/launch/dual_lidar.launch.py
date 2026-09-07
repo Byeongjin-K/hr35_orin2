@@ -36,7 +36,10 @@ def generate_launch_description():
     rviz_enable = LaunchConfiguration('viz')
     rviz_enable_arg = DeclareLaunchArgument(
         'viz',
-        default_value='True',
+        # Headless by default: this launch runs on the machine, where RViz competes
+        # for the CPU and GPU the perception stack needs, and a field bring-up has no
+        # display at all. Pass viz:=true when a window is actually wanted.
+        default_value='False',
     )
 
     cabin_driver = LifecycleNode(
