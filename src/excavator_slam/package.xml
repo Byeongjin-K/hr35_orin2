@@ -7,6 +7,8 @@
   <maintainer email="kimbj0607@gmail.com">Byeongjin Kim</maintainer>
   <license>Proprietary</license>
 
+  <depend>python3-numpy</depend>
+  <depend>python3-scipy</depend>
   <depend>rclpy</depend>
   <depend>sensor_msgs</depend>
   <depend>nav_msgs</depend>
