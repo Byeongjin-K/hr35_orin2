@@ -175,6 +175,16 @@ def main():
         first, _ = to_world(cache, first_name, params, args.mirrored, crop=crop)
         revisit, _ = to_world(cache, revisit_name, params, args.mirrored, crop=crop)
         print("crop", crop, "first", first.shape[0], "revisit", revisit.shape[0])
+        # Save before scoring. The comparison and the saved clouds are the same work,
+        # and returning early without writing them meant a later re-score of the
+        # baseline had nothing to read while the SLAM side did - an asymmetry that
+        # would quietly turn into "the baseline could not be measured".
+        if args.out_prefix:
+            for name, cloud in ((first_name, first), (revisit_name, revisit)):
+                out = args.out_prefix + name + ".npy"
+                Path(out).parent.mkdir(parents=True, exist_ok=True)
+                np.save(out, cloud.astype(np.float32))
+                print("wrote", out)
         result = revisit_consistency(first, revisit, cell_m=args.cell_m)
         gain = ((result["residual_rms_before_m"] - result["residual_rms_m"])
                 / result["residual_rms_before_m"])
