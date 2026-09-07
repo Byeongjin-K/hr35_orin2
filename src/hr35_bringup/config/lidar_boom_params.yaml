@@ -10,13 +10,20 @@ lidar_boom:
       # mtp_main[optional]: if true, then configure and reinit the sensor
       mtp_main: false
       # lidar_mode[optional]: resolution and rate
-      lidar_mode: ''
+      # Pinned rather than inherited. An empty value means "use whatever the sensor
+      # has stored", and persist_config is false, so a sensor swap or a firmware
+      # reset would silently change the resolution. 512x10 is what the boom sensor
+      # reports in its own recorded metadata; the cabin is set to match so the two
+      # LiDARs produce comparable data.
+      lidar_mode: '512x10'
       # timestamp_mode[optional]: method used to timestamp measurements
       timestamp_mode: 'TIME_FROM_ROS_TIME'
       # ptp_utc_tai_offset[optional]: UTC/TAI offset in seconds
       ptp_utc_tai_offset: -37.0
       # udp_profile_lidar[optional]: lidar packet profile
-      udp_profile_lidar: ''
+      # Same reason as lidar_mode: this is the profile the boom sensor already uses,
+      # made explicit. It carries range, reflectivity, signal and near-IR.
+      udp_profile_lidar: 'RNG19_RFL8_SIG16_NIR16'
       # metadata[optional]: path to save metadata file to
       metadata: ''
       # lidar_port[optional]: port value should be in the range [0, 65535]
@@ -34,7 +41,14 @@ lidar_boom:
       # pub_static_tf[optional]: when this flag is set to True, the driver will broadcast the TF transforms
       pub_static_tf: true
       # proc_mask[optional]: use any combination of the 4 flags IMG, PCL, IMU and SCAN
-      proc_mask: IMU|PCL|SCAN|IMG|RAW
+      # Only the point cloud and the IMU are consumed. Verified on the running system:
+      # /lidar_boom/points has 2 subscribers and /lidar_boom/imu has 1, while scan,
+      # range/signal/nearir/reflec_image and lidar/imu_packets all have 0. Producing
+      # them costs CPU and DDS bandwidth for nothing, doubled across two sensors.
+      # NOTE: dropping RAW also removes the packet topics, so a future recording
+      # cannot be re-processed into points at different driver settings. Add RAW back
+      # if that ever becomes wanted.
+      proc_mask: IMU|PCL
       # scan_ring[optional]: select which beam of the LidarScan to use
       scan_ring: 0
       # use_system_default_qos[optional]: if false, data are published with sensor data QoS
@@ -48,7 +62,10 @@ lidar_boom:
       # persist_config[optional]: request the sensor to persist settings
       persist_config: false
       # attempt_config[optional]: attempting to reconnect to the sensor after connection loss
-      attempt_reconnect: false
+      # Was false while max_failed_reconnect_attempts sat at 2147483647 - the two
+      # settings contradicted each other. On a machine in the field a brief network
+      # or power glitch otherwise leaves the LiDAR dead until someone restarts it.
+      attempt_reconnect: true
       # dormant_period_between_reconnects[optional]: wait time in seconds between reconnection attempts
       dormant_period_between_reconnects: 1.0
       # max_failed_reconnect_attempts[optional]: maximum number of attempts
