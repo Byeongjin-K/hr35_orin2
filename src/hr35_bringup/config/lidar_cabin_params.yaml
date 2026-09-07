@@ -12,7 +12,11 @@ lidar_cabin:
       # lidar_mode[optional]: resolution and rate
       lidar_mode: ''
       # timestamp_mode[optional]: method used to timestamp measurements
-      timestamp_mode: ''
+      # Match the boom sensor. Left empty, the driver falls back to the sensor's own
+      # oscillator, and a recording made that way cannot be fed to a SLAM tool: the
+      # clouds land ~1.76e9 s away from the GNSS on the host clock, so the tool drops
+      # every scan after the first. That cost a full debugging session on the 2025 bags.
+      timestamp_mode: 'TIME_FROM_ROS_TIME'
       # ptp_utc_tai_offset[optional]: UTC/TAI offset in seconds
       ptp_utc_tai_offset: -37.0
       # udp_profile_lidar[optional]: lidar packet profile
