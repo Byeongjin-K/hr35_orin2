@@ -217,10 +217,42 @@ sudo bash ~/robot_ws/scripts/zedx_recover.sh          # 열리는 즉시 중단
 데몬을 3회 이상 재시작했지만 패닉은 나지 않았으므로(userspace `rmmod` 가 먼저 포기한 것으로
 보인다) 실측된 위험은 아니다. 그래도 대가가 큰 쪽이므로 가드는 유지한다.
 
-### 아직 검증되지 않은 것 (정직하게)
+### 실검증 (2026-09-09 13:40, 동작 중인 캐빈 카메라로)
 
-3·5 단계가 **실제 wedge 상태에서** 카메라를 되살리는지는 증명되지 않았다. 검증하려면 wedge 를
-만들어야 하고, 그건 동작 중인 카메라를 깨는 일이다. refcnt 복구(4단계) 자체는 증명됐다.
+증거: `~/data/zedx_validation-20260909-134011/`
+
+1. **clean stop** — Ctrl-C 한 번으로 `=== CLOSING CAMERA ===` → `process has finished cleanly`.
+   `escalating to 'SIGTERM'` 0회, 커널 손상 0회, `refcnt 2 -> 0`, `VERDICT=HEALTHY`.
+2. **5단계가 진짜 재로드를 한다** — `systemctl restart zed_x_daemon` 직후 커널이 **전체 재프로브**를
+   했다(부팅 때와 같은 순서):
+
+   ```
+   13:40:17 sl_max96712 9-0029: gmsl_pipeline_setup: Camera connected to GMSL port 2 / 3
+   13:40:17 sl_max96712 9-0029: pipes_setup: camera pipeline operational
+   13:40:22 zedx 9-0020 / 9-0028: zedx_probe: Serial Number : 45233238
+   13:40:23 zedx 10-0020 / 10-0028: zedx_probe: Serial Number : 49749405
+   ```
+
+   데몬 로그에 `is in use` / `File exists` 0건 → rmmod/insmod 가 조용히 성공했다.
+   **refcnt >= 0 이면 벤더 복구 경로는 실제로 작동한다**(refcnt 가 음수일 때만 무효화된다).
+3. **재로드 직후 SDK 가 카메라를 연다** — 두 카메라 모두 `AVAILABLE`,
+   `OPEN_RESULT SUCCESS`, `GRAB SUCCESS`, `FRAME 1920 1200`.
+4. **재런치** — `ros2 topic hz` `average rate: 9.844`.
+
+### 그래도 남은 구멍 (정직하게)
+
+- 3단계 `rebind-sensors` 는 한 번도 실행되지 않았다(2단계에서 이미 복구됐거나 필요가 없었다).
+- 위 검증은 **정상 상태**에서 4→5 단계의 *메커니즘*을 증명한 것이다. refcnt 복구(4)와 모듈
+  재로드(5)가 각각 작동함은 증명됐지만, **실제 wedge 상태에서 그 조합이 argus/VI 를 풀어내는지**는
+  여전히 미증명이다. 다만 남은 논리적 간극은 "부팅과 동일한 전체 재프로브가 wedge 를 푸는가" 하나뿐이고,
+  재부팅이 항상 고쳤다는 사실이 그 쪽을 강하게 지지한다.
+
+### 부수 발견: 5초 타임아웃은 정상 종료에서는 문제가 아니다
+
+이번 clean stop 은 **옛 5초 설정 그대로**였는데도 에스컬레이션 없이 끝났다. 즉 `sl::Camera::close()`
+는 정상 상태에서 5초 안에 끝난다. 5초 초과는 **argus 가 이미 죽어 close 가 매달릴 때**만 일어난다
+(2026-09-09 12:00 관측). 따라서 30초 타임아웃은 평상시를 위한 것이 아니라 **그 병적인 경우에
+SIGKILL 로 카메라를 못 놓고 죽는 것을 막는 안전장치**다.
 
 ## 8. 예방 — 애초에 wedge 를 만들지 않기
 
