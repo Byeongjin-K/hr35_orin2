@@ -63,13 +63,19 @@
     "tf_time_offset": 1e-6,
     // Extension modules
     "extension_modules": [
-      "libmemory_monitor.so"
-      // Both viewers are off for offline benchmarking. libstandard_viewer.so opens a
-      // GLFW window and cannot run headless at all (glfw error 65544: DISPLAY missing),
-      // and librviz_viewer.so costs publishing work that would distort the real-time
-      // factor this run exists to measure. Re-enable librviz_viewer.so for live use.
+      "libmemory_monitor.so",
+      // libstandard_viewer.so stays off: it opens a GLFW window and cannot run headless
+      // (glfw error 65544, DISPLAY missing).
+      //
+      // librviz_viewer.so is ON and is NOT optional, despite the name. Its symbol table
+      // is where the ROS publishers live - create_publisher_factory for PoseStamped,
+      // Odometry, PointCloud2 and TFMessage - while libstandard_viewer.so has none and
+      // libglim_ros.so publishes only statistics_msgs/MetricsMessage. Turning it off to
+      // keep a benchmark clean cost the entire pose stream: the node ran perfectly and
+      // advertised nothing but /rosout and /parameter_events, so there was no rate to
+      // measure and nothing for the global map to consume either.
       // "libstandard_viewer.so",
-      // "librviz_viewer.so"
+      "librviz_viewer.so"
       // "libimu_validator.so"
     ],
     // Topics
