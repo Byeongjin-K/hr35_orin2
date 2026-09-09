@@ -107,3 +107,43 @@ python3 -c "import pyzed.sl as sl; print([(d.serial_number, str(d.camera_state))
 # 실제 스트림 확인
 ros2 topic hz /zedx_cabin/zedx_cabin_node/left/image_rect_color
 ```
+
+## 6. 확인된 재발 (2026-09-09) — 사다리 2·3단계는 refcnt 음수면 쓸모없다
+
+같은 고장이 하루 만에 재발했다. `zedx_health.sh` 가 30초 만에 `REBOOT_REQUIRED` 를 냈고,
+그 판정이 맞다는 것을 사다리를 끝까지 돌려서 증거로 확인했다.
+
+- 2단계 `systemctl restart nvargus-daemon` → 재시작 성공, device list 는 두 카메라 모두 `AVAILABLE`
+  로 보였지만 `open()` 은 **반환하지 않고 멈춤**(probe `EXIT=124` = timeout kill).
+- 3단계 `systemctl restart zed_x_daemon` → 로그는 `ZED-X Driver loaded` 라고 했지만 실제로는:
+  ```
+  rmmod sl_max9295  -> ERROR: Module sl_max9295 is in use by: sl_zedx
+  insmod sl_zedx.ko -> ERROR: could not insert ...: File exists
+  ```
+  `open()` 역시 다시 행 (`EXIT=124`).
+
+**따라서 `cat /sys/module/sl_zedx/refcnt` 가 음수면 2·3단계는 건너뛰고 바로 재부팅한다.**
+시도할 때마다 open 이 90초씩 멈추고 언더플로만 더 쌓인다(이번에 8회 추가됨).
+
+### 망가지는 순간은 "띄울 때"가 아니라 "내릴 때"다
+
+이번 부팅의 커널 로그 순서:
+
+```
+09:59:46  nvargus 세션 시작 (카메라 정상 동작)
+10:56:04  zedx 10-0028: Error turning off streaming   <- 여기서 teardown 실패
+10:57:16  WARNING at kernel/module.c:1095 module_put  <- refcnt = -1 확정
+11:52~    이후 모든 런치는 CAMERA STREAM FAILED TO START
+```
+
+즉 **정상 동작하던 세션을 종료하는 그 순간** 상태가 깨졌고, 그 뒤의 런치는 전부 실패할 운명이었다.
+그러므로:
+
+- ZED 노드를 내린 직후 `bash ~/robot_ws/scripts/zedx_health.sh` 를 한 번 돌린다.
+  `HEALTHY` 가 아니면 **다음 런치를 띄우지 말고** 판정에 따른다.
+- 내릴 때 Ctrl-C 한 번 → `process has finished cleanly` 확인. 안 끝난다고 **Ctrl-Z 로 백그라운드에
+  밀어놓고 새 런치를 띄우지 말 것.** 중지(T) 상태 프로세스는 종료 경로를 실행하지 않으므로
+  카메라를 계속 붙잡은 채 남고, 두 번째 런치가 그 위에 겹친다. (2026-09-09 실제 관측:
+  pid 230570/230599/230601 이 T 상태로 남은 채 231586 런치가 겹쳐 있었다)
+- 사고 로그는 재부팅하면 사라진다. 재부팅 전에 `~/data/zedx_incidents/` 로 덤프해 두거나,
+  4장의 journald 영속화를 먼저 적용한다.
