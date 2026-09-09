@@ -2,6 +2,34 @@
 
 목적: GNSS 앵커 전역맵(rn_global_map)의 재방문 정합 실패를 SLAM(LiDAR-inertial + GNSS + loop closure)으로 대체하기 위한 후보 선정. 리서치 레인 2개(slam-landscape, slam-excavator-feasibility) 결과를 이 호스트에서 직접 검증한 사실과 합쳤다.
 
+> **2026-09-09 갱신 — 아래 순위는 `예측`이었고, 이후 실측으로 결론이 났습니다.**
+> 재개하는 사람은 이 절만 읽고 행동하면 됩니다. 아래 원문은 당시 조사 기록으로 보존합니다.
+
+## 판정 결과 (실측, 2026-09-09)
+
+| 후보 | 예측 | **실측 판정** | 근거 |
+|---|---|---|---|
+| **GLIM** | 1순위 | **채택 — 유일하게 동작** | koide3 PPA가 arm64/ubuntu2204 제공(도커허브 이미지는 amd64 전용). 270초 bag을 88초에 처리 = **RTF 3.07** (CPU 전용). 재방문 정합에서 배포본을 최소 4배 앞섬 |
+| MOLA | 2순위 (apt 비교군) | **폐기 — 이 플랫폼에서 실행 불가** | Humble/arm64 바이너리가 RKNN 탐색에 nanoflann >= 1.5.1 을 요구하는데 Ubuntu 22.04 는 1.4.2 뿐. 검사가 배포 바이너리에 컴파일돼 있어 헤더 교체로 못 고침. packages.ros.org 에 mp2p_icp/MRPT 버전이 하나씩뿐이라 내려서 고정할 수도 없음. 파이프라인 4종 중 3종이 동일 KDTree 오류로 실패. 살리려면 MRPT + mp2p_icp 소스 재빌드 필요 |
+| KISS-ICP | 8순위 | **보류 — bag 을 못 읽음** | `AnyReaderError: Bag contains no type definitions`. rosbags 가 Humble 이 기록한 bag 에 typestore 를 요구하는데 kiss-icp 가 넘기지 않음. `rosbags<0.10` 핀도 동일 실패. 우회하려면 스캔을 KITTI .bin 으로 내보내야 함 |
+| LIO-SAM | 4순위 | 제외 유지 | 상류가 9축 IMU 를 요구하고 Ouster 내장 6축을 명시적으로 미지원 |
+| `glim_ext` | — | **PPA 에 없음** | `glim`, `glim_ros` + CUDA 변형뿐. ScanContext 장소인식과 GNSS 팩터가 필요하면 소스 빌드. 단 `libglobal_mapping.so`(서브맵 그래프 전역최적화)는 기본 포함이고 실행 중 실제로 between-factor 를 만들고 있었음 |
+
+**D2 답변**: GLIM. 사용자가 (c) KISS-ICP 수치 확인 후 (a) GLIM 으로 승인했고, 이후 MOLA/KISS-ICP 가
+플랫폼 제약으로 탈락하면서 GLIM 이 유일한 실행 가능 후보로 남았습니다.
+
+**메모가 예측하지 못했던 것** — 조사 단계에서는 보이지 않고 설치해 봐야만 드러난 것들:
+
+- `apt` 로 설치된다는 사실이 **이 플랫폼에서 실행된다는 뜻이 아니다.** MOLA 를 고른 이유가
+  ``값싼 apt 레인`` 이었는데, 정작 그 바이너리가 배포판의 nanoflann 과 맞지 않았습니다.
+  후보 평가에 **``의존 라이브러리 버전이 배포판에 실재하는가``** 항목이 있어야 했습니다.
+- 도커허브 이미지의 **아키텍처**를 확인해야 합니다. koide3/glim_ros 태그는 전부 amd64 라
+  pull 이 불가능했고, PPA 가 arm64 를 제공한다는 사실이 그걸 구했습니다.
+- **붐 장착 센서에 GNSS 를 그대로 융합하면 안 됩니다.** 리서치 두 레인이 ``캐빈 장착 권장`` 을
+  인용으로 권고했는데, 실측으로 이유가 확인됐습니다: 두 창 사이 캡 안테나 높이는 +0.016 m,
+  붐 라이다 높이는 -0.555 m (붐 관절 -11.6도). 안테나와 라이다가 서로 다른 강체라,
+  높이를 억지로 맞추면 붐 동작이 오차로 주입됩니다 (dz 편향 +0.209 -> +0.563 m).
+
 ## 이 호스트에서 검증한 사실 (2026-09-07)
 - Jetson Orin, JetPack R36.4, Ubuntu 22.04, ROS 2 Humble, aarch64, CUDA 12.6 (nvcc 12.6.r12.6).
 - apt 가능: ros-humble-gtsam 4.2.0, ros-humble-libg2o, libceres-dev 2.0, ros-humble-mola-lidar-odometry 3.0.0, ros-humble-mola-sm-loop-closure 1.2.2, ros-humble-mola-georeferencing, ros-humble-mola-state-estimation 2.4.2, ros-humble-mp2p-icp 2.12, ros-humble-rtabmap-ros 0.23.7, ros-humble-slam-toolbox, ros-humble-libpointmatcher. pip: kiss-icp 1.3.0. GLIM은 apt 미제공(소스 또는 PPA).
