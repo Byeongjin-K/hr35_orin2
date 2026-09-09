@@ -17,6 +17,28 @@ there it is the GNSS that is wrong.
 A global rigid alignment cannot do this job. It shifts every window by the same amount and
 so leaves the drift BETWEEN two windows exactly as it was - which is precisely the quantity
 dz_bias measures.
+
+PRECONDITION, learned by breaking it
+------------------------------------
+The reference and the trajectory must describe the SAME RIGID BODY. Applied to this
+machine's boom-mounted LiDAR against its cabin-mounted GNSS antenna, this function makes
+every figure worse, and the measurement says why in one line:
+
+    between two windows 62 s apart, the machine moved 0.095 m horizontally
+      cabin GNSS antenna height   62.218 -> 62.234 m   (+0.016 m)
+      boom LiDAR height (GLIM)    -0.552 -> -1.107 m   (-0.555 m)
+      boom joint angle            44.08  ->  32.46 deg (-11.6 deg, two sensors agreeing to 0.03)
+
+The LiDAR sits about 2.8 m out from the boom hinge, so 11.6 degrees of boom is 0.55 m of
+sensor height. GLIM was not drifting - it was correctly tracking a boom that came down, and
+the antenna cannot see that motion because it is not on the boom. Forcing the two to agree
+injected the articulation as error: dz_bias +0.209 -> +0.563 m, dz_median 0.247 -> 0.568,
+height residual 0.137 -> 0.159, nearest neighbour 0.0495 -> 0.117. Every figure worse.
+
+So for a boom-mounted sensor the GNSS reference must first be carried through the machine's
+kinematic chain (swing axis -> boom hinge -> boom link -> LiDAR mount), which is the very
+chain whose errors motivated this project. Mount the SLAM LiDAR on the cabin, rigid with
+the antenna, and the precondition holds without any of that.
 """
 
 from __future__ import annotations
