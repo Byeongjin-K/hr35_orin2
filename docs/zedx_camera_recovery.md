@@ -301,3 +301,54 @@ receiving 'SIGINT', escalating to 'SIGTERM'
 - **노드를 내린 직후** `bash ~/robot_ws/scripts/zedx_health.sh` 를 돌린다. `HEALTHY` 가 아니면
   다음 런치를 띄우지 말고 `zedx_recover.sh` 로 간다.
 - **스트리밍 중에는 어떤 데몬도 재시작하지 말 것.** 이게 이번 사고를 만든 동작이다.
+
+## 9. tmux 런처(`sensors`)에 붙인 자동 점검 (2026-09-09)
+
+`sensors start` 는 이제 tmux 세션을 만들기 **전에** 카메라 스택을 점검하고, 안전할 때만 스스로 복구한다.
+
+```bash
+sensors start     # 점검 -> (필요하고 안전하면) 복구 -> 런치
+sensors check     # 점검만 (별칭: scheck)
+sensors stop      # 실제로 종료될 때까지 기다린 뒤 세션을 죽인다
+```
+
+### 게이트: 언제 자동 복구가 도는가
+
+`scripts/zedx_preflight.sh` 의 종료 코드가 `sensors` 의 분기 계약이다.
+
+| 코드 | 뜻 | `sensors` 의 반응 |
+|---|---|---|
+| 0 | 이미 정상, 또는 복구 성공 | 그대로 런치 |
+| 2 | 복구가 필요하지만 **안전하지 않음** | 무엇을 멈춰야 하는지 출력하고 런치는 진행 |
+| 1 | 복구했는데도 wedge | 재부팅이 남았다고 알리고 런치는 시도 |
+
+**자동 복구를 하지 않는 경우** (`scripts/test_zedx_preflight.sh` 5/5 로 강제):
+
+- 카메라를 잡은 프로세스가 하나라도 살아 있을 때 — 복구는 그것을 죽인다. 먼저 `sensors stop`.
+  (`sensors restart` 는 stop 이 먼저라 두 번째 단계에서 자동으로 복구가 돈다.)
+- root 를 못 얻고 tty 도 없을 때 — sudo 프롬프트에서 매달리지 않는다.
+
+### 같이 고친 것: `sensors stop` 의 3초 고정 sleep
+
+원래 코드는 Ctrl+C 를 보내고 **3초 뒤 무조건** 세션을 죽였다:
+
+```bash
+SHUTDOWN_GRACE_SECONDS=3
+sleep "$SHUTDOWN_GRACE_SECONDS"
+tmux kill-session ...      # -> SIGHUP 몰살
+```
+
+ZED 노드가 `=== CLOSING CAMERA ===` 를 끝내는 데는 그보다 오래 걸린다. launch 의 SIGTERM
+에스컬레이션(5초, 지금은 30초)이 시작되기도 전에 세션이 죽는다. 즉 **`sdown` / `srestart` 자체가
+이 사고를 만들어온 경로**다. 세션 생성 시각과 wedge 시각이 매번 붙어 있던 이유이기도 하다.
+
+이제는 프로세스가 실제로 사라질 때까지(최대 45초) 기다리고, 초과하면 무엇이 남았는지 경고한다.
+회귀 테스트 `scripts/test_sensors_zedx.sh` 는 throwaway tmux 세션과 마커 프로세스로
+정상 종료 경로와 타임아웃 경로를 둘 다 실행해 확인한다(실제 카메라는 건드리지 않는다).
+
+### 수정한 파일
+
+- `~/.local/bin/sensors` — git 관리 밖이라 백업을 남겼다: `~/.local/bin/sensors.bak.20260909-141728`
+- `~/.bashrc` — `scheck` 별칭 추가
+- 로그인 셸마다 점검을 돌리지는 **않는다**. 점검은 카메라를 띄우는 순간에만 의미가 있고,
+  매 셸마다 돌면 소음이자 sudo 프롬프트 지뢰다.
