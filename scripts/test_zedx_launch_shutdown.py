@@ -22,8 +22,12 @@ from launch.actions import SetLaunchConfiguration
 
 MIN_SIGTERM_SEC = 20.0
 MIN_SIGKILL_SEC = 5.0
+# Every launch file that starts a ZED node. They all share the sl_zedx module, so an
+# unclean kill of ANY of them wedges the module for ALL cameras.
 LAUNCH_FILES = [
     "/home/kimm/robot_ws/src/hr35_bringup/launch/zedx_cabin.launch.py",
+    "/home/kimm/robot_ws/src/hr35_bringup/launch/zedx_boom.launch.py",
+    "/home/kimm/robot_ws/src/hr35_bringup/launch/dual_zedx.launch.py",
 ]
 
 
