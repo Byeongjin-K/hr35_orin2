@@ -16,6 +16,12 @@ __pycache__/
 # Claude Code
 .claude/
 
+# OMO agent (session state and work plans)
+.omo/
+
+# Sensor diagnostic output
+ZED_Diagnostic_Results.json
+
 # OS
 .DS_Store
 Thumbs.db
