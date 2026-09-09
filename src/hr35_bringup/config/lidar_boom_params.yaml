@@ -60,4 +60,9 @@ lidar_boom:
       # min_range[optional]: minimum lidar range to consider (meters)
       min_range: 0.0
       # max_range[optional]: maximum lidar range to consider (meters)
-      max_range: 1000.0 
+      max_range: 1000.0
+      # operating_mode: the 3.2 firmware update left the sensor in STANDBY, which
+      # emits no UDP data at all -- the driver connects, configures, then times out
+      # in poll_client(). Setting it here makes every driver start force NORMAL, so
+      # a sensor that boots into STANDBY cannot silently take the LiDAR down.
+      operating_mode: NORMAL 
