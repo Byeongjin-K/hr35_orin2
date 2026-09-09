@@ -17,6 +17,15 @@ lidar_boom:
       ptp_utc_tai_offset: -37.0
       # udp_profile_lidar[optional]: lidar packet profile
       udp_profile_lidar: ''
+      # udp_profile_imu: firmware 3.2 deprecated LEGACY, and on this sensor the
+      # LEGACY IMU stream stops transmitting a few minutes after it starts. It
+      # fails silently: the sensor keeps answering HTTP, the lidar stream stays
+      # at 10 Hz, and the only symptom is /lidar_boom/imu going to zero, which
+      # drops the voxelizer into GNSS attitude fallback. Writing any sensor
+      # config revives it briefly, so a healthy reading right after a restart
+      # does not mean it will still be alive an hour later.
+      # ACCEL32_GYRO32_NMEA is the format 3.2 added and it keeps streaming.
+      udp_profile_imu: 'ACCEL32_GYRO32_NMEA'
       # metadata[optional]: path to save metadata file to
       metadata: ''
       # lidar_port[optional]: port value should be in the range [0, 65535]
