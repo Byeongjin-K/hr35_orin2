@@ -13,7 +13,7 @@ bash ~/robot_ws/scripts/zedx_health.sh
 |---|---|---|---|
 | `HEALTHY` | 0 | 스택 정상 | 조치 없음. 그래도 안 열리면 다른 프로세스가 점유 중(출력의 `camera clients` 확인) |
 | `RECOVERABLE` | 1 | 캡처 세션이 클라이언트보다 오래 살아남음 | `sudo systemctl restart nvargus-daemon` → 안 되면 `zed_x_daemon` |
-| `REBOOT_REQUIRED` | 2 | `sl_zedx` 모듈 use-count 파손 | **재부팅 외 방법 없음** |
+| `REBOOT_REQUIRED` | 2 | `sl_zedx` 모듈 use-count 파손 | `sudo bash ~/robot_ws/scripts/zedx_recover.sh` (7장). 그래도 안 되면 재부팅 |
 
 ## 2. 복구 사다리 (위에서부터, 열리면 즉시 중단)
 
@@ -122,7 +122,7 @@ ros2 topic hz /zedx_cabin/zedx_cabin_node/left/image_rect_color
   ```
   `open()` 역시 다시 행 (`EXIT=124`).
 
-**따라서 `cat /sys/module/sl_zedx/refcnt` 가 음수면 2·3단계는 건너뛰고 바로 재부팅한다.**
+**따라서 `cat /sys/module/sl_zedx/refcnt` 가 음수면 2·3단계는 건너뛴다.** 이때 쓰는 것이 7장의 `zedx_recover.sh` 다(2026-09-09 이전에는 여기서 재부팅밖에 없었다).
 시도할 때마다 open 이 90초씩 멈추고 언더플로만 더 쌓인다(이번에 8회 추가됨).
 
 ### 망가지는 순간은 "띄울 때"가 아니라 "내릴 때"다
@@ -147,3 +147,125 @@ ros2 topic hz /zedx_cabin/zedx_cabin_node/left/image_rect_color
   pid 230570/230599/230601 이 T 상태로 남은 채 231586 런치가 겹쳐 있었다)
 - 사고 로그는 재부팅하면 사라진다. 재부팅 전에 `~/data/zedx_incidents/` 로 덤프해 두거나,
   4장의 journald 영속화를 먼저 적용한다.
+
+## 7. 무재부팅 복구 (2026-09-09 확립)
+
+### 근본 원인 — 소스 코드 위치까지 특정됨
+
+NVIDIA tegracam 의 V4L2 글루는 스트리밍 시작 때 `try_module_get(s_data->owner)` 로 센서 모듈
+참조를 잡고, 정지 때 `module_put()` 으로 놓는다. 그런데 센서의 `stop_streaming()` 이 에러를
+반환하면 정지 경로가 `error:` 라벨로 떨어지면서 **`module_put()` 을 한 번 더** 호출한다.
+
+`drivers/media/platform/tegra/camera/tegracam_v4l2.c` (linux-nv-oot)
+
+관측된 커널 로그가 정확히 이 순서다:
+
+```
+zedx 10-0020: Error turning off streaming          <- stop_streaming() 실패
+WARNING at kernel/module.c:1095 module_put+0x18c   <- 두 번째 module_put
+  module_put <- tegracam_v4l2subdev_register <- tegra_channel_set_stream
+             <- _vb2_fop_release <- __fput <- do_exit
+```
+
+`module_put()` 은 `atomic_dec_if_positive()` 라서 0 에서 멈춘다. 그런데 0 은 모듈이 로드될 때
+받는 **base reference 자체가 사라진 상태**다(`MODULE_REF_BASE = 1`). sysfs 는 `atomic - 1` 을
+보여주므로 `/sys/module/sl_zedx/refcnt` 가 `-1` 이 된다.
+
+이 기계에서 실측으로 확인했다: 카메라가 열려 있어 sysfs 가 `2` 일 때 실제 atomic 은 `3` 이다.
+
+### 그래서 재부팅밖에 없었던 이유
+
+`rmmod` 는 base reference 를 되돌려받아야 성공한다. 그게 없으면 영원히 실패하고,
+`systemctl restart zed_x_daemon` 이 하는 일이 정확히 rmmod + insmod 이므로 조용히 무효가 된다.
+`CONFIG_MODULE_FORCE_UNLOAD` 도 꺼져 있어 `rmmod -f` 조차 없다.
+
+### 잃어버린 참조를 되돌려주는 도구
+
+`tools/zedx_refcnt/` — `driver_find("zedx", &i2c_bus_type)->owner` 로 대상 모듈에 도달하고
+(모듈 리스트 순회 없음, 미export 심볼 없음), 이름이 일치하고 LIVE 일 때만 동작한다.
+
+```bash
+cd ~/robot_ws/tools/zedx_refcnt && make
+sudo insmod zedx_refcnt.ko target=sl_zedx driver=zedx repair=1
+sudo rmmod zedx_refcnt
+cat /sys/module/sl_zedx/refcnt      # -1 -> 0
+```
+
+검증(`tools/zedx_refcnt/test_zedx_refcnt.sh`, 12/12): 유휴 모듈 `sl_zedxpro` 에서
+`unsafe_break=1` 로 `refcnt=-1` 을 **재현**하고 `repair=1` 로 정확히 되돌렸다. 잘못된 드라이버
+이름·이름 불일치는 아무것도 건드리지 않고 거부하며, `delta<0` 은 base reference 아래로 내려가지
+않는다(도구가 스스로 이 손상을 만들 수 없다).
+
+### 복구 사다리
+
+```bash
+sudo bash ~/robot_ws/scripts/zedx_recover.sh --plan   # 무엇을 할지만 출력, 실행 안 함
+sudo bash ~/robot_ws/scripts/zedx_recover.sh          # 열리는 즉시 중단
+```
+
+| # | 단계 | 무엇을 되돌리나 |
+|---|---|---|
+| 1 | stop-clients | 카메라를 잡은 프로세스 정리. 하나라도 살아 있으면 아래 단계는 위험하다 |
+| 2 | restart-nvargus | argus 에 남은 고아 캡처 세션 |
+| 3 | rebind-sensors | `zedx` i2c 클라이언트(10-0020, 10-0028) unbind/bind → v4l2 subdev 재등록. **모듈 언로드가 필요 없어 refcnt 손상과 무관하게 동작한다** |
+| 4 | repair-refcnt | `refcnt < 0` 일 때만. base reference 복원 → rmmod 가 다시 합법이 됨 |
+| 5 | reload-drivers | `systemctl restart zed_x_daemon` = 진짜 rmmod+insmod. 로그에 `is in use` / `File exists` 가 없는지 **검증**한다 |
+
+**순서 강제(`scripts/test_zedx_recover.sh` 8/8)**: 4단계는 반드시 5단계보다 먼저다.
+이 커널은 `panic_on_oops=1` 이고, atomic refcnt 가 0 인 상태의 `rmmod` 는 이론상
+`try_release_module_ref()` 의 `BUG_ON(ret < 0)` 에 걸린다. 2026-09-08~09 에 refcnt=-1 상태로
+데몬을 3회 이상 재시작했지만 패닉은 나지 않았으므로(userspace `rmmod` 가 먼저 포기한 것으로
+보인다) 실측된 위험은 아니다. 그래도 대가가 큰 쪽이므로 가드는 유지한다.
+
+### 아직 검증되지 않은 것 (정직하게)
+
+3·5 단계가 **실제 wedge 상태에서** 카메라를 되살리는지는 증명되지 않았다. 검증하려면 wedge 를
+만들어야 하고, 그건 동작 중인 카메라를 깨는 일이다. refcnt 복구(4단계) 자체는 증명됐다.
+
+## 8. 예방 — 애초에 wedge 를 만들지 않기
+
+### 원인 사슬 (2026-09-09 10:55~10:57 실측)
+
+```
+10:55:49  SCF: 5 buffers still pending during EGLStreamProducer destruction
+          = 스트리밍 중이던 클라이언트가 카메라를 놓지 않고 죽음
+10:56:05  [ZED-X Daemon] Restart NVArgus Daemon      <- 데몬이 스스로 재시작 (ZEDX#1#8#FROZEN)
+10:56:04  zedx 10-0028: Error turning off streaming  <- 스트리밍 중에 argus 가 사라짐
+10:57:16  [ZED-X Daemon] Restart NVArgus Daemon      <- 두 번째
+10:57:16  WARNING module.c:1095 module_put           <- refcnt = -1 확정
+```
+
+즉 **사용자의 Ctrl-C 가 아니라 ZED-X 데몬 자신의 워치독**이 방아쇠를 당겼다. 데몬은 카메라가
+`FROZEN` 이라고 판단하면 스트리밍 중이든 말든 nvargus 를 재시작한다. 이 동작을 끄는 설정은
+`/etc/systemd/system/zed_x_daemon.service` 에도 데몬 바이너리에도 없다(preload/postload 훅뿐).
+
+따라서 예방은 **FROZEN 상태를 만들지 않는 것**, 즉 클라이언트가 카메라를 항상 깨끗이 놓고
+죽게 하는 것이다.
+
+### 적용한 변경
+
+`launch/zedx_cabin.launch.py` 에 종료 유예 시간을 명시했다:
+
+```python
+SetLaunchConfiguration('sigterm_timeout', '30'),
+SetLaunchConfiguration('sigkill_timeout', '10'),
+```
+
+launch 의 기본값은 5초인데 ZED 노드는 그 안에 `sl::Camera::close()` 를 끝내지 못한다.
+실측(2026-09-09 12:00):
+
+```
+process[component_container_isolated-2] failed to terminate '5' seconds after
+receiving 'SIGINT', escalating to 'SIGTERM'
+```
+
+5초 뒤 SIGTERM, 다시 5초 뒤 SIGKILL → 카메라를 놓지 못한 채 죽음 → FROZEN → wedge.
+회귀 테스트: `scripts/test_zedx_launch_shutdown.py`.
+
+### 운영 수칙
+
+- ZED 노드는 **Ctrl-C 한 번**, 그리고 `process has finished cleanly` 를 눈으로 확인한다.
+  안 끝난다고 Ctrl-Z 로 밀어두고 새 런치를 띄우면 중지된 프로세스가 카메라를 계속 붙잡는다.
+- **노드를 내린 직후** `bash ~/robot_ws/scripts/zedx_health.sh` 를 돌린다. `HEALTHY` 가 아니면
+  다음 런치를 띄우지 말고 `zedx_recover.sh` 로 간다.
+- **스트리밍 중에는 어떤 데몬도 재시작하지 말 것.** 이게 이번 사고를 만든 동작이다.
