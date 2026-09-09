@@ -349,6 +349,12 @@ ZED 노드가 `=== CLOSING CAMERA ===` 를 끝내는 데는 그보다 오래 걸
 ### 수정한 파일
 
 - `~/.local/bin/sensors` — git 관리 밖이라 백업을 남겼다: `~/.local/bin/sensors.bak.20260909-141728`
-- `~/.bashrc` — `scheck` 별칭 추가
+- `~/.bashrc` — 별칭 한 줄 (기계를 다시 세팅할 때 그대로 넣으면 된다):
+  ```bash
+  alias scheck='sensors check'
+  ```
+- `~/.local/bin/sensors` 는 이제 저장소 사본을 가리키는 심볼릭 링크다:
+  `~/.local/bin/sensors -> ~/robot_ws/scripts/sensors` (원본이 하나뿐이라 갈라지지 않는다).
+  되돌리려면: `rm ~/.local/bin/sensors && cp ~/.local/bin/sensors.bak.20260909-141728 ~/.local/bin/sensors`
 - 로그인 셸마다 점검을 돌리지는 **않는다**. 점검은 카메라를 띄우는 순간에만 의미가 있고,
   매 셸마다 돌면 소음이자 sudo 프롬프트 지뢰다.

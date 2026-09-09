@@ -1,0 +1,395 @@
+#!/usr/bin/env bash
+# =============================================================================
+# sensors - tmux launcher for ROS2 sensors and supporting services
+# =============================================================================
+#
+# Launches multiple long-running commands (sensor drivers, docker compose, etc.)
+# in a single detached tmux session, one window per command. Supports clean
+# graceful shutdown of all of them with one command.
+#
+# Usage:
+#   sensors start     Launch all sensors in a detached tmux session
+#   sensors check     Check the ZED capture stack (auto-repair when safe)
+#   sensors stop      Gracefully stop all sensors (Ctrl+C) and kill the session
+#   sensors restart   stop + start
+#   sensors attach    Attach to the running tmux session
+#   sensors status    Show whether the session is running and list windows
+#   sensors list      Show all configured sensors
+#   sensors help      Show usage
+#
+# To add/modify a sensor: edit the SENSORS array below.
+# =============================================================================
+
+set -uo pipefail
+
+SESSION_NAME="${SENSORS_SESSION:-sensors}"
+
+# -----------------------------------------------------------------------------
+# SENSOR CONFIG -- edit this array to add/modify/remove sensors
+#
+# Format: "name|working_dir|command"
+#   name        : short id, used as the tmux window name (no spaces)
+#   working_dir : directory to cd into before running ("-" for none)
+#   command     : the command to execute
+#
+# NOTE: ROS2 environment is auto-sourced from ~/.bashrc, so 'ros2 launch ...'
+#       just works inside each window. If you ever need extra setup, add it
+#       to ENV_SETUP below or chain it inline with '&&'.
+# -----------------------------------------------------------------------------
+SENSORS=(
+    "zed|-|ros2 launch hr35_bringup zedx_cabin.launch.py"
+    "ouster|-|ros2 launch hr35_bringup boom_only_driver.launch.py"
+    "docker|$HOME/repos/ontariotech_koceti_jetson_docker|sudo docker compose -f docker-compose.yml @COMPOSE_PROFILE@ up"
+)
+
+# Optional: command to run in EVERY window before the sensor command.
+# Leave empty if your ~/.bashrc already sources what you need (typical setup).
+# Example: ENV_SETUP="source /opt/ros/humble/setup.bash"
+ENV_SETUP=""
+
+# Checked before the session is created; repairs the ZED capture stack when that is
+# safe. See ~/robot_ws/scripts/zedx_preflight.sh and robot_ws/docs/zedx_camera_recovery.md.
+PREFLIGHT_CMD="${SENSORS_PREFLIGHT_CMD:-$HOME/robot_ws/scripts/zedx_preflight.sh}"
+
+# Upper bound on the wait for sensors to exit after Ctrl+C; the session is killed once
+# they are gone, or after this many seconds. Killing a ZED node before it finishes
+# "=== CLOSING CAMERA ===" wedges the capture stack until a reboot, and the old fixed
+# 3 s sleep was shorter than the close itself.
+SHUTDOWN_GRACE_SECONDS="${SENSORS_SHUTDOWN_GRACE:-45}"
+SHUTDOWN_WAIT_PATTERN="${SENSORS_SHUTDOWN_PATTERN:-component_container|os_driver|ros2 launch hr35_bringup}"
+
+# =============================================================================
+# Implementation - normally you don't need to edit anything below this line
+# =============================================================================
+
+# Colors
+RED=$'\033[0;31m'
+GREEN=$'\033[0;32m'
+YELLOW=$'\033[0;33m'
+BLUE=$'\033[0;34m'
+NC=$'\033[0m'
+
+log()  { printf "%s[sensors]%s %s\n" "$BLUE"   "$NC" "$*"; }
+ok()   { printf "%s[sensors]%s %s\n" "$GREEN"  "$NC" "$*"; }
+warn() { printf "%s[sensors]%s %s\n" "$YELLOW" "$NC" "$*"; }
+err()  { printf "%s[sensors]%s %s\n" "$RED"    "$NC" "$*" >&2; }
+
+require_tmux() {
+    if ! command -v tmux >/dev/null 2>&1; then
+        err "tmux is not installed."
+        err "Install with: sudo apt update && sudo apt install -y tmux"
+        exit 1
+    fi
+}
+
+session_exists() {
+    tmux has-session -t "$SESSION_NAME" 2>/dev/null
+}
+
+run_preflight() {
+    if [ ! -x "$PREFLIGHT_CMD" ]; then
+        warn "preflight not found: $PREFLIGHT_CMD -- skipping the camera stack check"
+        return 0
+    fi
+    log "Checking the ZED capture stack..."
+    "$PREFLIGHT_CMD"
+    case $? in
+        0) ok "camera stack ready." ;;
+        2) warn "camera stack needs repair, but repairing was not safe (see above)." ;;
+        *) err "camera stack is still wedged -- 'sudo reboot' is the remaining option."
+           err "continuing anyway; the zed window will fail to open the camera." ;;
+    esac
+}
+
+parse_entry() {
+    # Parses "name|workdir|command" into globals: ENTRY_NAME, ENTRY_WORKDIR, ENTRY_CMD
+    local entry="$1"
+    ENTRY_NAME="${entry%%|*}"
+    local rest="${entry#*|}"
+    ENTRY_WORKDIR="${rest%%|*}"
+    ENTRY_CMD="${rest#*|}"
+    # Sanitize window name (no spaces)
+    ENTRY_NAME="${ENTRY_NAME// /_}"
+}
+
+cmd_start() {
+    # Parse flags
+    local attach_after=0
+    # 전역맵은 기본 꺼짐. compose 의 profiles 가 opt-in 이라 그쪽 관례를 따른다.
+    local global_map="${SENSORS_GLOBAL_MAP:-0}"
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -a|--attach|--foreground|-f)
+                attach_after=1
+                shift
+                ;;
+            -g|--global-map)
+                global_map=1
+                shift
+                ;;
+            -G|--no-global-map)
+                global_map=0
+                shift
+                ;;
+            -h|--help)
+                cat <<EOF
+Usage: sensors start [options]
+
+Options:
+  -a, --attach, -f, --foreground   Attach to the session immediately after
+                                   launching (foreground mode - watch live output)
+  -g, --global-map                 전역맵 노드(OT_global_map)도 함께 띄운다
+  -G, --no-global-map              전역맵 제외 (기본값)
+
+Without options, sensors start in the background (detached) and you return
+to the prompt. Use 'sensors attach' later to view, or 'sensors stop' to kill.
+EOF
+                return 0
+                ;;
+            *)
+                err "Unknown option for start: $1"
+                err "Try: sensors start --help"
+                exit 1
+                ;;
+        esac
+    done
+
+    require_tmux
+
+    if session_exists; then
+        warn "Session '$SESSION_NAME' is already running."
+        warn "Use 'sensors restart' to relaunch, or 'sensors attach' to view it."
+        return 1
+    fi
+
+    run_preflight
+
+    if [ "${#SENSORS[@]}" -eq 0 ]; then
+        err "No sensors configured. Edit the SENSORS array in $0"
+        exit 1
+    fi
+
+    log "Starting ${#SENSORS[@]} sensor(s) in tmux session '$SESSION_NAME'..."
+
+    local first=1
+    for entry in "${SENSORS[@]}"; do
+        parse_entry "$entry"
+
+        # 전역맵 on/off 를 docker 창 명령에 주입한다. 플레이스홀더가 없는
+        # 다른 창은 그대로 남는다.
+        if [ "$global_map" -eq 1 ]; then
+            ENTRY_CMD="${ENTRY_CMD//@COMPOSE_PROFILE@/--profile globalmap}"
+        else
+            ENTRY_CMD="${ENTRY_CMD//@COMPOSE_PROFILE@/}"
+        fi
+        ENTRY_CMD="$(printf '%s' "$ENTRY_CMD" | tr -s ' ')"
+
+        if [ "$first" -eq 1 ]; then
+            tmux new-session -d -s "$SESSION_NAME" -n "$ENTRY_NAME"
+            first=0
+        else
+            tmux new-window -t "$SESSION_NAME" -n "$ENTRY_NAME"
+        fi
+
+        # Optional global env setup
+        if [ -n "$ENV_SETUP" ]; then
+            tmux send-keys -t "${SESSION_NAME}:${ENTRY_NAME}" "$ENV_SETUP" C-m
+        fi
+
+        # cd into working directory if specified
+        if [ "$ENTRY_WORKDIR" != "-" ] && [ -n "$ENTRY_WORKDIR" ]; then
+            tmux send-keys -t "${SESSION_NAME}:${ENTRY_NAME}" "cd '$ENTRY_WORKDIR'" C-m
+        fi
+
+        # Run the actual command
+        tmux send-keys -t "${SESSION_NAME}:${ENTRY_NAME}" "$ENTRY_CMD" C-m
+
+        log "  -> ${ENTRY_NAME}: ${ENTRY_CMD}"
+    done
+
+    # Focus first window
+    tmux select-window -t "${SESSION_NAME}:0" 2>/dev/null || true
+
+    ok "All sensors launched."
+    if [ "$global_map" -eq 1 ]; then
+        ok "전역맵: 포함 (OT_global_map 기동, /rn/global_map 발행)"
+    else
+        ok "전역맵: 제외  (켜려면 -g / --global-map)"
+    fi
+
+    if [ "$attach_after" -eq 1 ]; then
+        if [ ! -t 0 ] || [ ! -t 1 ]; then
+            warn "Not running in a TTY - cannot attach. Session keeps running in background."
+            ok "Attach later with: sensors attach"
+            return 0
+        fi
+        ok "Attaching to session... (Ctrl+b then d = detach, 'sensors stop' = kill all)"
+        sleep 1  # let commands print their first lines before we attach
+        exec tmux attach -t "$SESSION_NAME"
+    else
+        ok "Running in BACKGROUND. Useful next steps:"
+        ok "  sensors attach   # see live output  (or: satt)"
+        ok "  sensors status   # check session    (or: sstat)"
+        ok "  sensors stop     # kill everything  (or: sdown)"
+    fi
+}
+
+cmd_stop() {
+    require_tmux
+
+    if ! session_exists; then
+        warn "No active session '$SESSION_NAME'."
+        return 0
+    fi
+
+    log "Sending Ctrl+C to all windows for graceful shutdown..."
+    while read -r window; do
+        tmux send-keys -t "${SESSION_NAME}:${window}" C-c 2>/dev/null || true
+    done < <(tmux list-windows -t "$SESSION_NAME" -F '#{window_index}' 2>/dev/null)
+
+    log "Waiting up to ${SHUTDOWN_GRACE_SECONDS}s for the sensors to exit..."
+    local waited=0
+    while [ "$waited" -lt "$SHUTDOWN_GRACE_SECONDS" ]; do
+        pgrep -f "$SHUTDOWN_WAIT_PATTERN" >/dev/null 2>&1 || break
+        sleep 1
+        waited=$((waited + 1))
+    done
+    if pgrep -f "$SHUTDOWN_WAIT_PATTERN" >/dev/null 2>&1; then
+        warn "still running after ${waited}s; killing the session now may wedge the camera:"
+        pgrep -af "$SHUTDOWN_WAIT_PATTERN" | cut -c1-100 | sed 's/^/    /'
+    else
+        ok "all sensors exited cleanly after ${waited}s."
+    fi
+
+    log "Killing tmux session '$SESSION_NAME'..."
+    tmux kill-session -t "$SESSION_NAME" 2>/dev/null || true
+
+    ok "All sensors stopped."
+}
+
+cmd_restart() {
+    cmd_stop
+    sleep 1
+    cmd_start "$@"
+}
+
+cmd_attach() {
+    require_tmux
+    if ! session_exists; then
+        err "No active session '$SESSION_NAME'. Start it first: sensors start"
+        exit 1
+    fi
+    tmux attach -t "$SESSION_NAME"
+}
+
+cmd_status() {
+    require_tmux
+    if session_exists; then
+        ok "Session '$SESSION_NAME' is RUNNING"
+        echo "  Windows:"
+        tmux list-windows -t "$SESSION_NAME" \
+            -F '    [#{window_index}] #{window_name}  (#{window_panes} pane(s))' 2>/dev/null
+    else
+        warn "Session '$SESSION_NAME' is NOT running"
+    fi
+}
+
+cmd_check() {
+    run_preflight
+}
+
+cmd_list() {
+    log "Configured sensors (${#SENSORS[@]}):"
+    local i=0
+    for entry in "${SENSORS[@]}"; do
+        parse_entry "$entry"
+        ENTRY_CMD="${ENTRY_CMD//@COMPOSE_PROFILE@/[--profile globalmap]}"
+        printf "  %d) %-12s %s\n" "$i" "$ENTRY_NAME" "$ENTRY_CMD"
+        if [ "$ENTRY_WORKDIR" != "-" ] && [ -n "$ENTRY_WORKDIR" ]; then
+            printf "     %s(cwd: %s)%s\n" "$YELLOW" "$ENTRY_WORKDIR" "$NC"
+        fi
+        i=$((i + 1))
+    done
+}
+
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") <command> [options]
+
+Commands:
+  start [-a]    Launch all sensors in a tmux session
+                  (no flag) -> background, return to prompt
+                  -a / --attach / -f / --foreground -> attach immediately
+                                                       (watch live output)
+                  -g / --global-map    -> 전역맵 노드도 함께 띄운다
+                  -G / --no-global-map -> 전역맵 제외 (기본값)
+  check         Check the ZED capture stack, and repair it when that is safe
+  stop          Gracefully stop all sensors (Ctrl+C) and kill the session
+  restart [-a]  Stop then start (forwards -a flag if given)
+  attach        Attach to the running tmux session
+  status        Show whether the session is running and list windows
+  list          Show all configured sensors
+  help          Show this help
+
+Two execution modes:
+  BACKGROUND  : sensors start          (alias: sup)   - fire and forget
+  FOREGROUND  : sensors start --attach (alias: srun)  - watch live output
+
+전역맵 (GNSS 앵커 전역맵 노드):
+  제외 (기본) : sensors start        (별칭: srun)
+  포함        : sensors start -g     (별칭: srun -g)
+
+  docker 를 직접 띄울 때:
+    제외: sudo docker compose -f docker-compose.yml up
+    포함: sudo docker compose -f docker-compose.yml --profile globalmap up
+
+  전역맵만 따로 내리기: sudo docker stop OT_global_map
+
+Inside tmux (after attach):
+  Ctrl+b  n   next sensor window
+  Ctrl+b  p   previous sensor window
+  Ctrl+b  0/1/2  jump to window N
+  Ctrl+b  w   list all windows
+  Ctrl+b  d   detach (keeps session running in background)
+
+Configuration:
+  Edit the SENSORS array near the top of:
+    $0
+
+  Each entry: "name|working_dir|command"  ("-" = no cd)
+
+Environment overrides:
+  SENSORS_SESSION  override tmux session name (default: sensors)
+  SENSORS_GLOBAL_MAP  1 로 두면 전역맵 기본값이 '포함' 이 된다 (기본: 0)
+
+Examples:
+  sensors start            # background
+  sensors start --attach   # foreground (live view)
+  sensors restart -a       # restart and watch live
+  sensors start -g         # 전역맵 포함 (백그라운드)
+  sensors start -a -g      # 전역맵 포함 + 라이브 뷰
+  SENSORS_SESSION=test sensors start
+EOF
+}
+
+main() {
+    local cmd="${1:-}"
+    [ $# -gt 0 ] && shift
+    case "$cmd" in
+        start)             cmd_start "$@" ;;
+        check|preflight)   cmd_check ;;
+        stop)              cmd_stop ;;
+        restart)           cmd_restart "$@" ;;
+        attach|a)          cmd_attach ;;
+        status|st)         cmd_status ;;
+        list|ls)           cmd_list ;;
+        ""|help|-h|--help) usage ;;
+        *)
+            err "Unknown command: $cmd"
+            usage
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"
