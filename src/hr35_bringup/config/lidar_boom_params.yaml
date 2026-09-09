@@ -25,6 +25,10 @@ lidar_boom:
       # config revives it briefly, so a healthy reading right after a restart
       # does not mean it will still be alive an hour later.
       # ACCEL32_GYRO32_NMEA is the format 3.2 added and it keeps streaming.
+      # LEGACY 로 잠깐 되돌려 100 Hz 와 480 Hz 를 비교한 결과(2026-09-09), 맵 노이즈의
+      # 상당부분이 레이트 탓임이 확인됐다. 다만 원인은 프로파일이 아니라 레벨링 필터가
+      # dt 를 안 쓰던 것이라, rn_grid_map/imu_leveling.hpp 쪽을 고쳤다. LEGACY 는 몇 분
+      # 뒤 송신을 멈추므로 상시 운용에 못 쓴다 - 여기는 ACCEL32 로 유지한다.
       udp_profile_imu: 'ACCEL32_GYRO32_NMEA'
       # metadata[optional]: path to save metadata file to
       metadata: ''
