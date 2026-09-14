@@ -33,7 +33,7 @@ make_recover() { # name exitcode
   local f="$TMP/$1.recover"
   cat > "$f" <<EOF
 #!/usr/bin/env bash
-echo called >> "$TMP/$1.calls"
+echo "\$@" >> "$TMP/$1.calls"
 echo "fake recover ran"
 exit $2
 EOF
@@ -67,6 +67,12 @@ check "healthy stack never touches recovery" 0 0 a
 
 run_pf "$(make_health b 1 0)" "$(make_recover b 0)" "$NOCLIENT" true
 check "wedged + no client + root -> recovers" 0 1 b
+if grep -q -- '--safe' "$TMP/b.calls" 2>/dev/null; then
+  ok "automatic recovery runs in --safe mode"
+else
+  no "preflight must pass --safe: unattended recovery may not touch the kernel" \
+     "args=$(cat "$TMP/b.calls" 2>/dev/null)"
+fi
 
 run_pf "$(make_health c 2)" "$(make_recover c 0)" "$LIVECLIENT" true
 check "live camera client blocks automatic recovery" 2 0 c

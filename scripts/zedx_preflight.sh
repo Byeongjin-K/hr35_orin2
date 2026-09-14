@@ -55,8 +55,8 @@ if ! eval "$ROOT_CHECK_CMD" >/dev/null 2>&1 && [ ! -t 0 ]; then
   exit 2
 fi
 
-say "no camera client is running -- recovering now: $RECOVER_CMD"
-"$RECOVER_CMD" 2>&1 | sed 's/^/    /'
+say "no camera client is running -- recovering now: $RECOVER_CMD --safe --run"
+"$RECOVER_CMD" --safe --run 2>&1 | sed 's/^/    /'
 
 health_out="$("$HEALTH_CMD" 2>&1)"; health_rc=$?
 verdict="$(verdict_of "$health_out")"

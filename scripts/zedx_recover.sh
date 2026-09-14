@@ -5,11 +5,13 @@
 #   1 stop-clients     retire every process holding a camera (the wedge deepens
 #                      while one is alive, and unbind/rmmod on an open fd is fatal)
 #   2 restart-nvargus  drop argus' orphaned capture session
-#   3 rebind-sensors   re-probe the zedx i2c clients: re-registers the v4l2 subdevs
-#                      without unloading anything, so a damaged refcount cannot block it
-#   4 repair-refcnt    ONLY when /sys/module/sl_zedx/refcnt < 0: restore the base
+#   (removed) rebind-sensors  unbinding the zedx i2c clients oopsed the kernel on
+#                      2026-09-14: the re-bind failed and a live Argus thread then
+#                      dereferenced the dead subdev in tegra_channel_set_power.
+#                      panic_on_oops=1 turned that into a reboot. Never again.
+#   3 repair-refcnt    ONLY when /sys/module/sl_zedx/refcnt < 0: restore the base
 #                      module reference with tools/zedx_refcnt so rmmod becomes legal
-#   5 reload-drivers   systemctl restart zed_x_daemon, i.e. the vendor's real
+#   4 reload-drivers   systemctl restart zed_x_daemon, i.e. the vendor's real
 #                      rmmod+insmod, and then VERIFY it actually happened
 #
 # HARD GUARD: on this kernel panic_on_oops=1 and rmmod on a module whose atomic
@@ -27,8 +29,22 @@ SUDO="${SUDO:-sudo}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REFCNT_TOOL="${ZEDX_REFCNT_TOOL:-$HERE/../tools/zedx_refcnt}"
 SERIAL="${ZEDX_SERIAL:-49749405}"
-PLAN_ONLY=0
-[ "${1:-}" = "--plan" ] && PLAN_ONLY=1
+# Dry run is the DEFAULT. On 2026-09-14 `--safe --plan` executed the real ladder because
+# only $1 was inspected, which killed a streaming node and wedged the stack. A script that
+# kills processes and restarts daemons must never execute by accident: --run is required.
+PLAN_ONLY=1
+SAFE=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --run)  PLAN_ONLY=0 ;;
+    --plan) PLAN_ONLY=1 ;;
+    --safe) SAFE=1 ;;
+    *) echo "unknown option: $1" >&2
+       echo "usage: $(basename "$0") [--run] [--safe]   (default: plan only)" >&2
+       exit 64 ;;
+  esac
+  shift
+done
 
 refcnt="$(cat "$MODULE_DIR/sl_zedx/refcnt" 2>/dev/null || echo unknown)"
 clients="$(pgrep -af "$CLIENT_PATTERN" 2>/dev/null | head -5 || true)"
@@ -40,15 +56,19 @@ n=0
 step() { n=$((n+1)); echo "STEP $n $1"; }
 [ "$client_n" -gt 0 ] && step "stop-clients"
 step "restart-nvargus"
-step "rebind-sensors"
-if [ "$refcnt" != "unknown" ] && [ "$refcnt" -lt 0 ] 2>/dev/null; then
-  step "repair-refcnt"
-  echo "GUARD reload-drivers stays blocked until refcnt >= 0 (rmmod at atomic 0 can panic this kernel)"
+if [ "$SAFE" = 1 ]; then
+  echo "SAFE stops here: every remaining rung touches the kernel and needs a human."
+  echo "GUARD kernel rungs are not run unattended; run them yourself: sudo $0 --run"
+else
+  if [ "$refcnt" != "unknown" ] && [ "$refcnt" -lt 0 ] 2>/dev/null; then
+    step "repair-refcnt"
+    echo "GUARD reload-drivers stays blocked until refcnt >= 0 (rmmod at atomic 0 can panic this kernel)"
+  fi
+  step "reload-drivers"
 fi
-step "reload-drivers"
 
 if [ "$PLAN_ONLY" = 1 ]; then
-  echo "PLAN ONLY - nothing was executed"
+  echo "PLAN ONLY - nothing was executed. Add --run to execute."
   exit 0
 fi
 
@@ -81,14 +101,15 @@ $SUDO systemctl restart nvargus-daemon
 for _ in $(seq 1 30); do [ "$($SUDO systemctl is-active nvargus-daemon)" = active ] && break; sleep 0.5; done
 probe_ok && { echo "RECOVERED after restart-nvargus"; exit 0; }
 
-say "3 rebind-sensors"
-for d in 10-0020 10-0028; do echo "$d" | $SUDO tee /sys/bus/i2c/drivers/zedx/unbind >/dev/null 2>&1; done
-for d in 10-0020 10-0028; do echo "$d" | $SUDO tee /sys/bus/i2c/drivers/zedx/bind   >/dev/null 2>&1; done
-$SUDO systemctl restart nvargus-daemon
-for _ in $(seq 1 30); do [ "$($SUDO systemctl is-active nvargus-daemon)" = active ] && break; sleep 0.5; done
-probe_ok && { echo "RECOVERED after rebind-sensors"; exit 0; }
 
-say "4 repair-refcnt"
+if [ "$SAFE" = 1 ]; then
+  echo
+  echo "SAFE MODE: the userspace rungs did not fix it and the rest touches the kernel."
+  echo "Run them yourself, watching the output:  sudo $0 --run"
+  exit 2
+fi
+
+say "3 repair-refcnt"
 refcnt="$(cat /sys/module/sl_zedx/refcnt 2>/dev/null || echo unknown)"
 if [ "$refcnt" != "unknown" ] && [ "$refcnt" -lt 0 ] 2>/dev/null; then
   [ -f "$REFCNT_TOOL/zedx_refcnt.ko" ] || (cd "$REFCNT_TOOL" && make) || { echo "ABORT: cannot build zedx_refcnt"; exit 4; }
@@ -101,7 +122,7 @@ else
   echo "refcnt=$refcnt, nothing to repair"
 fi
 
-say "5 reload-drivers"
+say "4 reload-drivers"
 if [ "$refcnt" = "unknown" ] || [ "$refcnt" -lt 0 ] 2>/dev/null; then
   echo "ABORT: refcnt=$refcnt is still negative. Refusing to let zed_x_daemon run rmmod:"
   echo "       BUG_ON in try_release_module_ref() would panic this kernel (panic_on_oops=1)."

@@ -358,3 +358,43 @@ ZED 노드가 `=== CLOSING CAMERA ===` 를 끝내는 데는 그보다 오래 걸
   되돌리려면: `rm ~/.local/bin/sensors && cp ~/.local/bin/sensors.bak.20260909-141728 ~/.local/bin/sensors`
 - 로그인 셸마다 점검을 돌리지는 **않는다**. 점검은 카메라를 띄우는 순간에만 의미가 있고,
   매 셸마다 돌면 소음이자 sudo 프롬프트 지뢰다.
+
+## 10. 2026-09-14 사고 — 이 도구가 커널을 패닉시켰다
+
+`sensors start` 의 자동 복구가 돌면서 기계가 **커널 패닉으로 재부팅**되어 원격 SSH 가 끊겼다.
+증거는 ramoops 에 그대로 남았다: `~/data/zedx_incidents/20260914-panic/`.
+
+```
+[4652.332] zedx 10-0020: zedx_probe: ar0234 initialization failed   <- unbind 뒤 re-bind 실패
+[4652.400] zedx 10-0028: zedx_probe: ar0234 initialization failed
+[4652.461] pc : __pi_memcmp   lr : strnstr
+           tegra_channel_set_power [tegra_camera] <- __fput <- do_exit
+           Comm: TempBufferAcqui                  <- argus 캡처 스레드 종료
+[4653.479] Kernel panic - not syncing: Oops: Fatal exception
+```
+
+사슬: 2단계가 `nvargus-daemon` 을 재시작하고 probe 가 argus 세션을 새로 만든다 →
+3단계 `rebind-sensors` 가 **그 세션 밑에서 드라이버를 unbind** → re-bind 가 실패해 v4l2 subdev 가
+사라짐 → 130ms 뒤 살아있던 argus 스레드가 종료되며 없어진 subdev 를 참조 → oops →
+`panic_on_oops=1` 이므로 즉시 패닉·재부팅.
+
+"카메라 클라이언트 없음" 게이트가 이걸 막지 못한 이유: **v4l2 fd 를 실제로 쥐고 있는 것은
+`nvargus-daemon`** 인데 클라이언트 패턴(`component_container|ZED_Explorer|...`)에 없었다.
+
+### 고친 것
+
+1. **`rebind-sensors` 룽 삭제.** 한 번도 카메라를 살린 적이 없고, 커널을 죽인 전력이 있다.
+2. **파괴적 스크립트의 기본값을 dry-run 으로.** 같은 날 두 번째 사고는 테스트가
+   `zedx_recover.sh --safe --plan` 을 호출했는데 파서가 `$1` 만 보느라 `--plan` 을 놓쳐
+   **진짜 사다리를 실행**한 것이었다(스트리밍 중인 노드를 SIGKILL → `refcnt=-1`).
+   이제 실행하려면 `--run` 이 필요하고, 모르는 플래그는 exit 64 로 거부한다.
+3. **무인 실행은 커널을 건드리지 않는다.** `sensors start` 의 preflight 는
+   `zedx_recover.sh --safe --run` 을 부르고, `--safe` 는 사용자 공간 룽
+   (stop-clients, restart-nvargus)에서 멈춘다. refcnt 복구·드라이버 재로드처럼 커널을 만지는
+   단계는 **사람이 직접** `sudo zedx_recover.sh --run` 으로 실행한다.
+
+### 남은 위험
+
+`panic_on_oops=1` 이므로 이 스택에서 커널 oops 는 곧 재부팅이다. 값을 바꾸지는 않았다 —
+카메라 드라이버가 oops 난 뒤 계속 도는 쪽이 더 나쁘다. 대신 **무인 경로가 커널을 건드리지 않게**
+막는 방향을 택했다.

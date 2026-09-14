@@ -58,6 +58,38 @@ after="$(cat /sys/module/sl_zedx/refcnt 2>/dev/null)"
 [ "$before" = "$after" ] && ok "plan mode changed nothing on the real system (=$after)" \
   || no "plan mode must not touch the real system ($before -> $after)"
 
+# rebind-sensors is not a rung any more. On 2026-09-14 it unbound the sensor out from
+# under a live Argus thread, the re-bind failed ("ar0234 initialization failed"), and the
+# next fput dereferenced the dead subdev: Oops in tegra_channel_set_power -> panic_on_oops
+# -> reboot. Evidence: ~/data/zedx_incidents/20260914-panic/
+out="$(plan "$(mk_mod norebind -1)" "$NOCLIENT")"
+if printf '%s' "$out" | grep -q 'rebind-sensors'; then
+  no "the ladder must not plan rebind-sensors" "$out"
+else
+  ok "rebind-sensors is gone from the ladder"
+fi
+
+# --safe is the mode the tmux launcher runs unattended: userspace rungs only, never the kernel.
+safe="$(ZEDX_MODULE_DIR="$(mk_mod safemode -1)" ZEDX_CLIENT_PATTERN="$NOCLIENT" \
+        bash "$SCRIPT" --safe --plan 2>&1)"
+if printf '%s' "$safe" | grep -q 'restart-nvargus' \
+   && ! printf '%s' "$safe" | grep -qE 'repair-refcnt|reload-drivers'; then
+  ok "--safe plans only the userspace rungs"
+else
+  no "--safe must stop before every kernel-touching rung" "$safe"
+fi
+
+# 2026-09-14: `--safe --plan` executed the real ladder because only $1 was inspected.
+# It SIGKILLed a streaming node and wedged the stack. Nothing runs without --run now.
+for args in "" "--safe" "--plan" "--safe --plan" "--plan --safe"; do
+  o="$(ZEDX_MODULE_DIR="$(mk_mod dryrun 0)" ZEDX_CLIENT_PATTERN="$NOCLIENT" bash "$SCRIPT" $args 2>&1)"
+  if printf '%s' "$o" | grep -q 'PLAN ONLY'; then
+    ok "'${args:-<no args>}' is a dry run"
+  else
+    no "'${args:-<no args>}' must not execute anything" "$o"
+  fi
+done
+
 echo "----"
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]
