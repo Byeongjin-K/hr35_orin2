@@ -43,8 +43,8 @@ elif ! printf '%s' "$refcnt" | grep -qE '^-?[0-9]+$'; then
   verdict=REBOOT_REQUIRED; code=2
   reason="cannot parse sl_zedx refcnt ('$refcnt')."
 elif [ "$refcnt" -lt 0 ]; then
-  verdict=REBOOT_REQUIRED; code=2
-  reason="sl_zedx module use-count underflowed (refcnt=$refcnt). rmmod can never succeed, so 'systemctl restart zed_x_daemon' silently fails (rmmod: in use -> insmod: File exists) while still logging 'ZED-X Driver loaded'. CONFIG_MODULE_FORCE_UNLOAD is off, so rmmod -f does not exist either."
+  verdict=RECOVERABLE; code=1
+  reason="sl_zedx module use-count underflowed (refcnt=$refcnt, i.e. atomic 0). try_module_get() then fails, tegracam never starts the stream, and BOTH cameras report FROZEN. Restoring the lost base reference fixes it without a reboot (proven 2026-09-14): sudo $(dirname "$0")/zedx_recover.sh --run"
 elif [ "$argus_faults" -gt 0 ] && [ "$client_n" -eq 0 ]; then
   verdict=RECOVERABLE; code=1
   reason="nvargus-daemon reports $argus_faults capture-session fault line(s) in $ARGUS_WINDOW while no process holds a camera: a streaming client died without releasing the sensor."
@@ -74,11 +74,10 @@ case "$verdict" in
     echo "           check 'camera clients' above before touching any daemon."
     ;;
   RECOVERABLE)
-    echo "next step (in order, stop as soon as the camera opens):"
-    echo "  1) sudo systemctl restart nvargus-daemon"
-    echo "  2) sudo systemctl restart zed_x_daemon && \\"
-    echo "     journalctl -u zed_x_daemon -n 20 --no-pager | grep -E 'rmmod|insmod'"
-    echo "     ^ if that grep shows 'is in use' or 'File exists', the reload did NOT happen: reboot."
+    echo "next step: sudo bash $(dirname "$0")/zedx_recover.sh --run"
+    echo "           It restarts argus, restores the lost module reference, and opens the camera."
+    echo "           Do NOT restart zed_x_daemon to fix this: its own GMSL port bring-up fails and"
+    echo "           spends the restored reference before anything can use it (2026-09-14)."
     ;;
   REBOOT_REQUIRED)
     echo "next step: sudo reboot   — no userspace action can fix this state."

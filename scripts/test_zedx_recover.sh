@@ -69,14 +69,17 @@ else
   ok "rebind-sensors is gone from the ladder"
 fi
 
-# --safe is the mode the tmux launcher runs unattended: userspace rungs only, never the kernel.
+# --safe is what the tmux launcher runs unattended. Restoring the lost module reference is
+# allowed there: one atomic increment, no BUG_ON path, and it is what actually revived the
+# camera on 2026-09-14. Unloading modules is not, so no reload rung may be planned.
 safe="$(ZEDX_MODULE_DIR="$(mk_mod safemode -1)" ZEDX_CLIENT_PATTERN="$NOCLIENT" \
         bash "$SCRIPT" --safe --plan 2>&1)"
 if printf '%s' "$safe" | grep -q 'restart-nvargus' \
-   && ! printf '%s' "$safe" | grep -qE 'repair-refcnt|reload-drivers'; then
-  ok "--safe plans only the userspace rungs"
+   && printf '%s' "$safe" | grep -q 'repair-refcnt' \
+   && ! printf '%s' "$safe" | grep -qE 'STEP [0-9]+ reload-drivers'; then
+  ok "--safe plans restart-nvargus and repair-refcnt, but never unloads modules"
 else
-  no "--safe must stop before every kernel-touching rung" "$safe"
+  no "--safe must repair the reference and stop before unloading modules" "$safe"
 fi
 
 # 2026-09-14: `--safe --plan` executed the real ladder because only $1 was inspected.
@@ -99,6 +102,29 @@ if [ -n "$nv" ] && [ -n "$fd" ] && [ "$fd" -gt "$nv" ]; then
   ok "the /dev/video fd guard sits after restart-nvargus ($fd > $nv)"
 else
   no "the fd guard must come after restart-nvargus (nvargus=$nv guard=$fd)"
+fi
+
+# 2026-09-14: restart-nvargus + repair-refcnt + open is what actually revived the camera
+# (refcnt -1 == atomic 0 makes try_module_get fail, so tegracam never starts the stream and
+# the camera reports FROZEN). reload-drivers is NOT needed and its daemon bring-up burns the
+# repaired reference before anyone can use it, which is why the 12:21 attempt failed.
+ord_repair="$(grep -n 'say "3 repair-refcnt"' "$SCRIPT" | head -1 | cut -d: -f1)"
+ord_probe="$(grep -n 'RECOVERED after repair-refcnt' "$SCRIPT" | head -1 | cut -d: -f1)"
+ord_reload="$(grep -n 'say "4 reload-drivers"' "$SCRIPT" | head -1 | cut -d: -f1)"
+if [ -n "$ord_repair" ] && [ -n "$ord_probe" ] && [ -n "$ord_reload" ] \
+   && [ "$ord_repair" -lt "$ord_probe" ] && [ "$ord_probe" -lt "$ord_reload" ]; then
+  ok "the camera is tried right after repair-refcnt, before reload-drivers"
+else
+  no "repair -> open -> reload ordering broken (repair=$ord_repair probe=$ord_probe reload=$ord_reload)"
+fi
+
+safe2="$(ZEDX_MODULE_DIR="$(mk_mod safe_repair -1)" ZEDX_CLIENT_PATTERN="$NOCLIENT" \
+         bash "$SCRIPT" --safe --plan 2>&1)"
+if printf '%s' "$safe2" | grep -q 'repair-refcnt' \
+   && ! printf '%s' "$safe2" | grep -q 'reload-drivers'; then
+  ok "--safe repairs the refcount but never unloads modules"
+else
+  no "--safe must include repair-refcnt and exclude reload-drivers" "$safe2"
 fi
 
 echo "----"

@@ -56,13 +56,16 @@ n=0
 step() { n=$((n+1)); echo "STEP $n $1"; }
 [ "$client_n" -gt 0 ] && step "stop-clients"
 step "restart-nvargus"
+damaged=0
+if [ "$refcnt" != "unknown" ] && [ "$refcnt" -lt 0 ] 2>/dev/null; then
+  step "repair-refcnt"
+  damaged=1
+fi
 if [ "$SAFE" = 1 ]; then
-  echo "SAFE stops here: every remaining rung touches the kernel and needs a human."
-  echo "GUARD kernel rungs are not run unattended; run them yourself: sudo $0 --run"
+  echo "SAFE stops after the repair: the last rung unloads kernel modules, and that needs a human."
 else
-  if [ "$refcnt" != "unknown" ] && [ "$refcnt" -lt 0 ] 2>/dev/null; then
-    step "repair-refcnt"
-    echo "GUARD reload-drivers stays blocked until refcnt >= 0 (rmmod at atomic 0 can panic this kernel)"
+  if [ "$damaged" = 1 ]; then
+    echo "GUARD the last rung stays blocked until refcnt >= 0 (rmmod at atomic 0 can panic this kernel)"
   fi
   step "reload-drivers"
 fi
@@ -111,13 +114,6 @@ if [ "$held" -ne 0 ]; then
 fi
 
 
-if [ "$SAFE" = 1 ]; then
-  echo
-  echo "SAFE MODE: the userspace rungs did not fix it and the rest touches the kernel."
-  echo "Run them yourself, watching the output:  sudo $0 --run"
-  exit 2
-fi
-
 say "3 repair-refcnt"
 refcnt="$(cat /sys/module/sl_zedx/refcnt 2>/dev/null || echo unknown)"
 if [ "$refcnt" != "unknown" ] && [ "$refcnt" -lt 0 ] 2>/dev/null; then
@@ -129,6 +125,18 @@ if [ "$refcnt" != "unknown" ] && [ "$refcnt" -lt 0 ] 2>/dev/null; then
   echo "refcnt after repair: $refcnt"
 else
   echo "refcnt=$refcnt, nothing to repair"
+fi
+
+# This is the rung that actually revived the camera on 2026-09-14. Try it BEFORE touching
+# any module: reloading the drivers makes zed_x_daemon re-open the GMSL ports on its own, and
+# that failing attempt spends the reference we just restored.
+probe_ok && { echo "RECOVERED after repair-refcnt"; exit 0; }
+
+if [ "$SAFE" = 1 ]; then
+  echo
+  echo "SAFE MODE: repairing the reference was not enough, and the rest unloads kernel modules."
+  echo "Run it yourself, watching the output:  sudo $0 --run"
+  exit 2
 fi
 
 say "4 reload-drivers"

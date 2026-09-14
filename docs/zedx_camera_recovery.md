@@ -430,3 +430,62 @@ ZED 노드가 `=== CLOSING CAMERA ===` 를 끝내는 데는 그보다 오래 걸
 `CAMERA STREAM FAILED TO START` 의 이 형태에 대해 **검증된 무재부팅 복구 수단은 없다.**
 있는 것은 (a) 애초에 wedge 를 만들지 않는 예방(clean stop, 워치독 회피)과
 (b) 30초 안에 "재부팅이 필요하다"를 확정해주는 판정이다.
+
+## 12. 정정 — FROZEN 은 원인이 아니라 증상이었다 (2026-09-14 오후, 무재부팅 복구 성공)
+
+11장은 "모듈 재로드로도 안 풀리니 재부팅밖에 없다"고 결론지었다. **그것도 틀렸다.**
+같은 날 오후 재부팅 없이 카메라를 되살렸다.
+
+### 무엇이 진짜였나
+
+`/sys/module/sl_zedx/refcnt = -1` 은 atomic 0 이다. `try_module_get()` 은 `atomic_inc_not_zero`
+이므로 **0 에서는 실패한다.** tegracam 의 스트림 시작 경로가 바로 그것을 호출하므로 CSI 스트림이
+영영 켜지지 않고, 카메라 MCU 는 호스트를 기다리다 스스로 `FROZEN` 을 보고한다.
+
+```
+Port 1 OPENING for CAM ModeliD 8
+Port 1 CLOSING for CAM ModeliD 8
+Received invalid message: "ZEDX#1#8#FROZEN"
+```
+
+판별 증거: **boom 카메라(다른 GMSL 포트, 다른 하드웨어)도 똑같이 FROZEN** 이었다. 두 카메라의
+공통분모는 하드웨어가 아니라 `sl_zedx` 모듈 하나뿐이다. 즉 카메라가 고장 난 것이 아니었다.
+`AVAILABLE` 은 I2C 열거만 성공했다는 뜻이라 이 판단에 쓰면 안 된다.
+
+### 실제로 들은 순서
+
+```
+1. systemctl restart nvargus-daemon        # argus 가 쥔 /dev/video fd 를 놓게 한다
+2. insmod zedx_refcnt.ko ... repair=1      # 잃어버린 base reference 하나를 되돌린다
+3. 곧바로 연다
+```
+
+```
+refcnt before repair: -1
+after repair:          0
+refcnt immediately before open: 0
+OPEN_RESULT SUCCESS / GRAB SUCCESS / FRAME 1920 1200
+[12:37:07] Port 1 OPENING -> Port 1 Running      <- 그날 처음 나온 Running
+ros2 topic hz ... average rate: 9.998
+```
+
+### 12:21 시도가 실패한 이유 (중요)
+
+그때도 repair 는 성공했다. 그런데 곧바로 **reload-drivers** 를 돌렸고, `zed_x_daemon` 이 재시작되면서
+**스스로 GMSL 포트를 열려고 시도**한다. 그 시도가 실패하면서 방금 되돌려놓은 참조를 그대로 태웠다.
+probe 는 그 뒤에 돌았으니 실패할 수밖에 없었다.
+
+**그래서 사다리에서 `reload-drivers` 를 기본 경로에서 뺐다.** 지금은 repair 직후 곧바로 카메라를
+열어보고, 그래도 안 되면 그때만 reload 로 간다.
+
+### 판정 변경
+
+`refcnt < 0` 은 이제 `REBOOT_REQUIRED` 가 아니라 **`RECOVERABLE`(exit 1)** 이다.
+`zedx_health.sh` 는 `sudo zedx_recover.sh --run` 을 안내하고, "이걸 고치겠다고 zed_x_daemon 을
+재시작하지 말라"고 경고한다. `REBOOT_REQUIRED` 는 이제 **드라이버가 아예 안 올라온 경우**에만 쓴다.
+
+### 무인 경로에서 허용되는 것
+
+`--safe` (=`sensors start` 가 부르는 것)는 stop-clients, restart-nvargus, **repair-refcnt** 까지 한다.
+repair 는 atomic 증가 하나이고 BUG_ON 경로가 없어 무인 실행이 안전하다. 모듈을 내리는 rung 은
+여전히 사람이 지켜보며 `sudo zedx_recover.sh --run` 으로만 돈다.

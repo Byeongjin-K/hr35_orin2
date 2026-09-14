@@ -48,10 +48,10 @@ Sep 08 10:20:38 exca-orin-2 nvargus-daemon[2576]: (Argus) Error AlreadyAllocated
 EOF
 
 run_case "healthy stack"                  0 HEALTHY         "$(mk_mod healthy 2)"   "$clean_log" "$NO_CLIENT_PATTERN"
-run_case "refcnt underflow"               2 REBOOT_REQUIRED "$(mk_mod broken -1)"   "$clean_log" "$NO_CLIENT_PATTERN"
+run_case "refcnt underflow"               1 RECOVERABLE     "$(mk_mod broken -1)"   "$clean_log" "$NO_CLIENT_PATTERN"
 run_case "driver not loaded"              2 REBOOT_REQUIRED "$(mk_mod noload none)" "$clean_log" "$NO_CLIENT_PATTERN"
 run_case "stale argus, no client"         1 RECOVERABLE     "$(mk_mod orphan 0)"    "$stale_log" "$NO_CLIENT_PATTERN"
-run_case "underflow outranks argus"       2 REBOOT_REQUIRED "$(mk_mod both -1)"     "$stale_log" "$NO_CLIENT_PATTERN"
+run_case "underflow outranks argus"       1 RECOVERABLE     "$(mk_mod both -1)"     "$stale_log" "$NO_CLIENT_PATTERN"
 # Regression: nvargus logs the very same lines during ordinary contention while a node legitimately
 # holds the camera. A live client means the sensor is NOT orphaned. Goes through the real pgrep path.
 run_case "faults but client holds camera" 0 HEALTHY         "$(mk_mod busy 3)"      "$stale_log" "$LIVE_CLIENT_PATTERN"
