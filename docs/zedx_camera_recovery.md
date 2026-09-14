@@ -489,3 +489,66 @@ probe 는 그 뒤에 돌았으니 실패할 수밖에 없었다.
 `--safe` (=`sensors start` 가 부르는 것)는 stop-clients, restart-nvargus, **repair-refcnt** 까지 한다.
 repair 는 atomic 증가 하나이고 BUG_ON 경로가 없어 무인 실행이 안전하다. 모듈을 내리는 rung 은
 여전히 사람이 지켜보며 `sudo zedx_recover.sh --run` 으로만 돈다.
+
+## 13. 최종 모델 — 고장은 2단계다 (2026-09-14 저녁, 반증으로 확정)
+
+12장은 "refcnt 만 복구하면 열린다"고 했다. **필요조건이지 충분조건이 아니다.**
+
+### 반증한 실험
+
+재시도 루프를 PID 로 전부 제거(zed 프로세스 0, `/dev/video` 점유 0) → `nvargus-daemon` 재시작 →
+refcnt 복구 → **6초간 refcnt 가 0 을 유지하는 것까지 확인**(아무도 태우지 않음) → open.
+
+```
+refcnt 1s:0 2s:0 3s:0 4s:0 5s:0 6s:0
+13:10:50 Port 1 OPENING
+13:11:11 Port 1 CLOSING          <- 21초 침묵 = argus 타임아웃
+13:11:29 UNDERFLOW (PID 122753 = 실패한 probe 자신)
+13:12:06 "ZEDX#1#8#FROZEN"
+```
+
+완전히 깨끗한 상태에서도 열리지 않았다. 따라서 refcnt 는 고장의 **한 층**일 뿐이다.
+
+### 2단계 모델
+
+| 단계 | 상태 | 복구 |
+|---|---|---|
+| 1단계 | `refcnt < 0` 만 깨짐. 카메라 MCU 는 아직 멀쩡 | **무재부팅 복구 가능.** restart-nvargus → repair-refcnt → 곧바로 open (2026-09-14 12:35 성공) |
+| 2단계 | 실패한 open 이 반복되어 **MCU 가 FROZEN 에 고착** | **재부팅만.** PoC 전원 재인가 외에 방법 없음 |
+
+부팅 이후 누적(2026-09-14):
+
+```
+Port Running : 3   (마지막 12:37:07 = 1단계에서 복구에 성공한 순간)
+Port OPENING : 17
+FROZEN       : 32
+```
+
+12:37 이후 14번의 open 시도가 **전부 Running 에 도달하지 못했다.** 1단계에서 잡지 못하고
+재시도를 반복하면 2단계로 굳는다.
+
+### 그래서 운영 규칙
+
+- **`zedx_health.sh` 가 뭔가 말하면 즉시 `zedx_recover.sh --run`.** 늦을수록 2단계로 굳는다.
+- **안 열린다고 런치를 반복하지 말 것.** 실패한 open 1회 = MCU 를 FROZEN 쪽으로 한 칸 미는 것.
+- 복구 후에도 `Port ... Running` 이 안 뜨면 2단계다. 그때는 재부팅이 가장 빠르다.
+- 판정 근거: `journalctl -u zed_x_daemon | grep -c 'Running for CAM'` 가 늘어나면 1단계 복구 성공.
+
+### 이번에 같이 고친 코드 결함
+
+1. `zedx_recover.sh` 가 `systemctl is-active` / `journalctl` 을 `$SUDO` 로 호출했다. 이 둘은
+   `/etc/sudoers.d/zedx-recovery` 화이트리스트에 없어 **비밀번호 프롬프트에서 멈춘다** —
+   `sensors start` 의 무인 경로가 거기서 영영 매달렸다. root 가 필요 없는 명령이므로 sudo 를 뺐다.
+2. `zedx_preflight.sh` 의 root 검사가 `sudo -n true`(무제한 무비번)를 봤다. 우리는 명령 4개만
+   허용하므로 `sudo -n -l <그 명령>` 으로 바꿨다.
+3. insmod 경로에 `..` 이 들어가 sudoers 의 리터럴 매칭에 걸리지 않았다. 정규 경로로 바꿨다.
+4. `stop-clients` 가 `ros2 launch` 감독 프로세스를 못 잡았다(패턴이 `component_container` 뿐).
+   살아남은 감독이 6초마다 재시도하며 **복구를 1초 만에 되돌렸다**. fd 가드도 재시도 사이
+   빈틈에서 `0` 으로 통과했다. 정리는 패턴이 아니라 **PID 지목**으로 해야 한다
+   (패턴 kill 은 같은 문자열을 포함한 진단 셸까지 죽인다).
+
+### sudoers
+
+`/etc/sudoers.d/zedx-recovery` 에 복구가 쓰는 명령 4개만 NOPASSWD. `kimm` 은 원래 `ALL:ALL` 이라
+권한이 늘어난 것이 아니라 프롬프트만 사라진 것이고, 평문 비밀번호는 어디에도 저장하지 않았다.
+되돌리기: `sudo rm /etc/sudoers.d/zedx-recovery`.

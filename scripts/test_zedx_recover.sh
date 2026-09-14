@@ -127,6 +127,25 @@ else
   no "--safe must include repair-refcnt and exclude reload-drivers" "$safe2"
 fi
 
+# The NOPASSWD rule in /etc/sudoers.d/zedx-recovery matches the insmod command as a literal
+# string, so a path containing ".." would silently fall back to a password prompt and hang the
+# unattended path in `sensors start`.
+cmd="$(ZEDX_MODULE_DIR="$(mk_mod canon -1)" ZEDX_CLIENT_PATTERN="$NOCLIENT" bash "$SCRIPT" --plan 2>&1 \
+       | grep '^CMD ' | head -1)"
+if [ -n "$cmd" ] && ! printf '%s' "$cmd" | grep -q '\.\.'; then
+  ok "the planned repair command is a canonical path"
+else
+  no "the repair command must be a canonical path (no ..)" "${cmd:-<no CMD line>}"
+fi
+
+# /etc/sudoers.d/zedx-recovery whitelists only the four mutating commands. Routing a read-only
+# command through sudo would sit on a password prompt and hang `sensors start` forever.
+if grep -nE '\$SUDO +(systemctl is-active|journalctl)' "$SCRIPT" >/dev/null; then
+  no "read-only commands must not go through sudo" "$(grep -nE '\$SUDO +(systemctl is-active|journalctl)' "$SCRIPT")"
+else
+  ok "no read-only command is routed through sudo"
+fi
+
 echo "----"
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]

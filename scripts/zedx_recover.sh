@@ -27,7 +27,9 @@ MODULE_DIR="${ZEDX_MODULE_DIR:-/sys/module}"
 CLIENT_PATTERN="${ZEDX_CLIENT_PATTERN:-component_container|ZED_Explorer|ZED_Depth_Viewer|ZED_Media_Server}"
 SUDO="${SUDO:-sudo}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REFCNT_TOOL="${ZEDX_REFCNT_TOOL:-$HERE/../tools/zedx_refcnt}"
+# Resolved without ".." so it matches the sudoers rule literally: sudo compares the command
+# string, and /etc/sudoers.d/zedx-recovery lists the canonical path.
+REFCNT_TOOL="${ZEDX_REFCNT_TOOL:-$(cd "$HERE/.." && pwd)/tools/zedx_refcnt}"
 SERIAL="${ZEDX_SERIAL:-49749405}"
 # Dry run is the DEFAULT. On 2026-09-14 `--safe --plan` executed the real ladder because
 # only $1 was inspected, which killed a streaming node and wedged the stack. A script that
@@ -59,6 +61,7 @@ step "restart-nvargus"
 damaged=0
 if [ "$refcnt" != "unknown" ] && [ "$refcnt" -lt 0 ] 2>/dev/null; then
   step "repair-refcnt"
+  echo "CMD  insmod $REFCNT_TOOL/zedx_refcnt.ko target=sl_zedx driver=zedx repair=1"
   damaged=1
 fi
 if [ "$SAFE" = 1 ]; then
@@ -98,7 +101,7 @@ fi
 
 say "2 restart-nvargus"
 $SUDO systemctl restart nvargus-daemon
-for _ in $(seq 1 30); do [ "$($SUDO systemctl is-active nvargus-daemon)" = active ] && break; sleep 0.5; done
+for _ in $(seq 1 30); do [ "$(systemctl is-active nvargus-daemon)" = active ] && break; sleep 0.5; done
 probe_ok && { echo "RECOVERED after restart-nvargus"; exit 0; }
 
 # The fd guard belongs HERE, not before restart-nvargus: nvargus-daemon is itself the
@@ -148,12 +151,12 @@ if [ "$refcnt" = "unknown" ] || [ "$refcnt" -lt 0 ] 2>/dev/null; then
 fi
 $SUDO systemctl restart zed_x_daemon
 for _ in $(seq 1 40); do
-  $SUDO journalctl -u zed_x_daemon --no-pager --since '-2min' | grep -q 'ZED-X Driver loaded' && break; sleep 1
+  journalctl -u zed_x_daemon --no-pager --since '-2min' | grep -q 'ZED-X Driver loaded' && break; sleep 1
 done
 # The daemon logs "ZED-X Driver loaded" even when every rmmod/insmod inside it failed.
-if $SUDO journalctl -u zed_x_daemon --no-pager --since '-2min' | grep -qE 'is in use|File exists'; then
+if journalctl -u zed_x_daemon --no-pager --since '-2min' | grep -qE 'is in use|File exists'; then
   echo "reload did NOT happen (rmmod/insmod refused):"
-  $SUDO journalctl -u zed_x_daemon --no-pager --since '-2min' | grep -E 'rmmod|insmod' | tail -6
+  journalctl -u zed_x_daemon --no-pager --since '-2min' | grep -E 'rmmod|insmod' | tail -6
   echo "FAILED: reboot required"
   exit 6
 fi

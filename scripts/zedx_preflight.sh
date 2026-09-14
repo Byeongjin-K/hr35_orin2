@@ -25,7 +25,9 @@ SUDO="${SUDO:-sudo}"
 HEALTH_CMD="${ZEDX_HEALTH_CMD:-$HERE/zedx_health.sh}"
 RECOVER_CMD="${ZEDX_RECOVER_CMD:-$HERE/zedx_recover.sh}"
 CLIENT_PATTERN="${ZEDX_CLIENT_PATTERN:-component_container|ZED_Explorer|ZED_Depth_Viewer|ZED_Media_Server}"
-ROOT_CHECK_CMD="${ZEDX_ROOT_CHECK_CMD:-$SUDO -n true}"
+# We do not have blanket passwordless sudo; /etc/sudoers.d/zedx-recovery whitelists exactly
+# the commands the recovery runs. `sudo -n -l <cmd>` asks "may I run this?" without running it.
+ROOT_CHECK_CMD="${ZEDX_ROOT_CHECK_CMD:-$SUDO -n -l /usr/bin/systemctl restart nvargus-daemon}"
 
 say() { printf '[zedx-preflight] %s\n' "$*"; }
 verdict_of() { printf '%s' "$1" | grep -o 'VERDICT=[A-Z_]*' | head -1; }
