@@ -90,6 +90,17 @@ for args in "" "--safe" "--plan" "--safe --plan" "--plan --safe"; do
   fi
 done
 
+# nvargus-daemon holds /dev/video* itself, so the "nothing holds a camera" guard only
+# means anything AFTER restart-nvargus has had its chance to release them. Checking earlier
+# made the ladder abort forever (2026-09-14).
+nv="$(grep -n 'RECOVERED after restart-nvargus' "$SCRIPT" | head -1 | cut -d: -f1)"
+fd="$(grep -n 'camera fds held' "$SCRIPT" | head -1 | cut -d: -f1)"
+if [ -n "$nv" ] && [ -n "$fd" ] && [ "$fd" -gt "$nv" ]; then
+  ok "the /dev/video fd guard sits after restart-nvargus ($fd > $nv)"
+else
+  no "the fd guard must come after restart-nvargus (nvargus=$nv guard=$fd)"
+fi
+
 echo "----"
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]

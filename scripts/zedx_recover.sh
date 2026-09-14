@@ -92,14 +92,23 @@ if [ "$client_n" -gt 0 ]; then
   for _ in $(seq 1 20); do pgrep -f "$CLIENT_PATTERN" >/dev/null || break; sleep 0.5; done
   pgrep -f "$CLIENT_PATTERN" >/dev/null && pkill -KILL -f "$CLIENT_PATTERN"
 fi
-held="$(ls -l /proc/[0-9]*/fd 2>/dev/null | grep -cE '/dev/video')"
-echo "camera fds held: $held"
-[ "$held" -eq 0 ] || { echo "ABORT: something still holds /dev/video*; refusing to touch drivers"; exit 3; }
 
 say "2 restart-nvargus"
 $SUDO systemctl restart nvargus-daemon
 for _ in $(seq 1 30); do [ "$($SUDO systemctl is-active nvargus-daemon)" = active ] && break; sleep 0.5; done
 probe_ok && { echo "RECOVERED after restart-nvargus"; exit 0; }
+
+# The fd guard belongs HERE, not before restart-nvargus: nvargus-daemon is itself the
+# legitimate holder of /dev/video*, and restarting it is what makes it let go. Checking
+# first made the ladder abort forever on a wedged stack (2026-09-14). Everything below
+# touches the kernel, so nothing may hold a camera fd past this line.
+held="$(ls -l /proc/[0-9]*/fd 2>/dev/null | grep -cE '/dev/video')"
+echo "camera fds held: $held"
+if [ "$held" -ne 0 ]; then
+  echo "ABORT: something still holds /dev/video* after restarting argus; refusing to touch the kernel:"
+  ls -l /proc/[0-9]*/fd 2>/dev/null | grep -E '/dev/video' | head -5 | sed 's/^/    /'
+  exit 3
+fi
 
 
 if [ "$SAFE" = 1 ]; then

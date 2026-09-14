@@ -398,3 +398,35 @@ ZED 노드가 `=== CLOSING CAMERA ===` 를 끝내는 데는 그보다 오래 걸
 `panic_on_oops=1` 이므로 이 스택에서 커널 oops 는 곧 재부팅이다. 값을 바꾸지는 않았다 —
 카메라 드라이버가 oops 난 뒤 계속 도는 쪽이 더 나쁘다. 대신 **무인 경로가 커널을 건드리지 않게**
 막는 방향을 택했다.
+
+## 11. 반증: 모듈 재로드는 재부팅과 동등하지 않다 (2026-09-14 실측)
+
+7장은 "남은 논리적 간극은 부팅과 동일한 전체 재프로브가 wedge 를 푸는가 하나뿐이고, 재부팅이
+항상 고쳤다는 사실이 그쪽을 강하게 지지한다"고 적었다. **그 추론은 틀렸다.** 실제 wedge 에서
+사다리를 끝까지 돌린 결과:
+
+| 단계 | 결과 |
+|---|---|
+| repair-refcnt | 성공. `/sys/module/sl_zedx/refcnt` `-1 → 0` |
+| reload-drivers | **진짜 재로드됨.** `sl_max96712 9-0029: sl_max96712_probe: enter/success`, `zedx_probe: Serial Number` 4줄 전부 재출력, 데몬 로그에 `is in use`/`File exists` **0건** |
+| `sl::Camera::open()` | **실패.** argus: `NvPclStartPlatformDrivers: Failed to start module drivers`, `NvPclOpen: PCL Open Failed. Error: 0xf`, `SCF: Error BadParameter: Sensor could not be opened` (48회) |
+| 그 뒤 refcnt | 실패한 open 이 tegracam 이중 `module_put` 을 다시 타서 **-1 로 복귀** |
+
+결론: **고장은 모듈 계층 아래(VI/NVCSI/카메라 RTCPU)에 있다.** 모듈을 완전히 내렸다 올려도
+그 상태는 남는다. 사용자 공간에서 그것을 리셋하는 방법은 (조사 범위 안에서) 존재하지 않는다.
+
+### 그래서 지금 사다리를 어떻게 쓰나
+
+- **`--safe`(무인, `sensors start` 가 부르는 것)**: stop-clients + restart-nvargus. 고아 argus
+  세션은 이걸로 실제 풀린다. 여기까지는 값어치가 있다.
+- **3·4단계(repair-refcnt, reload-drivers)**: 실제 wedge 에서 한 번 시도했고 **카메라를 살리지
+  못했다.** 3분이 걸리고 실패한 open 이 refcnt 를 다시 깨뜨린다.
+  `zedx_health.sh` 가 `REBOOT_REQUIRED` 를 내면 **그냥 재부팅하는 편이 빠르다.**
+- 3·4단계를 남겨둔 이유는 단 하나, 다른 종류의 wedge(모듈 상태만 깨진 경우)에서는 유효할 수
+  있기 때문이다. 하지만 2026-09-14 형태의 고장에는 듣지 않는다.
+
+### 정직한 현재 상태
+
+`CAMERA STREAM FAILED TO START` 의 이 형태에 대해 **검증된 무재부팅 복구 수단은 없다.**
+있는 것은 (a) 애초에 wedge 를 만들지 않는 예방(clean stop, 워치독 회피)과
+(b) 30초 안에 "재부팅이 필요하다"를 확정해주는 판정이다.
