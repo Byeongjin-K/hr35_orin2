@@ -5,7 +5,22 @@
   "sub_mapping": {
     "so_name": "libsub_mapping.so",
     "enable_imu": true,
-    "enable_optimization": false,
+    // ON, against the stock value, and this single flag is where the registration accuracy
+    // of this project came from. With it false a submap is a RIGID STACK of its keyframes
+    // at the odometry poses of the moment, so roughly 9 s of drift is frozen into every
+    // submap and the global graph can only shove those frozen blocks around. Measured on
+    // the 1104 bag, stationary swing-revisit windows, same 2637 poses either way. GLIM is
+    // NOT run-to-run reproducible (unseeded random downsampling), so these are RANGES over
+    // three runs of each config, and the two sets do not overlap on any of them:
+    //   dz_median             control 0.106-0.254 m   ->  0.034-0.058 m
+    //   dz_bias               control +0.077-+0.222 m -> +0.015-+0.023 m
+    //   map tilt off gravity  control 10.0-11.7 deg   ->  1.99-2.06 deg
+    // Second, independent window pair 98 s apart, same picture:
+    //   dz_median 0.164 -> 0.028-0.062 m, dz_bias +0.063 -> +0.008-+0.038 m
+    // Cost: RTF 2.65 -> 1.53, still faster than real time on this Jetson.
+    // The global-mapping voxel knobs were ablated separately and contributed NOTHING here.
+    // MUST be paired with create_between_factors below - see the note there.
+    "enable_optimization": true,
     // Keyframe update strategy
     "max_num_keyframes": 15,
     "keyframe_update_strategy": "OVERLAP",
@@ -14,7 +29,16 @@
     "keyframe_update_interval_trans": 1.0,
     "max_keyframe_overlap": 0.6,
     // Relative pose factors
-    "create_between_factors": false,
+    // ON, and NOT optional once enable_optimization is true. Measured by ablation: with
+    // optimization on but these factors off, the submap's internal graph is held only by
+    // registration-error factors and deforms - the vertical datum improves (dz_bias +0.012)
+    // while everything local gets WORSE THAN THE SHIPPED CONFIG (rms0 0.278 and 0.391 on the
+    // two window pairs against a control of 0.119-0.190; dz_p90 0.63 and 0.72 against
+    // 0.45-0.59), and its own within-window floor doubles (0.092 vs 0.032), so the damage is
+    // inside one stationary window rather than across the revisit gap. With both on, rms0 is
+    // 0.039-0.072 and 0.054-0.113 over three runs. The odometry between-factors are what
+    // anchor the optimisation, so the two flags are one change and must move together.
+    "create_between_factors": true,
     "between_registration_type": "GICP",
     // Registration error factors
     "registration_error_factor_type": "VGICP",
