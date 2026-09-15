@@ -3,7 +3,8 @@
 The SLAM stack lives in a container because this host's apt needs a password that the
 session does not have, while docker does not, and because the GLIM binaries come from a
 PPA rather than from this workspace. The launch file's job is therefore orchestration:
-it starts one container that runs the estimator and the replay together.
+it starts one container in which the estimator reads the bag itself, so no scan can be
+lost to a player running faster than the config can absorb.
 
 Everything of substance is in scripts/glim_offline_entry.sh, which is mounted in rather
 than baked into the image, so the recipe is version controlled and a change does not
@@ -64,6 +65,11 @@ def _run(context, *args, **kwargs):
 
     cmd = [
         "docker", "run", "--rm", "--name", arg("container_name"),
+        # This host also carries the live stack. An unbounded replay container competes
+        # with it for the same 12 cores, and the estimator's thread counts are tuning
+        # knobs that can multiply, so the ceiling belongs here rather than in the hope
+        # that every config keeps its threads modest.
+        "--cpus", arg("cpus"),
         "--network", "host", "--entrypoint", "bash",
         "-e", "RMW_IMPLEMENTATION=rmw_fastrtps_cpp",
         "-e", "ROS_DOMAIN_ID=" + arg("domain"),
@@ -72,7 +78,7 @@ def _run(context, *args, **kwargs):
         "-v", out_host + ":/out",
         "-v", entry + ":/entry.sh:ro",
         arg("image"),
-        "/entry.sh", bag, "/cfg", "/out/slam_offline", arg("rate"), arg("measure_s"),
+        "/entry.sh", bag, "/cfg", "/out/slam_offline",
     ]
     return [ExecuteProcess(cmd=cmd, output="screen")]
 
@@ -87,8 +93,8 @@ def generate_launch_description():
         DeclareLaunchArgument("image", default_value=DEFAULT_IMAGE),
         DeclareLaunchArgument("container_name", default_value="excavator_slam_offline"),
         DeclareLaunchArgument("domain", default_value=DEFAULT_DOMAIN),
-        DeclareLaunchArgument("rate", default_value="1.0"),
-        DeclareLaunchArgument("measure_s", default_value="30",
-                              description="seconds spent measuring the pose topic rate"),
+        DeclareLaunchArgument("cpus", default_value="4",
+                              description="CPU ceiling for the replay container, so an "
+                                          "offline run cannot starve the live stack"),
         OpaqueFunction(function=_run),
     ])
