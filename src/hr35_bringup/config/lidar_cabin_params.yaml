@@ -28,6 +28,21 @@ lidar_cabin:
       # Same reason as lidar_mode: this is the profile the boom sensor already uses,
       # made explicit. It carries range, reflectivity, signal and near-IR.
       udp_profile_lidar: 'RNG19_RFL8_SIG16_NIR16'
+      # udp_profile_imu: match the boom sensor. Firmware 3.2 deprecated the LEGACY
+      # IMU profile, and on the boom sensor LEGACY stops transmitting a few minutes
+      # after it starts without failing: the lidar stream holds 10 Hz, the HTTP API
+      # keeps answering, and the only symptom is the IMU topic going to zero. That
+      # cost the SLAM work a session, and a LiDAR-inertial pipeline has nothing to
+      # fall back on when its IMU goes quiet.
+      #
+      # This sensor could not be checked. On 2026-09-15 192.168.0.6 answered neither
+      # ping nor the HTTP API, so its firmware is unconfirmed and this pin assumes it
+      # matches the boom (ousteros 3.2.0). If it turns out to be older, the pin comes
+      # off -- but a sensor that refuses a profile at startup is recoverable and one
+      # that goes quiet an hour into a field session is not. Check it the first time
+      # the sensor is powered:
+      #   curl -s http://192.168.0.6/api/v1/sensor/metadata/sensor_info
+      udp_profile_imu: 'ACCEL32_GYRO32_NMEA'
       # metadata[optional]: path to save metadata file to
       metadata: ''
       # lidar_port[optional]: port value should be in the range [0, 65535]
@@ -84,4 +99,10 @@ lidar_cabin:
       # min_range[optional]: minimum lidar range to consider (meters)
       min_range: 0.0
       # max_range[optional]: maximum lidar range to consider (meters)
-      max_range: 1000.0 
+      max_range: 1000.0
+      # operating_mode: the 3.2 firmware update left the boom sensor in STANDBY, which
+      # emits no UDP data at all -- the driver connects, configures, then times out in
+      # poll_client(). Forcing NORMAL at every driver start means a cabin sensor that
+      # boots into STANDBY cannot silently take the second LiDAR down on a field day,
+      # which is the one day there is no second chance to notice.
+      operating_mode: NORMAL
