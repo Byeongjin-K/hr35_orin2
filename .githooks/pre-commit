@@ -1,0 +1,46 @@
+#!/bin/bash
+# ══════════════════════════════════════════════════════════════
+# 공통 관리 규약 v1 — 대용량 파일 커밋 차단 훅
+#
+# GitHub는 100MB에서 푸시를 거부하고, 한 번 커밋되면 나중에
+# .gitignore에 추가해도 .git 용량은 절대 줄지 않는다.
+# (히스토리 재작성 필요) 그래서 들어가기 전에 막는다.
+#
+# 활성화:  git config core.hooksPath .githooks
+# 우회:    git commit --no-verify        (예외 상황에서만)
+# ══════════════════════════════════════════════════════════════
+
+LIMIT_MB=50
+LIMIT=$((LIMIT_MB * 1024 * 1024))
+fail=0
+
+while IFS= read -r -d '' file; do
+    blob=$(git rev-parse ":$file" 2>/dev/null) || continue
+    size=$(git cat-file -s "$blob" 2>/dev/null) || continue
+    if [ "$size" -gt "$LIMIT" ]; then
+        mb=$((size / 1024 / 1024))
+        printf '  차단  %6s MB  %s\n' "$mb" "$file"
+        fail=1
+    fi
+done < <(git diff --cached --name-only -z --diff-filter=ACM)
+
+if [ "$fail" -eq 1 ]; then
+    cat <<'MSG'
+
+────────────────────────────────────────────────────────────
+커밋 차단 — 50MB를 넘는 파일이 스테이징되어 있습니다.
+
+이 파일들은 Google Drive에서 관리해야 합니다.
+
+조치:
+  1) 스테이징 해제:  git restore --staged <파일>
+  2) 파일을 Drive 동기화 폴더로 이동
+  3) 필요하면 .gitignore에 패턴 추가
+
+정말 커밋해야 한다면:  git commit --no-verify
+────────────────────────────────────────────────────────────
+MSG
+    exit 1
+fi
+
+exit 0
