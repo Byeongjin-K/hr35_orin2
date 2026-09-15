@@ -18,6 +18,44 @@
 >   `slam_offline.launch.py` 가 TRAJECTORY **2203 poses**, SUBMAPS 17, DUMP 33.2 MB 를 냈다.
 >   (replay 도중 종료시킨 부분 실행이라 포즈 수는 전체 실행의 2637 보다 적다.)
 > - 지금의 유일한 하드 블로커는 **캐빈 라이다 전원 꺼짐**이다(192.168.0.6 ping/HTTP 무응답).
+>
+> **2026-09-15 후속 — 정합 오차 작업. 아래 3-2 의 수치는 이 블록으로 갱신된다.**
+>
+> - **전역맵 정합 오차의 원인을 찾아 고쳤다**: `sub_mapping` 의 `enable_optimization` 이
+>   꺼져 있어서 서브맵이 **그 순간 오도메트리 포즈로 굳은 강체 스택**이었다. 약 9초치
+>   드리프트가 서브맵마다 박제되고, 전역 그래프는 그 굳은 덩어리를 밀 수밖에 없었다.
+> - **`enable_optimization` + `create_between_factors` 를 켰다**(둘은 한 쌍이다, 아래 주의).
+>   정지 스윙-재방문 창에서, 같은 2637 포즈·같은 크롭·같은 지표로. **GLIM 이 런마다
+>   재현되지 않으므로 모든 수치는 여러 런의 범위로 적는다**(컨트롤 3런, 변경 3런):
+>
+>   | 지표 | 배포 설정 | 변경 후 |
+>   |---|---|---|
+>   | dz_median (창1) | 0.1061 ~ 0.2544 m | **0.0339 ~ 0.0582 m** |
+>   | dz_median (창2, 독립) | 0.1641 m | **0.0279 ~ 0.0621 m** |
+>   | dz_bias | +0.063 ~ +0.222 m | **+0.008 ~ +0.038 m** |
+>   | 맵 중력 기울기 | 10.0 ~ 11.7° | **1.77 ~ 2.06°** |
+>
+>   두 집단은 **어느 지표에서도 겹치지 않는다**. `dz_bias` 는 **모든 런에서 D1 목표
+>   `|dz| <= 0.05 m` 안**에 들어온다(배포 설정은 한 번도 못 들어온다). `dz_median` 은
+>   0.028~0.062 로 목표선을 걸친다 — **"충족"이 아니라 "걸친다"가 정확한 표현이다.**
+> - 비용은 `RTF 2.65 → 1.53` (bag 초/벽시계 초, 컨테이너 CPU 4개). 여전히 실시간보다 빠르다.
+> - **주의 — 두 플래그는 반드시 함께 켠다.** `enable_optimization` 만 켜면 서브맵 내부
+>   그래프가 정합오차 팩터만으로 버티다 **변형된다**: dz_bias 는 좋아지는데(+0.012)
+>   `rms0 0.278/0.391`, `dz_p90 0.63/0.72` 로 **배포 설정보다 나빠진다**.
+> - **전역 매핑 복셀 노브는 기여가 0이었다**(다중해상도 복셀맵, 0.25 m 복셀, 샘플링 0.4).
+>   단독으로 켜면 컨트롤과 구분되지 않으면서 RTF 만 2.70 → 1.17 로 깎아먹는다. 채택하지 않았다.
+> - **GLIM 은 런간 재현되지 않는다.** 같은 설정·같은 bag·같은 2637 포즈인데 궤적이 평균
+>   1.42 m 다르고 서브맵 개수까지 달라진다(21 vs 28). 원인은 전처리의
+>   `use_random_grid_downsampling`(매 프레임 무작위 10000점)이고 시드 노브가 없다.
+>   → **단일 런 A/B 비교는 무효다.** 컨트롤을 3회 돌려 분산을 먼저 재고, 그 폭을 넘는
+>   효과만 결과로 인정할 것.
+> - **오프라인 실행 방식을 바꿨다**: `ros2 bag play` 대신 **`glim_rosbag`** 이 bag 을
+>   추정기 프로세스 안에서 직접 읽는다. 무거운 설정이 스캔을 조용히 버리는 일이 사라졌고
+>   (예전에는 2637 → 1953 포즈), 실시간 가능 여부가 **RTF 숫자**로 나온다.
+>   `slam_offline.launch.py` 에서 `rate:=` / `measure_s:=` 는 없어졌고 `cpus:=` 가 생겼다.
+> - 측정 레시피는 이제 `scripts/score_revisit.py` 에 상수로 박혀 있다(/tmp 와 함께 증발하지
+>   않도록). 두 창 캐시는 `~/data/ulw_slam_artifacts/submaps_1104_sta_raw.npz`(창 쌍 1),
+>   `submaps_1104_sta2_raw.npz`(창 쌍 2).
 
 ---
 
@@ -269,7 +307,8 @@ GLIM의 높이를 GNSS로 잡아주는 보정을 만들어 붙였더니 **모든
 | `scripts/anchor_submaps.py` | 캐시 → GNSS 앵커 월드 서브맵 + 채점 |
 | `scripts/slam_submaps.py` | TUM 궤적 + 캐시 → SLAM 월드 서브맵 + 채점 |
 | `scripts/record_field_session.sh` | 현장 녹화 (사전 점검 포함) |
-| `launch/slam_offline.launch.py` + `scripts/glim_offline_entry.sh` | 오프라인 SLAM 실행 |
+| `scripts/score_revisit.py` | **고정 그리드** 채점 + 각 런의 자기 노이즈 바닥(`--floor`) |
+| `launch/slam_offline.launch.py` + `scripts/glim_offline_entry.sh` | 오프라인 SLAM 실행 (`glim_rosbag`, 무손실) |
 | `docker/glim.Dockerfile` | GLIM 이미지 (PPA 기반) |
 | `docs/slam_candidates.md` | 후보 조사 메모 (10행, 전 행 URL) |
 
@@ -308,6 +347,13 @@ GLIM의 높이를 GNSS로 잡아주는 보정을 만들어 붙였더니 **모든
 | **GLIM 토픽 발행은 `librviz_viewer.so`가 함** | 노드는 도는데 토픽 0개 | 헤드리스에서 못 도는 건 GLFW를 여는 `libstandard_viewer.so`뿐. rviz_viewer까지 끄면 포즈가 안 나옴 |
 | **호스트 `ROS_DOMAIN_ID=7`은 라이브 센서와 공유** | — | 오프라인 재생은 **반드시 도메인 99** 등으로 격리. 안 그러면 bag 데이터가 운영 전역맵에 주입됨 |
 | **NavSatFix 공분산이 `APPROXIMATED`** | 1σ 1.4 m로 보여서 "GNSS가 노이즈투성이"로 오판 | HDOP 유도 추정치라 무의미. 실제 정지 중 고도 산포는 **0.027 m p2p** |
+| **`ros2 bag play` + 무거운 설정** | 튜닝했더니 점수가 나빠짐 → "그 노브는 나쁘다"로 오판 | 재생기가 실시간으로 밀어넣어 **스캔이 유실**된다(2637 → 1953 포즈, 0.5배속에서도 1981). 설정이 아니라 **데이터 양이 달라진 것**. `glim_rosbag` 으로 바꿔서 원천 차단했고, 포즈 수를 항상 컨트롤과 대조할 것 |
+| **`glim_rosbag` 의 `auto_quit` 기본값 false** | bag 을 다 처리한 뒤 CPU 는 놀고 로그는 멈춘 채 영원히 대기 — 행으로 보임 | 정상 종료 대기 상태다. `-p auto_quit:=true` |
+| **`glim_rosbag` 이 실시간으로 스로틀** | RTF 가 1.0 언저리로만 나와 "겨우 실시간"으로 오판 | 리더가 `playback_speed` 에 맞춰 기다린다. 처리속도를 재려면 `-p playback_speed:=100.0` |
+| **GLIM 이 런간 재현되지 않음** | 같은 설정을 두 번 돌렸는데 점수가 다름 | 전처리가 매 프레임 **무작위 10000점**을 뽑고 시드가 없다. 궤적이 평균 1.42 m, 서브맵 개수가 21 vs 28 로 달라진다. **컨트롤 3회로 분산을 먼저 재고** 그 폭을 넘는 효과만 인정할 것 |
+| **서브맵 최적화만 켜기** | dz_bias 가 좋아져서 성공처럼 보임 | `create_between_factors` 없이는 서브맵이 변형된다 — `rms0 0.278/0.391`, `dz_p90 0.63/0.72` 로 **배포 설정보다 나쁨**. 두 플래그는 한 쌍 |
+| **오프라인 런의 종료코드 139/134** | 실패한 런으로 오판 | 덤프(`[global] saved`)가 끝난 **뒤의 teardown 크래시**다. 컨트롤 포함 모든 설정에서 난다. 판정은 `TRAJECTORY` 포즈 수로 |
+| **실행 중인 컨테이너에 마운트된 스크립트 편집** | `/entry.sh: line 90: unexpected EOF`, 런이 요약 출력 없이 exit 2 | bash 는 스크립트를 **바이트 오프셋으로 증분 읽기** 한다. 앞부분에 한 줄만 길어져도 남은 실행이 줄 중간부터 재개된다. 실측: 덤프(2637포즈, 서브맵 29)는 멀쩡히 끝났고 **요약 줄만 날아갔다**. 런이 도는 동안에는 `entry.sh` 를 건드리지 말 것 |
 
 ---
 
@@ -338,23 +384,43 @@ GLIM의 높이를 GNSS로 잡아주는 보정을 만들어 붙였더니 **모든
 |---|---|
 | C1 리서치 메모 | **통과** — 10행 전부 URL, GLIM 선정·동작 확인 |
 | C2 격리 | **통과** — main 무손상, 워크트리 분리, OT 컨테이너 4개 Up |
-| C3 오프라인 실행 | **부분** — GLIM 종료코드 0, RTF 3.07, 궤적 2637포즈, 서브맵 28개(오프라인 CLI 경로). **워크트리 launch 파일 경로는 미완** (마지막 실행이 궤적 0포즈. 원인 2개 수정 완료했으나 재실행 검증 전) |
-| C4 재방문 지표 | **부분** — RED→GREEN 완료, 양쪽 수치 확보. 단 "SLAM <= baseline 둘 다"는 dz에서 미충족. 목표치는 양쪽 다 미달 |
+| C3 오프라인 실행 | **통과** (2026-09-15) — launch 경로가 `glim_rosbag` 으로 닫혔다. 매 런 궤적 2637포즈(= 배포 설정과 동일, bag 의 points 메시지는 2668), 갭 경고 2건, 서브맵 21~29. 종료코드는 139/134 로 나오는데 **덤프가 끝난 뒤의 teardown 크래시**이고 산출물은 온전하다(그래서 `EXIT_STATUS` 로 항상 찍는다) |
+| C4 재방문 지표 | **수직은 통과, 수평은 이 데이터로 판정 불가** (2026-09-15) — 서브맵 내부 최적화를 켠 뒤 `dz_bias` 가 **3런 모두 +0.008~+0.038 m 로 D1 목표 안**(배포 설정은 +0.063~+0.222 로 한 번도 못 들어옴). `dz_median` 은 0.028~0.062 로 0.05 선을 걸친다. 수평은 이 창 쌍에서 탐색 이득이 0.03 수준(비용 지형이 거의 평평)이라 같은 설정이 0.09~0.87 로 튄다 — **주행 재방문이 있는 새 녹화 전에는 수평을 판정하지 말 것** |
 | C5 회귀 | **통과** — 63개 통과, skip/xfail 없음 |
 
 ---
 
 ## 8. 마지막에 하던 일 (중단 지점)
 
-`launch/slam_offline.launch.py`로 오프라인 실행을 돌리다가 궤적이 0포즈로 나왔고,
-원인 두 개(`ros2 run`의 SIGINT 미전달, `librviz_viewer.so` 비활성)를 고쳐 **재실행을
-막 걸었을 때 중단**했습니다. 다음에 재개하면 그 재실행부터 하면 C3가 닫힙니다:
+**2026-09-15 갱신.** C3 는 닫혔고, 정합 오차 작업이 한 단계 끝났습니다. 오프라인 실행은
+이제 이 한 줄이고, 매번 같은 프레임 수로 끝납니다:
 
 ~~~bash
 cd ~/robot_ws-lidar-slam && source install/setup.bash
 ros2 launch excavator_slam slam_offline.launch.py \
-  bag:=/home/kimm/data/ulw_slam_1104_restamped_v2
+  bag:=/home/kimm/data/ulw_slam_1104_restamped_v2 \
+  output_dir:=/home/kimm/data/ulw_slam_runs/<이름> cpus:=4
 ~~~
 
-단, 그건 **이미 아는 사실을 형식적으로 확인하는 작업**입니다(같은 GLIM이 오프라인 CLI
-경로로는 이미 2637포즈를 냈음). 우선순위는 **붐 IMU 복구 → 캐빈 기동 → 현장 녹화**입니다.
+채점은 두 단계입니다(두 창 쌍 모두 돌려서 한쪽 창의 우연을 배제할 것):
+
+~~~bash
+cd ~/robot_ws-lidar-slam/src/excavator_slam
+python3 scripts/slam_submaps.py \
+  --trajectory /home/kimm/data/ulw_slam_runs/<이름>/slam_offline/traj_lidar.txt \
+  --cache /home/kimm/data/ulw_slam_artifacts/submaps_1104_sta_raw.npz \
+  --window A --window B --cache-time-offset 1762233307.217859745 \
+  --out-prefix /tmp/<이름>_
+python3 scripts/score_revisit.py /tmp/<이름>_A.npy /tmp/<이름>_B.npy --label <이름> --floor
+~~~
+
+**다음에 할 것 (우선순위 순)**
+
+1. **캐빈 라이다 전원** — 여전히 유일한 하드 블로커. 측정으로 확정된 SLAM 주 센서입니다.
+2. **현장 녹화** — 수평 정합을 판정하려면 **주행 재방문**이 필요합니다. 지금 보유한 bag에는
+   주행 재방문이 0개라, 수평 수치는 정지 스윙 창의 거의 평평한 비용 지형 위에서 흔들립니다
+   (수직은 이번에 목표를 충족했습니다).
+3. **브링업 4커밋 main 반영** (아래 1-(3)) — 하드웨어를 건드리므로 확인 후.
+4. (선택) `submap_target_num_points` / `submap_downsample_resolution 0.3 → 0.1` 같은 GLIM
+   기본값 복원. 변이 `stock` 이 `~/data/ulw_slam_artifacts/variants/stock` 에 준비돼 있고
+   아직 안 돌렸습니다. 켤 때는 **반드시 컨트롤 3회 분산부터 다시 재고** 비교하십시오.
