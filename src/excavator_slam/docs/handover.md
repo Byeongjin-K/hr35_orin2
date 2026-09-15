@@ -1,8 +1,23 @@
 # 재개 안내 — 굴착기 LiDAR SLAM (feature/lidar-slam)
 
-마지막 작업: 2026-09-09
-워크트리: `/home/kimm/robot_ws-slam` (브랜치 `feature/lidar-slam`)
+마지막 작업: 2026-09-15
+작업 위치: `/home/kimm/robot_ws` (브랜치 `feature/lidar-slam`)
 전체 실행 기록(모든 실패와 그 진단 과정 포함): `/home/kimm/data/ulw_slam_artifacts/notepad.md`
+
+> **2026-09-15 갱신 — 아래 본문보다 이 블록이 우선한다.**
+>
+> - **워크트리 이름이 바뀌었다: `~/robot_ws-slam` → `~/robot_ws-lidar-slam`.**
+>   운영 규칙은 **브랜치 1개 : 워크트리 1개, 이름을 맞춰서 묶는다** 이다.
+>   `main` ↔ `~/robot_ws`, `feature/lidar-slam` ↔ `~/robot_ws-lidar-slam`.
+> - `main` 을 이 브랜치에 병합했다(`f961397`). 병합 전까지 이 브랜치의
+>   `lidar_boom_params.yaml` 에는 `udp_profile_imu` 가 없어서, **이 브랜치로 브링업하면
+>   센서가 LEGACY 로 돌아가 아래 1-(1) 블로커를 그대로 재생산했을 것**이다.
+> - 1-(1) 붐 IMU 블로커는 **해소됐다**. 아래 그 절의 머리에 결론을 적어 뒀다.
+> - 캐빈 설정에도 같은 함정을 막아 뒀다(`e9aad85`). 단 센서가 꺼져 있어 펌웨어는 미확인이다.
+> - **8. 마지막에 하던 일(오프라인 launch 가 0 pose)은 닫혔다.** 2026-09-15 재실행에서
+>   `slam_offline.launch.py` 가 TRAJECTORY **2203 poses**, SUBMAPS 17, DUMP 33.2 MB 를 냈다.
+>   (replay 도중 종료시킨 부분 실행이라 포즈 수는 전체 실행의 2637 보다 적다.)
+> - 지금의 유일한 하드 블로커는 **캐빈 라이다 전원 꺼짐**이다(192.168.0.6 ping/HTTP 무응답).
 
 ---
 
@@ -18,7 +33,25 @@ GLIM(LiDAR-관성 SLAM)이 이 Jetson에서 **실시간의 3배**로 돌고, 재
 
 ## 1. 재개하면 가장 먼저 볼 것 — 막혀 있는 것 3개
 
-### (1) ★최우선: 붐 라이다 IMU가 안 나옵니다
+### (1) ~~★최우선: 붐 라이다 IMU가 안 나옵니다~~ → **해결됨 (2026-09-09, main `44268ff`)**
+
+> **원인**: 펌웨어 3.2 가 LEGACY IMU UDP 프로파일을 폐기했다. 완전히 실패하지 않고 설정을 쓴
+> 직후 몇 분간 흐르다 조용히 멈춘다 — 라이다는 10 Hz 를 유지하고 HTTP 도 계속 응답하므로
+> 아래 표의 "양쪽 설정이 다 맞는데 IMU 만 안 온다" 가 정확히 이 증상이었다.
+> **해법**: `udp_profile_imu: 'ACCEL32_GYRO32_NMEA'` (3.2 가 추가한 포맷).
+>
+> **2026-09-15 라이브 재확인**: `imu_packets` 80.000 Hz(드롭 0), 드라이버 캐시 메타데이터의
+> `imu_measurements_per_packet = 8` → 정상 발행 640 Hz, 헤더 간격 중앙값 1.5625 ms
+> (= 정확히 1/640). 드라이버와 센서의 프로파일이 일치하므로 오파싱도 아니다.
+>
+> **판정할 때 함정**: `ros2 topic hz` 나 rclpy 구독자는 640 Hz 를 못 따라가 421~437 Hz 로
+> 낮게 보고한다. 그 숫자가 `44268ff` 가 기록한 오파싱 증상(433 Hz, 패킷당 5.4 메시지)과
+> 겹쳐서 건강한 스트림을 고장으로 오판하기 쉽다. 토픽 레이트가 아니라
+> **`imu_packets` 레이트 × `imu_measurements_per_packet`** 과
+> **드라이버/센서 프로파일 일치** 로 판정하라.
+
+아래는 당시의 진단 기록이다(원인 추적 과정이 남아 있어 보존한다).
+
 
 ~~~
 /lidar_boom/points        9.971 Hz   정상
@@ -99,7 +132,7 @@ ros2 launch hr35_bringup dual_lidar.launch.py
 2. **브링업 4커밋 main 반영 + 빌드 + 캐빈/붐 동시 기동** (위 1-(3), 1-(2)).
 3. **현장 녹화** — 스크립트 준비돼 있음:
    ~~~bash
-   ~/robot_ws-slam/src/excavator_slam/scripts/record_field_session.sh <출력경로> <초>
+   ~/robot_ws-lidar-slam/src/excavator_slam/scripts/record_field_session.sh <출력경로> <초>
    ~~~
    녹화 전 사전 점검을 스스로 합니다 (미들웨어 자동 선택 / GNSS quality 4 확인 /
    라이다 헤더 시각이 벽시계와 몇 초 이내인지). **점검 실패 시 녹화를 시작하지 않습니다** —
@@ -281,7 +314,7 @@ GLIM의 높이를 GNSS로 잡아주는 보정을 만들어 붙였더니 **모든
 ## 6. 자산 위치
 
 ~~~
-워크트리        /home/kimm/robot_ws-slam            (feature/lidar-slam, origin에 푸시됨)
+워크트리        /home/kimm/robot_ws-lidar-slam            (feature/lidar-slam, origin에 푸시됨)
 전체 실행 기록   /home/kimm/data/ulw_slam_artifacts/notepad.md
 캐시/결과물     /home/kimm/data/ulw_slam_artifacts/  (354 MB)
                   submaps_1104*.npz   31 GB bag 재독 없이 재사용 가능
@@ -318,7 +351,7 @@ GLIM의 높이를 GNSS로 잡아주는 보정을 만들어 붙였더니 **모든
 막 걸었을 때 중단**했습니다. 다음에 재개하면 그 재실행부터 하면 C3가 닫힙니다:
 
 ~~~bash
-cd ~/robot_ws-slam && source install/setup.bash
+cd ~/robot_ws-lidar-slam && source install/setup.bash
 ros2 launch excavator_slam slam_offline.launch.py \
   bag:=/home/kimm/data/ulw_slam_1104_restamped_v2
 ~~~
