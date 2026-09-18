@@ -552,3 +552,92 @@ FROZEN       : 32
 `/etc/sudoers.d/zedx-recovery` 에 복구가 쓰는 명령 4개만 NOPASSWD. `kimm` 은 원래 `ALL:ALL` 이라
 권한이 늘어난 것이 아니라 프롬프트만 사라진 것이고, 평문 비밀번호는 어디에도 저장하지 않았다.
 되돌리기: `sudo rm /etc/sudoers.d/zedx-recovery`.
+
+## 14. 2026-09-18 — 복구는 성공했는데 스크립트가 "reboot required" 라고 했다
+
+**한 줄**: `zedx_recover.sh` 의 STEP 4 대기가 **직전 재시작의 로그**를 보고 즉시 통과해,
+드라이버가 언로드된 순간에 probe 를 쏘고 멀쩡한 스택을 재부팅 대상으로 판정했다.
+
+### 실측 타임라인
+
+```
+09:49:00 OPENING -> 09:49:01 Running          (정상 시작)
+     ...  4시간 59분 연속 동작 ...
+14:48:25 4 buffers still pending during EGLStreamProducer destruction x2   (클라이언트 teardown)
+14:48:40 kernel: zedx 10-0020/10-0028: Error turning off streaming          (8장의 그 시그니처)
+14:48:40 ZED-X Daemon: Restart NVArgus Daemon
+14:48:44 CLOSING -> 14:49:17 ZEDX#1#8#FROZEN
+15:40:44 재기동 CAMERA STREAM FAILED TO START x6 -> 15:41:13 Camera detection timeout
+--- 여기서 sudo zedx_recover.sh --run ---
+15:54:28 STEP 2 restart-nvargus. 데몬이 이에 반응해 스스로 드라이버 리로드
+15:54:39   ZED-X Driver loaded            <<< 이 줄이 다음 단계를 망친다
+15:55:49 STEP 4 systemctl restart zed_x_daemon
+15:55:49   대기 루프가 --since '-2min' 창에서 15:54:39 의 'Driver loaded' 를 보고 즉시 break
+15:55:50   ZED-X Driver removed           <<< probe 는 지금 실행됐다. 드라이버가 없다
+           -> ZED-X Daemon 로그에 OPENING 0건. probe 실패. exit 7 "reboot required"
+15:56:00   ZED-X Driver loaded + Restarting NVArgus + Created Pub Endpoint  (진짜 완료, 11초 늦게)
+15:59:42 사용자가 런치 -> OPENING -> Running  (첫 시도에 성공. 재부팅은 애초에 불필요했다)
+```
+
+### 근본 원인
+
+`journalctl --since '-2min'` 은 **상대 시간창**이라 직전 재시작의 로그를 함께 잡는다.
+STEP 2 가 argus 를 재시작하면 ZED-X 데몬이 스스로 드라이버를 리로드하므로, STEP 4 가 자기
+재시작을 기다릴 때 창 안에는 이미 `ZED-X Driver loaded` 가 들어 있다.
+`is in use|File exists` 검사도 같은 오염된 창을 봤다.
+
+**고친 방법**: systemd 가 서비스 시작마다 새로 발급하는 `InvocationID` 로 범위를 좁혔다.
+`systemctl show -p InvocationID --value zed_x_daemon` 으로 이번 시작의 ID 를 얻고
+`journalctl -u zed_x_daemon _SYSTEMD_INVOCATION_ID=<id>` 만 본다. 시간창은 ID 를 못 얻을 때의 폴백.
+
+**추가로**: `ZED-X Driver loaded` 는 끝이 아니다. 데몬은 그 직후 NVArgus 를 재시작하므로,
+그 틈에 쏜 probe 는 카메라에 닿지 못한다. 이제 `Created Pub Endpoint`(데몬의 마지막 기동 줄)
+까지 기다리고, `nvargus-daemon` 이 active 가 될 때까지도 기다린 뒤에 probe 한다.
+대기가 예산 내에 끝나지 않으면 `exit 6` 으로 **명시적으로 보고**한다 — 조용히 진행하지 않는다.
+
+### 같이 드러난 결함 두 개
+
+1. **`stop-clients` 가 실패를 조용히 통과했다.** `component_container_isolated[886377]` 이
+   STEP 1 이후에도 살아서 argus 에 재연결했다(15:54:55, 15:55:35 `Connection established`).
+   SIGKILL 뒤 확인이 없었기 때문이다. 감독(`ros2 launch`)이 컨테이너를 되살리므로 컨테이너만
+   죽여서는 정리되지 않는다. 이제 SIGKILL 후에도 남아 있으면 `exit 8` 로 **중단**하고 무엇이
+   살아 있는지 출력한다. 사다리의 나머지는 "아무도 카메라를 안 만진다" 를 전제로 하므로,
+   살아 있는 클라이언트를 상대로 돌리면 움직이는 표적을 쫓게 된다.
+   (STEP 2 의 `camera fds held` 가드는 이걸 못 잡는다. `/dev/video*` 를 쥐는 건 argus 이지
+   클라이언트가 아니다.)
+2. **`probe_ok` 가 실패 사유를 버렸다.** `2>/dev/null` 때문에 "카메라가 죽었다" 와
+   "너무 일찍 찔렀다" 를 구분할 수 없었다 — 이번 사건의 애매함이 정확히 그것이었다.
+   이제 출력을 `PROBE_LAST` 에 보관하고 최종 실패 메시지에 마지막 5줄을 찍는다.
+
+### `zedx_health.sh` 도 같은 종류의 오탐이 있었다
+
+복구 직후 16:xx 에 health 가 `argus faults : 2` 로 `RECOVERABLE` 을 냈다. 그 2줄은 15:55:18 의
+`EGLStreamProducer destruction` — **복구 스크립트 자신이 만든 것**이었다. `-15min` 시간창은
+"스택이 wedge 됐다" 와 "방금 우리가 argus 를 재시작했다" 를 구분하지 못한다.
+이제 **지금 돌고 있는 argus 인스턴스**의 로그만 센다
+(`_SYSTEMD_INVOCATION_ID=$(systemctl show -p InvocationID --value nvargus-daemon)`).
+죽은 인스턴스의 fault 는 과거를 설명할 뿐 현재 상태가 아니다.
+출력도 `... line(s) in the running nvargus-daemon instance` 로 바뀌었다.
+
+### 운영 수칙 (갱신)
+
+- **복구 직후 바로 런치하지 말고, 데몬 기동이 끝났는지 보고 나서 띄운다.** 판단 줄은
+  `journalctl -u zed_x_daemon -b 0 | tail` 의 `Created Pub Endpoint`. 스크립트는 이제 이걸
+  기다리지만, 수동으로 할 때도 같은 기준이다.
+- **`FAILED: reboot required` 를 그대로 믿지 말고 커널 로그를 먼저 본다.**
+  `journalctl -k -b 0 | grep 'zedx_probe: Serial Number'` 가 4줄(카메라 2대 x 좌우) 나오고
+  `sl_max96712 ...: camera pipeline operational` 이 보이면 **드라이버 스택은 살아 있다.**
+  2026-09-18 이 정확히 그 경우였고, 그 상태에서 런치 한 번으로 복구됐다.
+- 여전히 유효: 안 열린다고 런치를 **반복하지 말 것**. 실패한 open 1회가 MCU 를 FROZEN 쪽으로 민다.
+
+### 검증
+
+`scripts/test_zedx_recover.sh` 27/27, `scripts/test_zedx_health.sh` 7/7,
+`scripts/test_zedx_preflight.sh` 6/6 (순차 실행 2회 연속). RED 를 먼저 잡고 고쳤다:
+대기 테스트는 수정 전 `rc=0 polls=1`(직전 로그를 보고 즉시 통과) 로 사건을 재현했고,
+수정 후 `polls=5`(기동 완료까지 대기) 로 통과한다.
+
+**주의**: 이 테스트들은 **순차로** 돌려야 한다. `test_zedx_preflight.sh` 와
+`test_sensors_zedx.sh` 는 의도적으로 실제 `pgrep`/`tmux` 를 타므로, 동시에 돌리면 서로의
+프로세스를 잡아 가짜 실패가 난다(실측: 병렬 실행 시 preflight 5/2, 순차 6/0).
+
