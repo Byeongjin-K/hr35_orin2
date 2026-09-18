@@ -20,7 +20,14 @@
 #
 #   --plan   print the ladder it would run for the current state, execute nothing
 #
-# Seams for tests: ZEDX_MODULE_DIR, ZEDX_CLIENT_PATTERN. Root via $SUDO (default sudo).
+# Exit codes: 0 recovered, 2 --safe stopped early, 3 a camera fd is still held,
+# 4 refcnt repair failed, 5 refcnt still negative, 6 the daemon reload did not happen,
+# 7 every rung exhausted, 8 a camera client survived stop-clients, 64 bad usage.
+#
+# Seams for tests: ZEDX_MODULE_DIR, ZEDX_CLIENT_PATTERN, ZEDX_JOURNAL_CMD,
+# ZEDX_SYSTEMCTL_CMD, ZEDX_PROBE_CMD, ZEDX_POLL_SLEEP, ZEDX_SOURCE_ONLY.
+# Root via $SUDO (default sudo). Only READ-ONLY commands go through a seam: the mutating
+# systemctl calls stay literal because /etc/sudoers.d/zedx-recovery matches them as strings.
 set -u
 
 MODULE_DIR="${ZEDX_MODULE_DIR:-/sys/module}"
@@ -31,6 +38,122 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # string, and /etc/sudoers.d/zedx-recovery lists the canonical path.
 REFCNT_TOOL="${ZEDX_REFCNT_TOOL:-$(cd "$HERE/.." && pwd)/tools/zedx_refcnt}"
 SERIAL="${ZEDX_SERIAL:-49749405}"
+# Read-only seams. Each defaults to the real command, so an unset environment behaves
+# exactly as before; scripts/test_zedx_recover.sh substitutes fakes for them.
+JOURNAL="${ZEDX_JOURNAL_CMD:-journalctl}"
+SYSTEMCTL="${ZEDX_SYSTEMCTL_CMD:-systemctl}"
+PROBE_CMD="${ZEDX_PROBE_CMD:-}"
+POLL_SLEEP="${ZEDX_POLL_SLEEP:-1}"
+PGREP="${ZEDX_PGREP_CMD:-pgrep}"
+PKILL="${ZEDX_PKILL_CMD:-pkill}"
+KILL_SLEEP="${ZEDX_KILL_SLEEP:-0.5}"
+
+# Keep the probe's output. Throwing stderr away made "FAILED: reboot required" indistinguishable
+# from "we probed while the driver was still unloaded", which is what it actually was on
+# 2026-09-18.
+PROBE_LAST=""
+probe_ok() {
+  local out
+  if [ -n "$PROBE_CMD" ]; then
+    out="$($PROBE_CMD 2>&1)"
+  else
+    out="$(timeout -k 5 75 python3 - "$SERIAL" 2>&1 <<'PY'
+import sys, pyzed.sl as sl
+init = sl.InitParameters(); init.set_from_serial_number(int(sys.argv[1]))
+init.camera_resolution = sl.RESOLUTION.HD1200; init.camera_fps = 15
+init.depth_mode = sl.DEPTH_MODE.NONE
+cam = sl.Camera(); st = cam.open(init)
+print("OPEN", st)
+if st == sl.ERROR_CODE.SUCCESS: cam.close()
+PY
+)"
+  fi
+  PROBE_LAST="$out"
+  printf '%s\n' "$out" | grep -q '^OPEN SUCCESS'
+}
+say() { echo; echo "=== $* ==="; }
+
+# Returns 0 only when nothing matches the pattern any more. A supervisor (ros2 launch)
+# respawns the container, so SIGKILL on the container alone does not settle it: on 2026-09-18
+# component_container[886377] outlived this step and reconnected to argus at 15:54:55 and
+# 15:55:35, which left every later rung working against a live client.
+stop_clients() { # $1 pattern -> 0 cleared, 1 still alive
+  local pat="$1" left=20
+  $PKILL -CONT -f "$pat" 2>/dev/null
+  $PKILL -INT  -f "$pat" 2>/dev/null
+  while [ "$left" -gt 0 ]; do
+    $PGREP -f "$pat" >/dev/null || return 0
+    sleep "$KILL_SLEEP"; left=$((left-1))
+  done
+  $PKILL -KILL -f "$pat" 2>/dev/null
+  left=10
+  while [ "$left" -gt 0 ]; do
+    $PGREP -f "$pat" >/dev/null || return 0
+    sleep "$KILL_SLEEP"; left=$((left-1))
+  done
+  return 1
+}
+
+# systemd gives every service start a fresh InvocationID, and journald tags that start's
+# lines with it. It is the only way to ask "did THIS restart finish?" without a time window.
+daemon_invocation() {
+  $SYSTEMCTL show -p InvocationID --value zed_x_daemon 2>/dev/null
+}
+
+# A RELATIVE window is wrong here. On 2026-09-18 step 2 had already made the daemon reload at
+# 15:54:39, so at 15:55:49 the '-2min' window still held that line: the wait broke on its first
+# poll, probe_ok ran while the driver was unloaded (the daemon logged no OPENING at all) and the
+# ladder reported "reboot required" for a stack that was fine. Scope to THIS start instead.
+daemon_log() { # $1 invocation id
+  local inv="${1:-}"
+  if [ -n "$inv" ]; then
+    $JOURNAL -u zed_x_daemon --no-pager "_SYSTEMD_INVOCATION_ID=$inv" 2>/dev/null
+  else
+    $JOURNAL -u zed_x_daemon --no-pager --since '-2min' 2>/dev/null
+  fi
+}
+
+wait_for_driver_reload() { # $1 invocation id, $2 poll count
+  local inv="${1:-}" left="${2:-40}" log
+  while [ "$left" -gt 0 ]; do
+    log="$(daemon_log "$inv")"
+    # "Driver loaded" alone is not the finish line: the daemon restarts NVArgus immediately
+    # after it, and a probe fired into that gap cannot reach the camera. "Created Pub Endpoint"
+    # is the daemon's own last start-up line (2026-09-18: loaded and endpoint both at 15:56:00,
+    # while the premature probe had already run at 15:55:50).
+    if printf '%s' "$log" | grep -q 'ZED-X Driver loaded' \
+       && printf '%s' "$log" | grep -q 'Created Pub Endpoint'; then
+      return 0
+    fi
+    sleep "$POLL_SLEEP"; left=$((left-1))
+  done
+  return 1
+}
+
+wait_for_argus_active() { # $1 poll count
+  local left="${1:-30}"
+  while [ "$left" -gt 0 ]; do
+    [ "$($SYSTEMCTL is-active nvargus-daemon 2>/dev/null)" = active ] && return 0
+    sleep "$POLL_SLEEP"; left=$((left-1))
+  done
+  return 1
+}
+
+# The daemon prints "ZED-X Driver loaded" even when every rmmod/insmod inside it failed,
+# so the reload has to be verified separately.
+reload_refused() { # $1 invocation id
+  daemon_log "$1" | grep -qE 'is in use|File exists'
+}
+
+reload_refusal_lines() { # $1 invocation id
+  daemon_log "$1" | grep -E 'rmmod|insmod' | tail -6
+}
+
+# Tests load the functions above without running the ladder.
+if [ "${ZEDX_SOURCE_ONLY:-0}" = 1 ]; then
+  return 0 2>/dev/null || exit 0
+fi
+
 # Dry run is the DEFAULT. On 2026-09-14 `--safe --plan` executed the real ladder because
 # only $1 was inspected, which killed a streaming node and wedged the stack. A script that
 # kills processes and restarts daemons must never execute by accident: --run is required.
@@ -78,30 +201,21 @@ if [ "$PLAN_ONLY" = 1 ]; then
   exit 0
 fi
 
-probe_ok() {
-  timeout -k 5 75 python3 - "$SERIAL" <<'PY' 2>/dev/null | grep -q '^OPEN SUCCESS'
-import sys, pyzed.sl as sl
-init = sl.InitParameters(); init.set_from_serial_number(int(sys.argv[1]))
-init.camera_resolution = sl.RESOLUTION.HD1200; init.camera_fps = 15
-init.depth_mode = sl.DEPTH_MODE.NONE
-cam = sl.Camera(); st = cam.open(init)
-print("OPEN", st)
-if st == sl.ERROR_CODE.SUCCESS: cam.close()
-PY
-}
-say() { echo; echo "=== $* ==="; }
-
 say "1 stop-clients"
 if [ "$client_n" -gt 0 ]; then
-  pkill -CONT -f "$CLIENT_PATTERN" 2>/dev/null
-  pkill -INT  -f "$CLIENT_PATTERN" 2>/dev/null
-  for _ in $(seq 1 20); do pgrep -f "$CLIENT_PATTERN" >/dev/null || break; sleep 0.5; done
-  pgrep -f "$CLIENT_PATTERN" >/dev/null && pkill -KILL -f "$CLIENT_PATTERN"
+  if ! stop_clients "$CLIENT_PATTERN"; then
+    echo "ABORT: a camera client survived SIGKILL, so something keeps respawning it:"
+    $PGREP -af "$CLIENT_PATTERN" 2>/dev/null | head -5 | sed 's/^/    /'
+    echo "       Every rung below assumes nothing is touching the camera; running them against"
+    echo "       a live client is what made the 2026-09-18 recovery fight a moving target."
+    echo "       Stop the launcher first (sensors stop, or Ctrl-C the launch), then re-run."
+    exit 8
+  fi
 fi
 
 say "2 restart-nvargus"
 $SUDO systemctl restart nvargus-daemon
-for _ in $(seq 1 30); do [ "$(systemctl is-active nvargus-daemon)" = active ] && break; sleep 0.5; done
+for _ in $(seq 1 30); do [ "$($SYSTEMCTL is-active nvargus-daemon)" = active ] && break; sleep 0.5; done
 probe_ok && { echo "RECOVERED after restart-nvargus"; exit 0; }
 
 # The fd guard belongs HERE, not before restart-nvargus: nvargus-daemon is itself the
@@ -150,18 +264,25 @@ if [ "$refcnt" = "unknown" ] || [ "$refcnt" -lt 0 ] 2>/dev/null; then
   exit 5
 fi
 $SUDO systemctl restart zed_x_daemon
-for _ in $(seq 1 40); do
-  journalctl -u zed_x_daemon --no-pager --since '-2min' | grep -q 'ZED-X Driver loaded' && break; sleep 1
-done
-# The daemon logs "ZED-X Driver loaded" even when every rmmod/insmod inside it failed.
-if journalctl -u zed_x_daemon --no-pager --since '-2min' | grep -qE 'is in use|File exists'; then
+inv="$(daemon_invocation)"
+if ! wait_for_driver_reload "$inv" 40; then
+  echo "FAILED: zed_x_daemon never finished starting after the restart"
+  echo "        (no 'ZED-X Driver loaded' + 'Created Pub Endpoint' for invocation ${inv:-<unknown>})"
+  exit 6
+fi
+# The daemon restarts NVArgus as part of its own start-up; probing before argus is back is
+# what produced the false "reboot required" on 2026-09-18.
+wait_for_argus_active 30 || echo "WARNING: nvargus-daemon is not active yet; the probe may fail"
+if reload_refused "$inv"; then
   echo "reload did NOT happen (rmmod/insmod refused):"
-  journalctl -u zed_x_daemon --no-pager --since '-2min' | grep -E 'rmmod|insmod' | tail -6
+  reload_refusal_lines "$inv"
   echo "FAILED: reboot required"
   exit 6
 fi
 echo "driver reload verified (no 'is in use' / 'File exists' in the daemon log)"
 probe_ok && { echo "RECOVERED after reload-drivers"; exit 0; }
 
+echo "the camera still does not open. Last probe output:"
+printf '%s\n' "${PROBE_LAST:-<no probe output>}" | tail -5 | sed 's/^/    /'
 echo "FAILED: every rung exhausted; reboot required"
 exit 7

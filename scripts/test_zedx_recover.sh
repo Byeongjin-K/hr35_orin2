@@ -146,6 +146,142 @@ else
   ok "no read-only command is routed through sudo"
 fi
 
+# ---------------------------------------------------------------------------
+# 2026-09-18: the ladder printed "FAILED: every rung exhausted; reboot required" while the
+# recovery had actually worked. STEP 4 waited with a RELATIVE window
+# (journalctl --since '-2min'), and that window still contained the PREVIOUS reload's
+# "ZED-X Driver loaded" (15:54:39, triggered by step 2 restarting argus). The loop broke
+# instantly at 15:55:49, probe_ok then ran while the driver was unloaded -- the daemon logged
+# no OPENING at all -- and the script exited 7. The real load finished 11 s later at 15:56:00
+# and the camera opened on the first try at 15:59:42, no reboot needed.
+# So the wait must be scoped to THIS restart, and it must also wait for the daemon to finish
+# coming up: right after "Driver loaded" it restarts NVArgus, and a probe fired into that
+# gap cannot reach the camera.
+mk_fake_journal() { # $1 path, $2 poll that loads the driver, $3 poll that finishes bring-up
+  cat > "$1" <<EOF
+#!/usr/bin/env bash
+scoped=0
+for a in "\$@"; do case "\$a" in _SYSTEMD_INVOCATION_ID=*) scoped=1 ;; esac; done
+n=\$(( \$(cat "\$FAKE_CALLS" 2>/dev/null || echo 0) + 1 )); echo "\$n" > "\$FAKE_CALLS"
+echo 'ZED-X Daemon  ** Start ZED-X Daemon'
+echo 'ZED-X Daemon ZED-X Driver removed'
+if [ "\$scoped" = 1 ]; then
+  [ "\$n" -ge $2 ] && echo 'ZED-X Daemon ZED-X Driver loaded'
+  [ "\$n" -ge $3 ] && echo 'ZED-X Daemon  ** Created Pub Endpoint "tcp://127.0.0.1:20027"'
+else
+  echo 'ZED-X Daemon ZED-X Driver loaded'
+fi
+exit 0
+EOF
+  chmod +x "$1"
+}
+
+wait_probe() { # $1 fake journal, $2 calls file, $3 poll budget -> prints "rc polls"
+  local rc=0
+  : > "$2"
+  ZEDX_SOURCE_ONLY=1 ZEDX_JOURNAL_CMD="$1" ZEDX_POLL_SLEEP=0 FAKE_CALLS="$2" \
+    bash -c "source '$SCRIPT'; wait_for_driver_reload THISINV $3" >/dev/null 2>&1 || rc=$?
+  echo "$rc $(cat "$2" 2>/dev/null || echo 0)"
+}
+
+fj="$TMP/fakejournal"; mk_fake_journal "$fj" 3 5
+read -r rc polls <<<"$(wait_probe "$fj" "$TMP/calls" 20)"
+if [ "$rc" = 0 ] && [ "$polls" -ge 5 ]; then
+  ok "the reload wait is scoped to this restart and waits for bring-up (polls=$polls)"
+else
+  no "the wait must ignore the previous restart's 'Driver loaded' and wait for this one (rc=$rc polls=$polls)"
+fi
+
+# A restart that never completes must be reported, not silently treated as done: that is the
+# difference between "recovery failed" and "we probed too early".
+fj2="$TMP/fakejournal_stuck"; mk_fake_journal "$fj2" 99 99
+read -r rc2 polls2 <<<"$(wait_probe "$fj2" "$TMP/calls2" 3)"
+if [ "$rc2" != 0 ] && [ "$polls2" -ge 3 ]; then
+  ok "a reload that never finishes exhausts the budget and fails (rc=$rc2 polls=$polls2)"
+else
+  no "a stale 'Driver loaded' must not satisfy the wait (rc=$rc2 polls=$polls2)"
+fi
+
+# 2026-09-18: STEP 1 printed nothing and the ladder moved on, but component_container[886377]
+# was still alive -- it reconnected to argus at 15:54:55 and again at 15:55:35, so every later
+# rung ran against a live client. A supervisor (ros2 launch) respawns the container, which is
+# why SIGKILL on the container alone does not settle it. Surviving the kill has to abort the
+# ladder, not pass silently.
+mk_fake_proc() { # $1 dir, $2 pgrep call after which the client is gone (0 = it never dies)
+  mkdir -p "$1"
+  cat > "$1/pgrep" <<EOF
+#!/usr/bin/env bash
+n=\$(( \$(cat "\$FAKE_PGREP_CALLS" 2>/dev/null || echo 0) + 1 )); echo "\$n" > "\$FAKE_PGREP_CALLS"
+gone=$2
+if [ "\$gone" != 0 ] && [ "\$n" -ge "\$gone" ]; then exit 1; fi
+[ "\${1:-}" = "-af" ] && echo "12345 component_container_isolated --ros-args"
+exit 0
+EOF
+  cat > "$1/pkill" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "$1/pgrep" "$1/pkill"
+}
+
+run_stop_clients() { # $1 fake dir, $2 calls file -> prints rc
+  local rc=0
+  : > "$2"
+  ZEDX_SOURCE_ONLY=1 ZEDX_PGREP_CMD="$1/pgrep" ZEDX_PKILL_CMD="$1/pkill" ZEDX_KILL_SLEEP=0 \
+    FAKE_PGREP_CALLS="$2" \
+    bash -c "source '$SCRIPT'; stop_clients 'zedx-fake-client'" >/dev/null 2>&1 || rc=$?
+  echo "$rc"
+}
+
+d1="$TMP/proc_survives"; mk_fake_proc "$d1" 0
+rc="$(run_stop_clients "$d1" "$TMP/pgrep_calls1")"
+if [ "$rc" != 0 ]; then
+  ok "a client that survives SIGKILL is reported, not ignored (rc=$rc)"
+else
+  no "stop_clients must fail when a client is still alive after SIGKILL (rc=$rc)"
+fi
+
+d2="$TMP/proc_dies"; mk_fake_proc "$d2" 2
+rc="$(run_stop_clients "$d2" "$TMP/pgrep_calls2")"
+if [ "$rc" = 0 ]; then
+  ok "a client that exits clears stop-clients (rc=$rc)"
+else
+  no "stop_clients must succeed once the client is gone (rc=$rc)"
+fi
+
+# The abort must be wired into the ladder, not just available as a function.
+if grep -q 'stop_clients "$CLIENT_PATTERN"' "$SCRIPT" \
+   && grep -A4 'stop_clients "$CLIENT_PATTERN"' "$SCRIPT" | grep -q 'ABORT'; then
+  ok "the ladder aborts when stop-clients cannot clear the camera"
+else
+  no "step 1 must abort the ladder when a client survives" "$(grep -A4 'stop_clients "\$CLIENT_PATTERN"' "$SCRIPT")"
+fi
+
+# probe_ok threw its stderr away (2>/dev/null), so when the ladder ended in
+# "FAILED: reboot required" there was no way to tell "the camera is dead" from "we probed
+# 10 s too early" -- exactly the ambiguity that cost the 2026-09-18 session a reboot scare.
+cat > "$TMP/fakeprobe_fail" <<'EOF'
+#!/usr/bin/env bash
+echo "OPEN ERROR_CODE.CAMERA_NOT_DETECTED"
+exit 0
+EOF
+chmod +x "$TMP/fakeprobe_fail"
+
+probe_out="$(ZEDX_SOURCE_ONLY=1 ZEDX_PROBE_CMD="$TMP/fakeprobe_fail" \
+  bash -c "source '$SCRIPT'; probe_ok; echo \"LAST=\${PROBE_LAST:-<unset>}\"" 2>&1)"
+if printf '%s' "$probe_out" | grep -q 'LAST=.*CAMERA_NOT_DETECTED'; then
+  ok "a failed probe keeps its output for the report"
+else
+  no "probe_ok must record why the open failed" "$probe_out"
+fi
+
+if grep -q 'PROBE_LAST' "$SCRIPT" && grep -B4 'FAILED: every rung exhausted' "$SCRIPT" | grep -q 'PROBE_LAST'; then
+  ok "the final failure prints the last probe output"
+else
+  no "the 'reboot required' message must show the last probe output" \
+     "$(grep -B4 'FAILED: every rung exhausted' "$SCRIPT")"
+fi
+
 echo "----"
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]
