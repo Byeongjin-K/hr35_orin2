@@ -56,6 +56,47 @@ run_case "underflow outranks argus"       1 RECOVERABLE     "$(mk_mod both -1)" 
 # holds the camera. A live client means the sensor is NOT orphaned. Goes through the real pgrep path.
 run_case "faults but client holds camera" 0 HEALTHY         "$(mk_mod busy 3)"      "$stale_log" "$LIVE_CLIENT_PATTERN"
 
+# 2026-09-18: recovery had just restarted argus and the camera was fine, yet this script
+# printed "argus faults: 2 ... VERDICT=RECOVERABLE". Those two lines were the 15:55:18
+# EGLStreamProducer fault the recovery ITSELF had produced, still inside the -15min window.
+# A time window cannot separate "the stack is wedged" from "we just restarted argus", so the
+# default log command has to be scoped to the argus instance running NOW.
+# The fakes go on PATH rather than through a seam on purpose: this must exercise the DEFAULT
+# command, which is the thing that was wrong.
+mkdir -p "$TMP/fakebin"
+cat > "$TMP/fakebin/journalctl" <<'EOF'
+#!/usr/bin/env bash
+scoped=0
+for a in "$@"; do case "$a" in _SYSTEMD_INVOCATION_ID=*) scoped=1 ;; esac; done
+echo 'Sep 18 15:56:00 host nvargus-daemon[887951]: === NVIDIA Libargus Camera Service (0.99.33)=== Listening for connections...'
+if [ "$scoped" = 0 ]; then
+  # an unscoped window also picks up the PREVIOUS argus instance: the recovery's own noise
+  echo 'Sep 18 15:55:18 host nvargus-daemon[886064]: SCF: Error InvalidState: 2 buffers still pending during EGLStreamProducer destruction (in src/services/gl/EGLStreamProducer.cpp, function freeBuffers(), line 300)'
+fi
+exit 0
+EOF
+cat > "$TMP/fakebin/systemctl" <<'EOF'
+#!/usr/bin/env bash
+# only the read-only InvocationID lookup is expected here
+case "$*" in
+  *InvocationID*nvargus-daemon*) echo "CURRENTARGUSINVOCATION" ;;
+  *) echo "unexpected systemctl call: $*" >&2; exit 1 ;;
+esac
+exit 0
+EOF
+chmod +x "$TMP/fakebin/journalctl" "$TMP/fakebin/systemctl"
+
+out="$(PATH="$TMP/fakebin:$PATH" ZEDX_MODULE_DIR="$(mk_mod after_recovery 0)" \
+       ZEDX_CLIENT_PATTERN="$NO_CLIENT_PATTERN" bash "$SCRIPT" 2>&1)"
+code=$?
+if [ "$code" = 0 ] && printf '%s' "$out" | grep -q 'VERDICT=HEALTHY'; then
+  echo "PASS a fault from a previous argus instance does not count (exit=$code)"; pass=$((pass+1))
+else
+  echo "FAIL a restarted argus must not be judged by the previous instance's faults (exit=$code)"
+  printf '%s\n' "$out" | sed 's/^/    /'
+  fail=$((fail+1))
+fi
+
 echo "----"
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]

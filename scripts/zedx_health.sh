@@ -23,7 +23,20 @@ set -u
 MODULE_DIR="${ZEDX_MODULE_DIR:-/sys/module}"
 REFCNT_FILE="$MODULE_DIR/sl_zedx/refcnt"
 ARGUS_WINDOW="${ZEDX_ARGUS_WINDOW:--15min}"
-ARGUS_LOG_CMD="${ZEDX_ARGUS_LOG_CMD:-journalctl -u nvargus-daemon --no-pager --since $ARGUS_WINDOW}"
+JOURNAL="${ZEDX_JOURNAL_CMD:-journalctl}"
+SYSTEMCTL="${ZEDX_SYSTEMCTL_CMD:-systemctl}"
+# Scope the fault count to the argus instance running NOW. A time window cannot tell a wedged
+# stack from one whose argus was just restarted by a recovery: on 2026-09-18 this script still
+# saw the EGLStreamProducer fault that the recovery itself had produced 90 s earlier, and
+# called a healthy stack RECOVERABLE. Faults from a dead argus instance describe the past.
+ARGUS_INVOCATION="${ZEDX_ARGUS_INVOCATION:-$($SYSTEMCTL show -p InvocationID --value nvargus-daemon 2>/dev/null)}"
+if [ -n "$ARGUS_INVOCATION" ]; then
+  ARGUS_SCOPE="the running nvargus-daemon instance"
+  ARGUS_LOG_CMD="${ZEDX_ARGUS_LOG_CMD:-$JOURNAL -u nvargus-daemon --no-pager _SYSTEMD_INVOCATION_ID=$ARGUS_INVOCATION}"
+else
+  ARGUS_SCOPE="$ARGUS_WINDOW"
+  ARGUS_LOG_CMD="${ZEDX_ARGUS_LOG_CMD:-$JOURNAL -u nvargus-daemon --no-pager --since $ARGUS_WINDOW}"
+fi
 CLIENT_PATTERN="${ZEDX_CLIENT_PATTERN:-component_container|ZED_Explorer|ZED_Depth_Viewer|ZED_Media_Server}"
 
 # A capture session that outlived its client: the sensor stays allocated and every open() fails.
@@ -47,7 +60,7 @@ elif [ "$refcnt" -lt 0 ]; then
   reason="sl_zedx module use-count underflowed (refcnt=$refcnt, i.e. atomic 0). try_module_get() then fails, tegracam never starts the stream, and BOTH cameras report FROZEN. Restoring the lost base reference fixes it without a reboot (proven 2026-09-14): sudo $(dirname "$0")/zedx_recover.sh --run"
 elif [ "$argus_faults" -gt 0 ] && [ "$client_n" -eq 0 ]; then
   verdict=RECOVERABLE; code=1
-  reason="nvargus-daemon reports $argus_faults capture-session fault line(s) in $ARGUS_WINDOW while no process holds a camera: a streaming client died without releasing the sensor."
+  reason="nvargus-daemon reports $argus_faults capture-session fault line(s) from $ARGUS_SCOPE while no process holds a camera: a streaming client died without releasing the sensor."
 else
   verdict=HEALTHY; code=0
   if [ "$argus_faults" -gt 0 ]; then
@@ -59,7 +72,7 @@ fi
 
 echo "=== ZED X stack health — $(hostname) $(date '+%F %T') ==="
 echo "sl_zedx refcnt : ${refcnt:-<driver not loaded>}   (0 = idle; 1 per open camera; NEGATIVE = broken)"
-echo "argus faults   : $argus_faults line(s) in $ARGUS_WINDOW"
+echo "argus faults   : $argus_faults line(s) in $ARGUS_SCOPE"
 if [ "$client_n" -gt 0 ]; then
   echo "camera clients : $client_n"; printf '%s\n' "$clients" | cut -c1-110 | sed 's/^/                 /'
 else
