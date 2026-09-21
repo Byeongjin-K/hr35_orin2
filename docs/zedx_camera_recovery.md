@@ -641,3 +641,87 @@ STEP 2 가 argus 를 재시작하면 ZED-X 데몬이 스스로 드라이버를 �
 `test_sensors_zedx.sh` 는 의도적으로 실제 `pgrep`/`tmux` 를 타므로, 동시에 돌리면 서로의
 프로세스를 잡아 가짜 실패가 난다(실측: 병렬 실행 시 preflight 5/2, 순차 6/0).
 
+---
+
+## 15. 2026-09-21 — 무재부팅 복구 완성. 빠져 있던 건 **카메라 MCU 리셋**이었다
+
+13장의 "2단계(MCU FROZEN 고착)는 재부팅만" 은 **틀렸다**. 재부팅 0회로 복구했고
+(17:08:22 `OPEN SUCCESS` / `FRAME 1920x1200`, 런치 후 compressed 9.804Hz), 그 순서를
+`zedx_recover.sh` 에 넣었다. 이제 **`zedx_recover.sh --run` 한 번이면 끝난다.**
+
+### 반증 1 — 사다리가 자기 발등을 찍고 있었다
+
+옛 순서는 `repair-refcnt → open 프로브 → (실패 시) reload-drivers` 였다. **그 중간 프로브가
+문제다.** wedge 된 카메라는 open 이 반드시 실패하고, 실패한 teardown 이 tegracam 의 이중
+`module_put` 버그를 때려 방금 복원한 참조를 그 자리에서 태운다. 실측:
+
+| 시각 | 사건 |
+|---|---|
+| 17:00:08 | repair 로 refcnt **0** 확보 |
+| 17:00:08 | 프로브 실패 → `Error turning off streaming` ×2 → `module_put` 언더플로 (PID 50505) |
+| 17:00:09 | refcnt **-1** 로 복귀 |
+| 17:00:09 | 그 상태로 리로드 → `sl_max9295 is in use by: sl_zedx`, `sl_zedx.ko: File exists` |
+| | → `sl_zedx` 는 **언로드조차 못 했다**. 커널에 새 `Serial Number` 0줄 → `exit 6` |
+
+즉 **`FAILED: reboot required` 는 카메라가 못 산다는 뜻이 아니라, 스크립트가 자기
+전제조건을 프로브로 부쉈다는 뜻**이었다. 부수 결함: rung 4 의 panic 가드가 `$refcnt` 의
+**프로브 이전 값**(stale)을 봤다 — 실제 -1 인데 0 으로 알고 데몬에 rmmod 를 시켰다.
+
+### 반증 2 — 드라이버를 완전히 재프로브해도 카메라는 안 열린다
+
+프로브를 빼고 `repair → 즉시 데몬 재시작` 으로 **진짜 리로드**를 받아냈다(17:03:20):
+rmmod/insmod 거부 0건, 커널 `zedx_probe: Serial Number` **4줄**,
+`sl_max96712_probe: success`, `camera pipeline operational` ×2, `[last unloaded: sl_max96712]`,
+refcnt 0, `module_put` 경고 0건. **그런데도** 17:04 의 open 은
+`(Argus) Error Timeout ... ClientSocketManager.cpp:137` + `ZEDX#1#8#FROZEN` 으로 실패했다.
+
+→ 11장의 "리로드는 재부팅과 동등" 은 **드라이버 스택에 한해서만** 참이다. 호스트가 무엇을 하든
+카메라 MCU 는 frozen 으로 남는다. 사다리를 끝까지 돌려도 안 살아나던 진짜 이유가 이것이다.
+
+### 해결 레버
+
+```python
+import pyzed.sl as sl
+sl.Camera.reboot_from_input(sl.INPUT_TYPE.GMSL)   # -> SUCCESS
+```
+
+- 호스트를 안 건드리고 GMSL 링크 너머 **카메라 MCU 를 리셋**한다. 커널 모듈을 안 만지므로
+  패닉 위험이 없고 refcnt 도 안 태운다.
+- **`sl.Camera.reboot(sn, full_reboot)` 는 USB 전용** — 이 장비에선 `INVALID FUNCTION CALL`.
+- MCU 부팅에 **~20초** 필요(리셋 17:07:38 → open 성공 17:08:16). `ZEDX_MCU_SETTLE` 로 조절.
+- PoC 전원을 직접 끊을 sysfs 레버는 **없다**(device-tree 에 max96712 pwdn/poc 노드 없음,
+  regulator 이름에 poc/cam/gmsl 0개). 그래서 이게 유일한 무재부팅 경로다.
+
+### 새 사다리
+
+```
+1 stop-clients     2 restart-nvargus   → 프로브 → 되면 끝
+3 repair-refcnt    4 reboot-mcu        → 프로브 → 되면 끝   (--safe 는 여기까지)
+5 reload-drivers   → repair → reboot-mcu → 프로브          (최후 수단)
+```
+
+- **`reboot-mcu` 가 `reload-drivers` 보다 앞**이다. 커널을 안 건드리는 쪽이 더 싸고 더 안전하며,
+  실제로 복구를 끝낸 단계다.
+- **repair 와 그 참조를 쓰는 단계 사이에 프로브를 넣지 않는다.** 테스트가 이 구간을 스캔해
+  `probe_ok` 가 있으면 실패시킨다.
+- rmmod 가드는 **매번 sysfs 를 다시 읽는다**(`repair_refcnt`). 캐시된 값은 믿지 않는다.
+- `--safe`(무인)는 모듈을 언로드하지 않으므로 4까지. MCU 리셋은 무인에서도 허용한다.
+
+### 호출법
+
+```bash
+~/robot_ws/scripts/zedx_recover.sh --run      # sudo 없이!
+```
+
+`sudo bash zedx_recover.sh` 는 **틀린 호출**이다. `/etc/sudoers.d/zedx-recovery` 는 스크립트가
+아니라 스크립트가 쓰는 명령 4개를 화이트리스트에 올려둔 것이라, sudo 를 붙이면 비밀번호를
+묻고 무인 경로가 멈춘다. `zedx_health.sh` 의 안내 문구도 이에 맞춰 고쳤다.
+
+### 검증
+
+`test_zedx_recover.sh` **34/34**, `test_zedx_health.sh` 7/7, `test_zedx_preflight.sh` 6/6
+(순차 실행). 옛 "repair → open → reload" 순서를 강제하던 테스트는 이 세션이 반증했으므로,
+반대 성질(복원과 사용 사이 프로브 금지 + `reboot-mcu` 가 `reload-drivers` 앞)을 강제하는
+테스트로 교체했다. 실기 검증: `mcu_reboot` 기본 경로가 `MCU_REBOOT SUCCESS` (refcnt 불변),
+`--run` end-to-end 가 `RECOVERED after restart-nvargus` / `LADDER_EXIT=0`.
+
