@@ -57,7 +57,7 @@ elif ! printf '%s' "$refcnt" | grep -qE '^-?[0-9]+$'; then
   reason="cannot parse sl_zedx refcnt ('$refcnt')."
 elif [ "$refcnt" -lt 0 ]; then
   verdict=RECOVERABLE; code=1
-  reason="sl_zedx module use-count underflowed (refcnt=$refcnt, i.e. atomic 0). try_module_get() then fails, tegracam never starts the stream, and BOTH cameras report FROZEN. Restoring the lost base reference fixes it without a reboot (proven 2026-09-14): sudo $(dirname "$0")/zedx_recover.sh --run"
+  reason="sl_zedx module use-count underflowed (refcnt=$refcnt, i.e. atomic 0). try_module_get() then fails, tegracam never starts the stream, and BOTH cameras report FROZEN. Restoring the lost base reference and resetting the camera MCU fixes it without a reboot (proven 2026-09-14 and 2026-09-21): $(dirname "$0")/zedx_recover.sh --run"
 elif [ "$argus_faults" -gt 0 ] && [ "$client_n" -eq 0 ]; then
   verdict=RECOVERABLE; code=1
   reason="nvargus-daemon reports $argus_faults capture-session fault line(s) from $ARGUS_SCOPE while no process holds a camera: a streaming client died without releasing the sensor."
@@ -87,10 +87,12 @@ case "$verdict" in
     echo "           check 'camera clients' above before touching any daemon."
     ;;
   RECOVERABLE)
-    echo "next step: sudo bash $(dirname "$0")/zedx_recover.sh --run"
-    echo "           It restarts argus, restores the lost module reference, and opens the camera."
-    echo "           Do NOT restart zed_x_daemon to fix this: its own GMSL port bring-up fails and"
-    echo "           spends the restored reference before anything can use it (2026-09-14)."
+    echo "next step: $(dirname "$0")/zedx_recover.sh --run"
+    echo "           It restarts argus, restores the lost module reference, resets the camera MCU"
+    echo "           over GMSL, and opens the camera. One command; no reboot."
+    echo "           Run it WITHOUT sudo: /etc/sudoers.d/zedx-recovery whitelists the four commands"
+    echo "           the script runs, not the script itself, so 'sudo bash ...' only earns a"
+    echo "           password prompt that stalls the unattended path."
     ;;
   REBOOT_REQUIRED)
     echo "next step: sudo reboot   — no userspace action can fix this state."
