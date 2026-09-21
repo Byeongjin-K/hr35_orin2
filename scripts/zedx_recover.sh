@@ -11,12 +11,31 @@
 #                      panic_on_oops=1 turned that into a reboot. Never again.
 #   3 repair-refcnt    ONLY when /sys/module/sl_zedx/refcnt < 0: restore the base
 #                      module reference with tools/zedx_refcnt so rmmod becomes legal
-#   4 reload-drivers   systemctl restart zed_x_daemon, i.e. the vendor's real
-#                      rmmod+insmod, and then VERIFY it actually happened
+#   4 reboot-mcu       sl.Camera.reboot_from_input(GMSL): reset the CAMERA's own MCU
+#                      over the GMSL link. It touches no kernel module, so it is both
+#                      cheaper and safer than rung 5, and it is the step that actually
+#                      ended the 2026-09-21 wedge. A full driver reload alone did NOT:
+#                      the kernel re-probed both cameras (4x "zedx_probe: Serial
+#                      Number", "camera pipeline operational") and open still failed
+#                      with (Argus) Error Timeout + ZEDX#1#8#FROZEN, because the camera
+#                      MCU stays frozen no matter what the host does to its drivers.
+#   5 reload-drivers   last resort: systemctl restart zed_x_daemon, i.e. the vendor's
+#                      real rmmod+insmod, VERIFY it happened, then repair and reset the
+#                      MCU once more -- that trio is the 2026-09-21 proven sequence
+#
+# WHY NO PROBE SITS BETWEEN repair-refcnt AND reload-drivers: opening a wedged camera
+# always fails, and the failing teardown hits the tegracam double module_put bug, which
+# burns the base reference again within seconds. On 2026-09-21 that is exactly what
+# happened -- repair drove refcnt to 0, the probe fired at 17:00:08 and failed, and by
+# 17:00:09 refcnt was -1 again -- so the reload was refused ("sl_max9295 is in use by:
+# sl_zedx", "sl_zedx.ko: File exists"), sl_zedx never unloaded, and the ladder reported
+# "reboot required" for a camera that a reboot-free sequence revived minutes later.
+# Every rung that needs a sane refcount therefore re-reads sysfs and repairs again right
+# before it runs, and never trusts a value captured before a probe.
 #
 # HARD GUARD: on this kernel panic_on_oops=1 and rmmod on a module whose atomic
 # refcount is 0 can hit BUG_ON(ret < 0) in try_release_module_ref() -> panic.
-# Step 5 therefore never runs until step 4 has driven sysfs refcnt >= 0.
+# reload-drivers therefore never runs until sysfs refcnt >= 0 *at that moment*.
 #
 #   --plan   print the ladder it would run for the current state, execute nothing
 #
@@ -25,7 +44,8 @@
 # 7 every rung exhausted, 8 a camera client survived stop-clients, 64 bad usage.
 #
 # Seams for tests: ZEDX_MODULE_DIR, ZEDX_CLIENT_PATTERN, ZEDX_JOURNAL_CMD,
-# ZEDX_SYSTEMCTL_CMD, ZEDX_PROBE_CMD, ZEDX_POLL_SLEEP, ZEDX_SOURCE_ONLY.
+# ZEDX_SYSTEMCTL_CMD, ZEDX_PROBE_CMD, ZEDX_POLL_SLEEP, ZEDX_SOURCE_ONLY,
+# ZEDX_MCU_REBOOT_CMD, ZEDX_MCU_SETTLE.
 # Root via $SUDO (default sudo). Only READ-ONLY commands go through a seam: the mutating
 # systemctl calls stay literal because /etc/sudoers.d/zedx-recovery matches them as strings.
 set -u
@@ -47,6 +67,10 @@ POLL_SLEEP="${ZEDX_POLL_SLEEP:-1}"
 PGREP="${ZEDX_PGREP_CMD:-pgrep}"
 PKILL="${ZEDX_PKILL_CMD:-pkill}"
 KILL_SLEEP="${ZEDX_KILL_SLEEP:-0.5}"
+MCU_REBOOT_CMD="${ZEDX_MCU_REBOOT_CMD:-}"
+# The ZED X MCU needs a few seconds to come back after a GMSL reset. 20 s is what the
+# 2026-09-21 recovery used before the open that succeeded (reset 17:07:38, open 17:08:16).
+MCU_SETTLE="${ZEDX_MCU_SETTLE:-20}"
 
 # Keep the probe's output. Throwing stderr away made "FAILED: reboot required" indistinguishable
 # from "we probed while the driver was still unloaded", which is what it actually was on
@@ -72,6 +96,51 @@ PY
   printf '%s\n' "$out" | grep -q '^OPEN SUCCESS'
 }
 say() { echo; echo "=== $* ==="; }
+
+# Reset the CAMERA, not the host. On 2026-09-21 the driver stack was provably healthy after a
+# real reload -- 4x "zedx_probe: Serial Number", "camera pipeline operational", refcnt 0, zero
+# module_put warnings -- and open STILL failed with (Argus) Error Timeout and ZEDX#1#8#FROZEN.
+# The MCU on the far end of the GMSL link was the thing that was stuck, and this is what
+# unstuck it. It unloads nothing, so it cannot panic the kernel and cannot burn the refcount.
+MCU_LAST=""
+mcu_reboot() { # -> 0 the SDK accepted the reset
+  local out
+  if [ -n "$MCU_REBOOT_CMD" ]; then
+    out="$($MCU_REBOOT_CMD 2>&1)"
+  else
+    out="$(timeout -k 5 60 python3 - 2>&1 <<'PY'
+import pyzed.sl as sl
+# Camera.reboot(sn, full_reboot) is the USB path; on this GMSL rig it answers
+# "INVALID FUNCTION CALL" and does nothing. reboot_from_input(GMSL) is the one that
+# reaches the ZED X MCU (verified 2026-09-21: returned SUCCESS, open worked 38 s later).
+print("MCU_REBOOT", sl.Camera.reboot_from_input(sl.INPUT_TYPE.GMSL))
+PY
+)"
+  fi
+  MCU_LAST="$out"
+  printf '%s\n' "$out" | grep -q 'MCU_REBOOT SUCCESS'
+}
+
+# Always re-reads sysfs. The 2026-09-18 ladder carried a $refcnt captured BEFORE a probe into
+# the rmmod guard; by the time the daemon ran rmmod the failed probe had driven the module back
+# to -1, so the guard was inspecting a value that no longer existed.
+repair_refcnt() { # -> 0 the refcount is >= 0 now, 1 it is not
+  local r
+  r="$(cat "$MODULE_DIR/sl_zedx/refcnt" 2>/dev/null || echo unknown)"
+  if [ "$r" != unknown ] && [ "$r" -ge 0 ] 2>/dev/null; then
+    echo "refcnt=$r, nothing to repair"
+    return 0
+  fi
+  [ -f "$REFCNT_TOOL/zedx_refcnt.ko" ] || (cd "$REFCNT_TOOL" && make) \
+    || { echo "cannot build zedx_refcnt"; return 1; }
+  $SUDO rmmod zedx_refcnt 2>/dev/null
+  $SUDO insmod "$REFCNT_TOOL/zedx_refcnt.ko" target=sl_zedx driver=zedx repair=1 \
+    || { echo "insmod of the repair module failed"; return 1; }
+  $SUDO rmmod zedx_refcnt 2>/dev/null
+  r="$(cat "$MODULE_DIR/sl_zedx/refcnt" 2>/dev/null || echo unknown)"
+  echo "refcnt after repair: $r"
+  [ "$r" != unknown ] && [ "$r" -ge 0 ] 2>/dev/null
+}
 
 # Returns 0 only when nothing matches the pattern any more. A supervisor (ros2 launch)
 # respawns the container, so SIGKILL on the container alone does not settle it: on 2026-09-18
@@ -187,8 +256,10 @@ if [ "$refcnt" != "unknown" ] && [ "$refcnt" -lt 0 ] 2>/dev/null; then
   echo "CMD  insmod $REFCNT_TOOL/zedx_refcnt.ko target=sl_zedx driver=zedx repair=1"
   damaged=1
 fi
+step "reboot-mcu"
+echo "CMD  python3 -c 'import pyzed.sl as sl; sl.Camera.reboot_from_input(sl.INPUT_TYPE.GMSL)'"
 if [ "$SAFE" = 1 ]; then
-  echo "SAFE stops after the repair: the last rung unloads kernel modules, and that needs a human."
+  echo "SAFE stops here: it resets the camera but never unloads a kernel module, which needs a human."
 else
   if [ "$damaged" = 1 ]; then
     echo "GUARD the last rung stays blocked until refcnt >= 0 (rmmod at atomic 0 can panic this kernel)"
@@ -232,37 +303,39 @@ fi
 
 
 say "3 repair-refcnt"
-refcnt="$(cat /sys/module/sl_zedx/refcnt 2>/dev/null || echo unknown)"
-if [ "$refcnt" != "unknown" ] && [ "$refcnt" -lt 0 ] 2>/dev/null; then
-  [ -f "$REFCNT_TOOL/zedx_refcnt.ko" ] || (cd "$REFCNT_TOOL" && make) || { echo "ABORT: cannot build zedx_refcnt"; exit 4; }
-  $SUDO rmmod zedx_refcnt 2>/dev/null
-  $SUDO insmod "$REFCNT_TOOL/zedx_refcnt.ko" target=sl_zedx driver=zedx repair=1 || { echo "ABORT: repair failed"; exit 4; }
-  $SUDO rmmod zedx_refcnt 2>/dev/null
-  refcnt="$(cat /sys/module/sl_zedx/refcnt)"
-  echo "refcnt after repair: $refcnt"
-else
-  echo "refcnt=$refcnt, nothing to repair"
-fi
+repair_refcnt || { echo "ABORT: could not restore the base module reference"; exit 4; }
 
-# This is the rung that actually revived the camera on 2026-09-14. Try it BEFORE touching
-# any module: reloading the drivers makes zed_x_daemon re-open the GMSL ports on its own, and
-# that failing attempt spends the reference we just restored.
-probe_ok && { echo "RECOVERED after repair-refcnt"; exit 0; }
+# Rung 4 deliberately comes before rung 5. Resetting the camera cannot panic the kernel and
+# cannot burn the refcount, and on 2026-09-21 it is the step the recovery actually turned on.
+# NOTE: there is no probe between rung 3 and here on purpose -- see the header. A probe that
+# fails takes the repaired reference down with it and blocks every rung below.
+say "4 reboot-mcu"
+if mcu_reboot; then
+  echo "camera MCU reset accepted; letting it boot for ${MCU_SETTLE}s"
+  sleep "$MCU_SETTLE"
+else
+  echo "WARNING: the GMSL reset did not report SUCCESS:"
+  printf '%s\n' "${MCU_LAST:-<no output>}" | tail -3 | sed 's/^/    /'
+fi
+probe_ok && { echo "RECOVERED after reboot-mcu"; exit 0; }
 
 if [ "$SAFE" = 1 ]; then
   echo
-  echo "SAFE MODE: repairing the reference was not enough, and the rest unloads kernel modules."
-  echo "Run it yourself, watching the output:  sudo $0 --run"
+  echo "SAFE MODE: resetting the camera was not enough, and the rest unloads kernel modules."
+  echo "Run it yourself, watching the output:  $0 --run"
   exit 2
 fi
 
-say "4 reload-drivers"
-if [ "$refcnt" = "unknown" ] || [ "$refcnt" -lt 0 ] 2>/dev/null; then
-  echo "ABORT: refcnt=$refcnt is still negative. Refusing to let zed_x_daemon run rmmod:"
+say "5 reload-drivers"
+# Re-read sysfs instead of trusting anything measured earlier: the probe above may have burned
+# the reference again, and letting the daemon run rmmod at atomic 0 is the BUG_ON that panics
+# this kernel.
+if ! repair_refcnt; then
+  echo "ABORT: the refcount is still negative. Refusing to let zed_x_daemon run rmmod:"
   echo "       BUG_ON in try_release_module_ref() would panic this kernel (panic_on_oops=1)."
-  echo "       Reboot is the only remaining option."
   exit 5
 fi
+reload_t0="$(date '+%Y-%m-%d %H:%M:%S')"
 $SUDO systemctl restart zed_x_daemon
 inv="$(daemon_invocation)"
 if ! wait_for_driver_reload "$inv" 40; then
@@ -276,10 +349,26 @@ wait_for_argus_active 30 || echo "WARNING: nvargus-daemon is not active yet; the
 if reload_refused "$inv"; then
   echo "reload did NOT happen (rmmod/insmod refused):"
   reload_refusal_lines "$inv"
+  echo "       That is a burned reference seen from the daemon's side: sl_zedx never unloaded,"
+  echo "       so the kernel is still running the module that was already wedged."
   echo "FAILED: reboot required"
   exit 6
 fi
 echo "driver reload verified (no 'is in use' / 'File exists' in the daemon log)"
+# The decisive proof that the reload was real: the kernel re-probes both cameras, left and
+# right. Informational only -- journald here is volatile, so a missing line is not evidence
+# of failure, whereas reload_refused above already catches the real refusal.
+echo "kernel camera re-probes since the restart: $($JOURNAL -k --no-pager --since "$reload_t0" 2>/dev/null \
+  | grep -c 'zedx_probe: Serial Number')  (4 = both cameras, left and right)"
+
+# A freshly reloaded driver still talks to a frozen MCU, and the daemon opens the GMSL ports
+# while starting, which can burn the reference again. Repair, reset, then open: that trio is
+# what recovered the camera on 2026-09-21 without a reboot.
+repair_refcnt || echo "WARNING: the reference went negative again during the reload"
+if mcu_reboot; then
+  echo "camera MCU reset accepted; letting it boot for ${MCU_SETTLE}s"
+  sleep "$MCU_SETTLE"
+fi
 probe_ok && { echo "RECOVERED after reload-drivers"; exit 0; }
 
 echo "the camera still does not open. Last probe output:"

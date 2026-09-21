@@ -104,18 +104,99 @@ else
   no "the fd guard must come after restart-nvargus (nvargus=$nv guard=$fd)"
 fi
 
-# 2026-09-14: restart-nvargus + repair-refcnt + open is what actually revived the camera
-# (refcnt -1 == atomic 0 makes try_module_get fail, so tegracam never starts the stream and
-# the camera reports FROZEN). reload-drivers is NOT needed and its daemon bring-up burns the
-# repaired reference before anyone can use it, which is why the 12:21 attempt failed.
+# 2026-09-21 REPLACES the old "repair -> open -> reload" assertion, which this session
+# disproved. That probe is destructive: opening a wedged camera always fails, the failing
+# teardown hits the tegracam double module_put bug, and the reference repaired one second
+# earlier is gone. Measured: repair drove refcnt to 0, the probe failed at 17:00:08, refcnt
+# was -1 by 17:00:09, and the reload was then refused ("sl_max9295 is in use by: sl_zedx",
+# "sl_zedx.ko: File exists") so sl_zedx never unloaded and the ladder cried "reboot required"
+# for a camera that came back without one. The gap between repairing the reference and
+# spending it must stay probe-free, and the cheap non-kernel rung goes first.
 ord_repair="$(grep -n 'say "3 repair-refcnt"' "$SCRIPT" | head -1 | cut -d: -f1)"
-ord_probe="$(grep -n 'RECOVERED after repair-refcnt' "$SCRIPT" | head -1 | cut -d: -f1)"
-ord_reload="$(grep -n 'say "4 reload-drivers"' "$SCRIPT" | head -1 | cut -d: -f1)"
-if [ -n "$ord_repair" ] && [ -n "$ord_probe" ] && [ -n "$ord_reload" ] \
-   && [ "$ord_repair" -lt "$ord_probe" ] && [ "$ord_probe" -lt "$ord_reload" ]; then
-  ok "the camera is tried right after repair-refcnt, before reload-drivers"
+ord_mcu="$(grep -n 'say "4 reboot-mcu"' "$SCRIPT" | head -1 | cut -d: -f1)"
+ord_reload="$(grep -n 'say "5 reload-drivers"' "$SCRIPT" | head -1 | cut -d: -f1)"
+if [ -n "$ord_repair" ] && [ -n "$ord_mcu" ] && [ -n "$ord_reload" ] \
+   && [ "$ord_repair" -lt "$ord_mcu" ] && [ "$ord_mcu" -lt "$ord_reload" ]; then
+  ok "ordering is repair-refcnt -> reboot-mcu -> reload-drivers ($ord_repair < $ord_mcu < $ord_reload)"
 else
-  no "repair -> open -> reload ordering broken (repair=$ord_repair probe=$ord_probe reload=$ord_reload)"
+  no "ordering must be repair -> reboot-mcu -> reload (repair=$ord_repair mcu=$ord_mcu reload=$ord_reload)"
+fi
+
+if [ -n "$ord_repair" ] && [ -n "$ord_mcu" ]; then
+  gap="$(sed -n "${ord_repair},$((ord_mcu - 1))p" "$SCRIPT" | grep -n 'probe_ok' || true)"
+  [ -z "$gap" ] && ok "no probe fires between repairing the reference and using it" \
+    || no "a probe there burns the reference that the next rung needs" "$gap"
+else
+  no "cannot locate the repair/reboot-mcu rungs to check the probe-free gap"
+fi
+
+# The guard in front of reload-drivers used to test $refcnt, a value captured BEFORE a probe
+# that had since driven it back to -1, so it waved through an rmmod at atomic 0. It has to
+# consult the module afresh, immediately before the daemon restart.
+if [ -n "$ord_reload" ]; then
+  tail_from_reload="$(sed -n "${ord_reload},\$p" "$SCRIPT")"
+  g="$(printf '%s' "$tail_from_reload" | grep -n 'repair_refcnt' | head -1 | cut -d: -f1)"
+  r="$(printf '%s' "$tail_from_reload" | grep -n 'systemctl restart zed_x_daemon' | head -1 | cut -d: -f1)"
+  if [ -n "$g" ] && [ -n "$r" ] && [ "$g" -lt "$r" ]; then
+    ok "reload-drivers re-reads and repairs the refcount before restarting the daemon"
+  else
+    no "the rmmod guard must re-read sysfs right before the daemon restart (guard=$g restart=$r)"
+  fi
+else
+  no "cannot locate the reload-drivers rung to check its guard"
+fi
+
+# Camera.reboot(sn, ...) is the USB entry point: on this GMSL rig it answered
+# "INVALID FUNCTION CALL" and did nothing (2026-09-21). Only reboot_from_input(GMSL) reaches
+# the ZED X MCU, and that call is what ended the wedge.
+if grep -q 'reboot_from_input(sl.INPUT_TYPE.GMSL)' "$SCRIPT" && ! grep -q 'sl\.Camera\.reboot(' "$SCRIPT"; then
+  ok "the MCU reset uses the GMSL entry point, not the USB one"
+else
+  no "the reset must call reboot_from_input(GMSL) and never Camera.reboot(sn)" "$(grep -n 'reboot' "$SCRIPT" | head)"
+fi
+
+# repair_refcnt has to answer from sysfs every time it is called.
+rc=0
+ZEDX_SOURCE_ONLY=1 ZEDX_MODULE_DIR="$(mk_mod repair_ok 0)" \
+  bash -c "source '$SCRIPT'; repair_refcnt" >/dev/null 2>&1 || rc=$?
+[ "$rc" = 0 ] && ok "repair_refcnt is a no-op on a healthy refcount" \
+  || no "repair_refcnt must pass a refcount that is already >= 0 (rc=$rc)"
+
+cat > "$TMP/fakesudo" <<'EOF'
+#!/usr/bin/env bash
+echo "$@" >> "$FAKE_SUDO_LOG"
+exit 0
+EOF
+chmod +x "$TMP/fakesudo"
+touch "$TMP/zedx_refcnt.ko"   # so the helper never shells out to `make`
+: > "$TMP/sudo_log"
+ZEDX_SOURCE_ONLY=1 ZEDX_MODULE_DIR="$(mk_mod repair_broken -1)" SUDO="$TMP/fakesudo" \
+  ZEDX_REFCNT_TOOL="$TMP" FAKE_SUDO_LOG="$TMP/sudo_log" \
+  bash -c "source '$SCRIPT'; repair_refcnt" >/dev/null 2>&1 || true
+if grep -q 'insmod .*repair=1' "$TMP/sudo_log"; then
+  ok "a negative refcount drives the repair module with repair=1"
+else
+  no "repair_refcnt must insmod the repair module when the refcount is negative" "$(cat "$TMP/sudo_log")"
+fi
+
+# The reset is only worth believing when the SDK says SUCCESS; anything else has to be
+# reported, not swallowed, or the ladder blames the camera for an SDK refusal.
+printf '#!/usr/bin/env bash\necho "MCU_REBOOT SUCCESS"\n' > "$TMP/mcu_ok"
+printf '#!/usr/bin/env bash\necho "MCU_REBOOT INVALID FUNCTION CALL"\n' > "$TMP/mcu_bad"
+chmod +x "$TMP/mcu_ok" "$TMP/mcu_bad"
+rc=0
+ZEDX_SOURCE_ONLY=1 ZEDX_MCU_REBOOT_CMD="$TMP/mcu_ok" \
+  bash -c "source '$SCRIPT'; mcu_reboot" >/dev/null 2>&1 || rc=$?
+[ "$rc" = 0 ] && ok "mcu_reboot accepts a SUCCESS answer" || no "mcu_reboot must succeed on SUCCESS (rc=$rc)"
+# Ask the shell to report mcu_reboot's OWN status: `mcu_reboot; echo ...` would hand back the
+# echo's status and the assertion would pass no matter what the function did.
+out_mcu="$(ZEDX_SOURCE_ONLY=1 ZEDX_MCU_REBOOT_CMD="$TMP/mcu_bad" \
+  bash -c "source '$SCRIPT'; if mcu_reboot; then echo RC=0; else echo RC=1; fi; echo \"LAST=\$MCU_LAST\"" 2>&1)"
+if printf '%s' "$out_mcu" | grep -q 'RC=1' \
+   && printf '%s' "$out_mcu" | grep -q 'LAST=.*INVALID FUNCTION CALL'; then
+  ok "a refused reset fails and keeps the SDK's answer"
+else
+  no "mcu_reboot must fail and record the refusal" "$out_mcu"
 fi
 
 safe2="$(ZEDX_MODULE_DIR="$(mk_mod safe_repair -1)" ZEDX_CLIENT_PATTERN="$NOCLIENT" \
