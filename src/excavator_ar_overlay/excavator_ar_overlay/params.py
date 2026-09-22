@@ -65,11 +65,15 @@ SCHEMA: "tuple[tuple[str, object, str], ...]" = (
     ("layers.dig_plan", True, "Draw the AI-selected dig cells."),
     (
         "swing_axis_row_in_gui_grid",
-        -2,
+        0,
         "GUI row index that AI row 0 maps onto: AI[i, j] = GUI[swing+i, j]. "
         "Declared at the top level with this exact name so the shared SSOT file "
         "excavator_task_config_gui/config/ai_grid_calibration.yaml can be passed "
-        "to this node unchanged. Never hardcode it.",
+        "to this node unchanged. Never hardcode it. The default tracks that file, "
+        "which TF measurement fixed at 0 on 2026-09-09; the previous -2 claimed "
+        "the swing axis sat at x=-0.30 m and sent every dig command 0.30 m too "
+        "far. It does not move anything this node draws, because a dig cell "
+        "arrives as an AI row and forward_m = ai_row * cell_size either way.",
     ),
     (
         "grid.anchor_frame",

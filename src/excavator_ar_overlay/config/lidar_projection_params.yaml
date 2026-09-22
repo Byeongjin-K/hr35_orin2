@@ -40,7 +40,12 @@
     #   ros2 launch excavator_ar_overlay lidar_projection.launch.py \
     #     params_file:=/home/kimm/hr35/src/excavator_task_config_gui/config/ai_grid_calibration.yaml
     # Field calibration procedure: docs/guides/ai_coordinate_diagnostic_calibration.md
-    swing_axis_row_in_gui_grid: -2
+    # 2026-09-09 hr35 정본이 TF 실측으로 0 을 확정했다(종전 -2 는 스윙축이
+    # x=-0.30 m 에 있다는 주장이었고, 모든 굴착 명령이 0.30 m 멀리 나갔다).
+    # 이 노드가 그리는 위치는 이 값과 무관하다 — dig 셀은 AI 행으로 들어오고
+    # forward_m = ai_row * cell_size 이기 때문이다. 정본과 어긋난 기본값을
+    # 남겨두지 않으려고 맞춘다.
+    swing_axis_row_in_gui_grid: 0
 
     grid:
       # +x forward, +y lateral-left. Established from the live TF tree, not

@@ -105,9 +105,18 @@ def test_align_round_trip_against_canon():
 
 
 def test_extent_gate_matches_canon_for_default_grid():
+    """Where the canon's gate now cuts, on a 34-row map.
+
+    It moved on 2026-09-09: the required row count gained a
+    ``min(..., gui_forward_rows)`` cap, so a 34-row map asks for 34 rows rather
+    than the physically impossible 36. Every non-positive shift keeps all 34;
+    a positive one drops the GUI rows below it. The old boundary this pinned
+    (-2 ok, -1 rejected) was a symptom of the impossible requirement.
+    """
     canon = _load_canon()
     assert canon.extent_ok(34, -2) is True
-    assert canon.extent_ok(34, -1) is False
+    assert canon.extent_ok(34, 0) is True
+    assert canon.extent_ok(34, 1) is False
 
 
 def test_cell_corners_form_one_cell_square_at_the_given_height():
