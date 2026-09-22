@@ -72,11 +72,32 @@ def generate_launch_description():
         ),
     )
 
+    # The boom LiDAR hangs off the boom, so anchoring it to map pins a moving
+    # sensor to a fixed pose: the old [0, 0, 2] placeholder simply dropped the
+    # boom rotation. Measured 2026-09-22 against the live /rn/grid_map, cell by
+    # cell: through this chain the cloud's ground sat 1.776 m from the mapped
+    # terrain (median), and the error swung +0.541 -> -1.776 m as the boom moved,
+    # while the kinematic chain held 0.065 m.
+    #
+    # Parenting os_sensor to gm_os_lidar instead makes it ride the boom, and
+    # every consumer gets the right value with no code change. The driver
+    # publishes os_sensor -> os_lidar itself, so this one constant is all that is
+    # needed; it is read straight off that transform:
+    #   ros2 run tf2_ros tf2_echo lidar_boom/os_lidar lidar_boom/os_sensor
+    #   -> translation [0, 0, -0.038], rpy [0, 0, 180 deg]
+    #
+    # Consequence worth knowing: map -> lidar_boom/* now exists only while the
+    # stack publishing the gm_ frames is up. When it is not, the transform is
+    # absent rather than silently wrong by metres.
     tf_publisher_boom = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
         name='tf_publisher_boom',
-        arguments=['0', '0', '2', '0', '0', '-1.5708', 'map', 'lidar_boom/os_sensor'],
+        arguments=[
+            '--x', '0', '--y', '0', '--z', '-0.038',
+            '--roll', '0', '--pitch', '0', '--yaw', '3.14159265',
+            '--frame-id', 'gm_os_lidar', '--child-frame-id', 'lidar_boom/os_sensor',
+        ],
         output='screen',
     )
 

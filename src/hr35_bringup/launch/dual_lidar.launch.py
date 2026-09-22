@@ -141,14 +141,27 @@ def generate_launch_description():
         output='screen',
     )
 
+    # Same correction as boom_only_driver.launch.py, and for the same reason:
+    # this LiDAR rides the boom, so a fixed map -> os_sensor pose throws the
+    # boom rotation away. Note the old value here differed from the one in
+    # boom_only_driver.launch.py, so the size and direction of the error
+    # depended on which launch had been used. Parenting to the kinematic frame
+    # removes both problems.
+    #
+    # The constant is the driver's own os_sensor -> os_lidar, inverted:
+    #   ros2 run tf2_ros tf2_echo lidar_boom/os_lidar lidar_boom/os_sensor
+    #   -> translation [0, 0, -0.038], rpy [0, 0, 180 deg]
+    #
+    # map -> lidar_boom/* therefore exists only while the gm_ frames are being
+    # published. Absent beats wrong-by-metres.
     tf_publisher_boom = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
         name='tf_publisher_boom',
         arguments=[
-            '--x', '1.9', '--y', '-0.5', '--z', '-0.9',
-            '--roll', '-1.5708', '--pitch', '0', '--yaw', '0',
-            '--frame-id', 'map', '--child-frame-id', 'lidar_boom/os_sensor',
+            '--x', '0', '--y', '0', '--z', '-0.038',
+            '--roll', '0', '--pitch', '0', '--yaw', '3.14159265',
+            '--frame-id', 'gm_os_lidar', '--child-frame-id', 'lidar_boom/os_sensor',
         ],
         output='screen',
     )
