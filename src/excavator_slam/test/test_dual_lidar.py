@@ -119,6 +119,29 @@ def test_the_slam_pose_carries_the_points_into_the_world_frame():
     assert placed == pytest.approx(np.array([[11.0, -5.0, 2.0]]), abs=1e-12)
 
 
+def test_a_non_identity_cabin_mounting_is_inverted_and_not_applied_twice():
+    """The branch a sign error hides in, pinned by an invariant instead of a number.
+
+    place_boom_points goes cab -> cabin LiDAR by INVERTING the mounting, then cabin LiDAR
+    -> world by the SLAM pose. So if the SLAM pose happens to equal the mounting, the two
+    cancel exactly and the points must come back in cab coordinates. Applying the mounting
+    the wrong way round, or twice, breaks this and nothing else in this file would notice.
+    """
+    yaw = np.radians(90.0)
+    mounting = SensorPose(
+        translation=(1.0, 2.0, 3.0),
+        rotation=np.array([[np.cos(yaw), -np.sin(yaw), 0.0],
+                           [np.sin(yaw), np.cos(yaw), 0.0],
+                           [0.0, 0.0, 1.0]]))
+    chain = BoomChain(cab_from_cabin_lidar=mounting,
+                      hinge_in_cab_m=(0.0, 0.0, 0.0),
+                      lidar_in_link_m=(0.0, 0.0, 0.0))
+    points = np.array([[5.0, -1.0, 0.5], [0.0, 0.0, 0.0]])
+
+    placed = place_boom_points(points, chain, MachineState(slam_pose=mounting, boom_deg=0.0))
+    assert placed == pytest.approx(points, abs=1e-9)
+
+
 def test_a_malformed_point_array_is_rejected_rather_than_reshaped():
     state = MachineState(slam_pose=SensorPose.identity(), boom_deg=0.0)
     with pytest.raises(ValueError):
