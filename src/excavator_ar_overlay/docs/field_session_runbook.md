@@ -26,9 +26,12 @@
 ## 1. 준비물
 
 - 이미지·클라우드 양쪽에서 명확히 식별되는 타깃 **1개**
-  - 조건: 높이 0.3 m 이상(라이다 점이 지면과 분리됨), 폭 0.3 m 이상, 색이 흙·잔디와 대비.
-  - 후보: 콘, 밝은 합판/양동이, 각목에 흰 테이프. 없으면 버킷으로 만든 작은 흙더미도 가능하나
-    윤곽이 흐려 정밀도가 떨어진다.
+  - 조건: 높이 0.3 m 이상(라이다 점이 지면과 분리됨), 폭 0.3 m 이상, 색이 바닥과 대비.
+  - **색은 어둡거나 채도가 높은 것**으로 고른다. 2026-09-22 캐빈 카메라 실측 화면에서
+    작업면이 마른 밝은 모래라 흰 합판·밝은 색 타깃은 대비가 약하다. 빨간 콘, 파란 양동이 권장.
+  - 없으면 버킷으로 만든 작은 흙더미도 가능하나 윤곽이 흐려 정밀도가 떨어진다.
+- 화면 배치 주의(같은 실측): **붐·암·버킷이 이미지 우측 약 1/3을 가린다.** 타깃은 좌측
+  2/3 안에 놓아야 하고, 기계 그림자가 짙게 지는 구역은 피한다.
 - 줄자(타깃 위치 기록용, 선택).
 - 노트북에서 이 저장소 접근 가능할 것.
 
@@ -40,8 +43,33 @@ source ~/robot_ws/install/setup.bash
 ros2 topic hz /lidar_boom/points            # 10 Hz 부근
 ros2 topic hz /zedx_cabin/zedx_cabin_node/rgb/image_rect_color/compressed
 ros2 run tf2_ros tf2_echo map gm_swing_axis # 값이 나와야 함
+ros2 run tf2_ros tf2_echo map gm_os_lidar   # 값이 나와야 함
 df -h ~/data                                 # 한 세션 ~15 MB
 ```
+
+**gm_ 프레임 두 개가 이 점검의 핵심이다.** 센서만 떠 있으면 클라우드·이미지는 멀쩡히
+나오지만 오프라인 풀이는 불가능하다(클라우드를 외부 파라미터가 사는 프레임으로 옮길 수
+없다). 2026-09-22 실측에서 센서만 살아 있고 `gm_*` 가 없는 상태가 실제로 발생했으므로,
+이제 캡처 노드가 그런 상황에서 **저장을 거부**하고 다음 경고를 낸다:
+
+```
+still, but gm_os_lidar and gm_swing_axis are missing from TF, so this capture
+could not be solved offline. Nothing was written.
+```
+
+이 경고가 뜨면 `gm_` 프레임을 발행하는 기구학 스택(rn voxelizer 계열)을 먼저 띄운다.
+
+2026-09-22 실측 참고값: `/lidar_boom/points` 10.0 Hz(512×128, 유효 34k점),
+`rgb/image_rect_color/compressed` 10.1 Hz, `left/image_rect_color/compressed` 10.3 Hz.
+**rgb 계열이 비어 있다는 과거 기록은 이 날짜 기준으로는 재현되지 않는다** — 둘 다 정상.
+(같은 날 오후 ZED 스택이 argus 오류로 내려갔다. 카메라가 안 뜨면 캡처는 의미가 없으니
+`docs/zedx_camera_recovery.md` 쪽 절차를 먼저 끝낼 것.)
+
+**`gm_*` TF 는 상시가 아니다.** 09-22 관측에서 `gm_swing_axis`/`gm_os_lidar` 와
+`/rn/grid_map` 이 함께 수 분간 사라졌다가 돌아왔다(상류 rn voxelizer). 라이다·카메라는
+그 동안에도 멀쩡했다. 캡처 노드는 TF 가 없으면 저장을 거부하므로 **세션 중간에 조용히
+비는 구간이 생길 수 있다.** 9장을 다 찍은 뒤 §4 검수에서 파일 개수를 반드시 세고,
+모자라면 그 자리에서 다시 찍는다.
 셋 중 하나라도 비면 캡처는 의미가 없다. 특히 카메라 스트림이 죽으면 캡처 노드는
 같은 프레임을 반복 저장하려 하는데, 이제는 노드가 이를 거부하고
 `no new image since the last capture (stream stalled?)` 로 경고한다. 이 경고가
@@ -183,5 +211,8 @@ ros2 run rqt_image_view rqt_image_view /excavator/perception/dig_overlay/compres
 
 - 타깃 대응점이 6점 미만으로 유효하면: 같은 자리에서 타깃을 더 촘촘히(1.5 m 간격) 다시 배치.
 - 그래도 안 되면 재귀반사 테이프 + 라이다 반사강도 채널로 자동 검출하는 경로가 남아 있다.
-  현재 캡처는 XYZ 만 저장하므로 그 경우 `pointcloud.extract_xyz` 를 반사강도까지
-  저장하도록 넓혀야 한다 (코드 작업, 현장 불필요).
+  2026-09-22부터 캡처가 반사강도 채널과 센서의 행/열 구조를 그대로 저장하므로
+  (`pointcloud.extract_organized`), 코드 확장 없이 그 세션 데이터로 바로 시도할 수 있다.
+  저장 형식은 `(height, width, 4)` = x·y·z·intensity 이고 무반사 빔은 NaN 이다.
+  08-18 이전 캡처는 XYZ 평면 목록이라 해당되지 않는다 —
+  `target_pick.xyz_from_capture` 가 두 형식을 모두 읽는다.

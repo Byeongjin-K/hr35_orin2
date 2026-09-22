@@ -54,9 +54,11 @@
       # axis almost purely in +x.
       anchor_frame: 'gm_swing_axis'
       elevation_layer: 'elevation'
-      # /rn/grid_map is currently silent (its upstream voxelizer emits empty
-      # clouds), so the overlay falls back to a flat plane at this height
-      # rather than dropping the dig layer entirely.
+      # 2026-09-22 실측: /rn/grid_map 은 더 이상 무음이 아니다. frame 'map',
+      # 34x67 셀(res 0.15, 중심 x=2.55), 유효 2084/2278, 고도 -0.19~+0.67 m.
+      # 다만 발행이 간헐적이다 — 10 Hz 로 나오다가 수 분간 끊긴다(상류 rn
+      # 파이프라인). 끊긴 구간에서는 dig 레이어를 버리지 않고 이 높이의
+      # 평면으로 대체한다.
       fallback_height_m: 0.0
 
     dig:

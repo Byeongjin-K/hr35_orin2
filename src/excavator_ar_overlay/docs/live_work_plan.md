@@ -147,7 +147,170 @@ A의 보정은 센서↔센서 직접 변환이라 이 문제와 무관하게 �
 
 ### 결정 후 조치
 `grid.anchor_frame` 파라미터로 이미 노출되어 있어 코드 변경 없이 전환 가능하다.
-placeholder를 제거할지 여부는 다른 노드(ouster 드라이버 등)의 의존을 확인해야 한다.
+오버레이 쪽은 `lidar.override_frame: 'gm_os_lidar'` 로 이미 우회 중이다.
+
+### 2026-09-22 라이브 재확인 — 붐 스윕 없이, 한 포즈로 재판정
+
+08-18 판정은 붐 8포즈가 필요했다. 그 사이 `/rn/grid_map` 이 살아나서(34×67, res 0.15,
+frame `map`, 유효 2084/2278) **기계와 독립적인 지형 기준**이 생겼으므로, 이제 한
+포즈에서 끝난다. 셀 481개의 중심에서 라이다 지면(하위 20 퍼센타일)과 grid map 고도를
+비교했다:
+
+| 체인 | \|dz\| 중앙값 | p90 | 편향 | 매칭 셀 |
+|---|---|---|---|---|
+| `gm_os_lidar` | **0.065 m** | 0.240 m | -0.021 m | 225/481 |
+| `lidar_boom/os_lidar` | **1.776 m** | 2.838 m | -1.776 m | 164/481 |
+
+기구학 체인만이 **반 셀(0.075 m) 안에서** dig 레이어가 읽는 지형과 일치한다. 이것이
+Stage 2 에서 실제로 중요한 판정이다 — 절대 진리가 아니라 *두 레이어가 서로 맞는가*.
+
+붐각 의존성도 우연히 다시 잡혔다: 같은 비교를 몇 분 간격으로 두 번 돌리는 사이 붐이
+움직였고, placeholder 편향이 **+0.541 m → -1.776 m** 로 바뀌었다. 기구학 체인은 그
+사이에도 0.065 m 를 유지했다.
+
+재현: `/tmp` 스크래치로 돌렸다. 필요하면 위 설명대로 다시 작성한다 —
+`ElevationGrid.from_message` + `target_pick.points_between_frames` 두 줄이 전부다.
+
+### placeholder 근본 수정 — 2026-09-22 **적용 완료**
+
+승인 후 붐 쪽 두 런치를 고쳤다(`boom_only_driver.launch.py`, `dual_lidar.launch.py`).
+**캐빈은 손대지 않았다** — `dual_lidar.launch.py:139` 의 `map → lidar_cabin/os_sensor`
+(pitch 0.25 고정)도 같은 패턴이지만, 캐빈 라이다는 떠 있지도 않고 대응하는 기구학
+프레임을 실측한 적이 없다. 근거 없이 같이 고치지 않는다.
+
+아래는 그 판단의 근거와 실측값이다.
+
+**1) placeholder 가 런치마다 값이 다르다 — 같은 프레임, 두 개의 거짓말**
+
+| 런치 | 발행 값 (map → `lidar_boom/os_sensor`) |
+|---|---|
+| `hr35_bringup/launch/boom_only_driver.launch.py:79` | xyz `[0, 0, 2]`, rpy `[0, 0, -1.5708]` |
+| `hr35_bringup/launch/dual_lidar.launch.py:151` | xyz `[1.9, -0.5, -0.9]`, rpy `[-1.5708, 0, 0]` |
+
+08-18 세션이 측정한 3.128 m / 50.37° 오차는 **boom_only 기동 때의 값**이다. dual 로
+띄우면 오차의 크기와 방향이 달라질 뿐 붐각 무시라는 성질은 같다. 캐빈도 같은 패턴이다
+(`dual_lidar.launch.py:139`, pitch 0.25 고정).
+
+**2) 소비자**
+
+| 소비자 | 영향 |
+|---|---|
+| `pointcloud_to_gridmap` (`config/grid_map_params.yaml`: `/lidar_boom/points` → `frame_id: map`) | TF로 map 변환하므로 실행하면 **같은 오차를 그대로 물려받는다** (붐각당 53.9 mm). 다만 2026-09-22 라이브 그래프에는 **떠 있지 않다** — 아래 4) 참조 |
+| `dual_lidar_viz.rviz`, `lidar_boom_viz.rviz` | 표시 전용 |
+| AR 오버레이 | `lidar.override_frame` 으로 이미 우회 |
+
+**3) 권고: 지우지 말고 부모를 바꾼다**
+
+드라이버가 `os_sensor → os_lidar` 를 스스로 발행하므로 앵커가 필요한 프레임은
+`os_sensor` 하나다. 지금처럼 `map` 에 매달면 붐 회전이 통째로 빠지지만, 부모를
+기구학 프레임으로 바꾸면 붐과 함께 움직이고 **소비자 전부가 코드 변경 없이** 맞는
+값을 받는다.
+
+```
+현재:  map            --static-->  lidar_boom/os_sensor  --driver-->  lidar_boom/os_lidar
+권고:  gm_os_lidar    --static-->  lidar_boom/os_sensor  --driver-->  lidar_boom/os_lidar
+```
+
+필요한 상수는 드라이버가 발행하는 `os_sensor → os_lidar` 의 역변환 하나다.
+**2026-09-22 직접 실측 완료** — 유도한 값이 아니라 TF 에서 그대로 읽은 값이다:
+
+```
+$ ros2 run tf2_ros tf2_echo lidar_boom/os_lidar lidar_boom/os_sensor
+- Translation: [0.000, 0.000, -0.038]
+- Rotation: in RPY (degree) [0.000, -0.000, 180.000]
+```
+
+이것이 곧 `gm_os_lidar → lidar_boom/os_sensor` 에 넣을 값이다(전제는 아래).
+
+두 런치에 들어간 인자는 다음과 같다:
+
+```
+--x 0 --y 0 --z -0.038 --roll 0 --pitch 0 --yaw 3.14159265
+--frame-id gm_os_lidar --child-frame-id lidar_boom/os_sensor
+```
+
+**적용 전에 라이브로 검증했다** — 옛 값이 위치 인자(`x y z yaw pitch roll`)였던 탓에
+규약 착오가 바로 이 버그의 출발점이었으므로, 인자 해석 자체를 확인해야 했다. 같은
+인자로 `lidar_boom/os_sensor_test` 라는 임시 프레임을 띄우고, 거기에 드라이버의
+`os_sensor → os_lidar` 를 합성한 결과를 살아 있는 `map → gm_os_lidar` 와 비교했다:
+
+```
+map -> os_sensor_test           t = [1.9687, 0.7359, 1.9168]
+  o driver os_sensor->os_lidar
+  = predicted map -> os_lidar   t = [1.9524, 0.7704, 1.9166]
+live map -> gm_os_lidar         t = [1.9525, 0.7702, 1.9166]
+difference: 0.19 mm, 0.0000 deg   -> MATCH
+```
+
+(0.19 mm 는 두 조회 사이에 붐이 미세하게 움직인 양이다. 임시 프레임은 검증 후 내렸다.)
+
+**부작용 하나는 알고 있어야 한다**: 이제 `map → lidar_boom/*` 는 `gm_` 프레임을 발행하는
+스택이 떠 있을 때만 존재한다. 안 떠 있으면 변환이 **틀린 값이 아니라 아예 없다.** 위
+4-(c) 에 적은 대로 그 스택은 간헐적이므로, RViz 나 `pointcloud_to_gridmap` 이 조용히
+비는 구간이 생길 수 있다 — 종전의 "항상 있지만 몇 m 틀린" 상태보다 낫다고 판단했다.
+
+**기동 확인 (같은 날 13:13 재기동분)**. 고친 런치로 올라온 `tf_publisher_boom` 에서
+실제 트리를 읽었다:
+
+```
+$ ros2 run tf2_ros tf2_echo gm_os_lidar lidar_boom/os_sensor
+- Translation: [0.000, 0.000, -0.038]      rpy [0, 0, 180 deg]     <- 새 static
+
+$ ros2 run tf2_ros tf2_echo gm_os_lidar lidar_boom/os_lidar
+- Translation: [0.000, 0.000, 0.000]       rpy [0, 0, 0]           <- 드라이버까지 합성
+```
+
+두 번째가 **항등**이다 — 헤더 프레임 `lidar_boom/os_lidar` 가 이제 기구학 프레임과
+같은 것을 가리킨다는 뜻이고, 이 수정이 목표한 바로 그 상태다. 덕분에 AR 의
+`lidar.override_frame` 은 결과에 영향을 주지 않는 값이 됐다(고치기 전 bringup 으로
+띄운 세션을 위해 남겨 둔다).
+
+예고한 부작용도 같이 관측됐다: 그 시점 rn 스택이 내려가 있어
+`tf2_echo map lidar_boom/os_lidar` 는 `frame does not exist` 로 실패한다. 의도된
+동작이다.
+
+전제: `gm_os_lidar` 가 물리 os_lidar 프레임과 위치·자세 모두 일치한다는 것(08-18 지면
+불변량 검증과 09-22 grid map 대조가 이를 지지한다). 적용 직후
+`tf2_echo map lidar_boom/os_lidar` 와 `tf2_echo map gm_os_lidar` 가 일치하는지 확인하면
+전제까지 함께 검증된다.
+
+현재 어긋난 양(2026-09-22 한 포즈 실측, `tf2_echo gm_os_lidar lidar_boom/os_lidar`):
+
+```
+- Translation: [2.219, 0.531, 0.181]      -> 2.289 m
+- Rotation: in RPY (degree) [-0.24, 0.64, -0.26]
+```
+
+회전은 이 포즈에서 우연히 0.7° 안으로 맞는다 — **자세만 보고 placeholder 가 맞다고
+판단하면 안 되는 이유다.** 08-18 에는 같은 쌍이 yaw 17.2° 로 어긋나 있었다.
+
+적용하면 오버레이의 `lidar.override_frame` 은 빈 문자열로 되돌릴 수 있고, B의 판정
+근거였던 "맵 프레임 지면 높이의 붐각 무의존성"이 그리드맵에도 성립하게 된다.
+
+**4) 곁가지로 발견한 것 (AR 범위 밖, 미수정)**
+
+**(a) 이름이 겹친다 — 헷갈리지 말 것.** 라이브 그래프에 `/grid_map_node` 가 있지만
+이것은 이 워크스페이스의 `pointcloud_to_gridmap` 이 **아니다.** rn 파이프라인 쪽
+노드이며(`/rn/original/voxel_point_cloud` 구독 → `/rn/grid_map`·`/height_array` 발행),
+`pointcloud_to_gridmap` 은 아예 떠 있지 않다. 더 나쁜 것은 `/grid_map_node` 라는
+**동일 이름의 노드가 두 개** 떠 있다는 점이다(`ros2 node list` 가 경고를 낸다.
+하나가 voxel cloud 를 발행하고 다른 하나가 그것을 구독한다). 파라미터 서비스·이름
+해석이 어느 쪽으로 갈지 보장되지 않으므로 rn 쪽에 보고할 값어치가 있다.
+
+**(b) 파라미터 키 불일치.** `config/grid_map_params.yaml` 의 최상위 키는
+`grid_map_node:` 인데, 이 워크스페이스의 노드는 자신을 `pointcloud_to_gridmap` 으로
+이름 짓는다(`pointcloud_to_gridmap.cpp:108`, 런치의 `name=` 도 동일). 키가 안 맞으면
+파라미터 파일이 통째로 무시되어 기본값 `pointcloud_topic: /ouster/points` 로 뜬다 —
+그 토픽은 이 워크스페이스에 없다. 공교롭게도 그 yaml 키는 rn 쪽 노드 이름과 같아서
+더 헷갈린다. 띄울 일이 생기면
+`ros2 param get /pointcloud_to_gridmap pointcloud_topic` 으로 먼저 확인할 것.
+
+**(c) `/rn/grid_map` 발행이 간헐적이다.** 09-22 관측에서 10 Hz 로 나오다가 수 분간
+완전히 멎었고(그 구간엔 `gm_*` TF 도 함께 사라졌다), 다시 살아났다. 상류
+`/lidar_boom/points`(9.9 Hz)와 `/local_pc`(9.9 Hz)는 그 동안에도 살아 있었으므로
+끊김은 rn voxelizer 단계다. **캡처 세션을 잡기 전에 `gm_*` TF 가 안정적으로 나오는지
+먼저 확인해야 한다** — 캡처 노드는 이제 TF 가 없으면 저장을 거부하므로 세션 도중
+조용히 건너뛰는 구간이 생길 수 있다.
 
 ---
 
@@ -208,19 +371,31 @@ GUI 파라미터 설명에 이런 실측 기록이 있다:
 > left/ 를 기본값으로 쓴다. 둘은 동일 센서다.
 
 그런데 이 오버레이 노드는 `topics.image_in`에 **rgb/ 계열**을 쓰고 있고, 2026-08-12~13
-실측에서는 정상 수신됐다(2 Hz, 프레임 캡처 성공). 두 관측이 엇갈리므로, GUI 연결 시점에
-오버레이 입력이 비면 `topics.image_in`을 left/ 계열로 바꿔 볼 것. 파라미터라 재빌드는
-필요 없다.
+실측에서는 정상 수신됐다(2 Hz, 프레임 캡처 성공).
+
+**2026-09-22 재측정으로 정리됨**: 캐빈 카메라에서 `rgb/image_rect_color/compressed`
+10.1 Hz, `left/image_rect_color/compressed` 10.3 Hz 로 **둘 다 정상 발행**이다. GUI
+파라미터 설명의 "rgb 계열 0장" 기록은 이 날짜 기준으로 재현되지 않는다. 그래도 GUI 연결
+시점에 오버레이 입력이 비면 `topics.image_in`을 left/ 계열로 바꿔 볼 것. 파라미터라
+재빌드는 필요 없다.
 
 ---
 
 ## E. 코드 품질 잔여 (실험 불필요, 낮은 우선순위)
 
-- `lidar_projection_node.py`가 549 LOC로 프로젝트 가이드라인(250) 초과.
-  dig 레이어(~140줄)와 LiDAR 레이어(~40줄)를 별도 모듈로 분리하면 해소된다.
-  기능 영향 없음.
-- 노드 자체의 통합 테스트 없음(순수 모듈은 133개로 커버). rclpy 픽스처가 필요해
-  비용 대비 효용을 따져볼 것.
+> **2026-09-22 갱신.** 아래 두 항목은 모두 닫혔고, 캡처 저장 형식도 개선했다.
+
+- ~~`lidar_projection_node.py` 549 LOC~~ → 2026-09-07 `layers.py` / `projection_render.py`
+  분리로 해소.
+- ~~노드 통합 테스트 없음~~ → `test/test_snapshot_capture_node.py` 가 rclpy 픽스처로
+  캡처 노드를 합성 메시지로 구동해 실제로 쓰이는 파일(클라우드·이미지·meta)을 검증한다.
+  하드웨어·토픽 불필요. 현재 전체 195개 통과.
+- 캡처 클라우드가 조직화 `(height, width, 4)` x·y·z·intensity 로 저장된다
+  (무반사 빔은 NaN). 08-18 세션 노트가 지적한 "평탄화 때문에 거리 불연속을 각도
+  재binning 으로 근사" 문제와 §9 대안(반사강도 기반 검출)의 선행 코드 작업이 함께 닫혔다.
+  기존 평면 `(N, 3)` 캡처는 `target_pick.xyz_from_capture` 가 그대로 읽는다.
+- 남은 것: 투영 노드(`LidarProjectionNode`) 자체의 통합 테스트. 캡처 노드와 달리
+  이미지·TF·GridMap 픽스처가 전부 필요해 비용이 크고, 순수 모듈 커버리지가 이미 높다.
 
 ---
 
