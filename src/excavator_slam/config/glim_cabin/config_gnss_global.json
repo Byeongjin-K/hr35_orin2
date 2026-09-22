@@ -1,0 +1,22 @@
+{
+  /*** GNSS global factors (glim_ext gnss_global module) ***
+  // gnss_topic      : sensor_msgs/NavSatFix the module subscribes to
+  // min_baseline    : metres of travel required before GNSS factors are added at all
+  // prior_inf_scale : information weight on [east, north, up]
+  //
+  // min_baseline is the reason this cannot be validated on the bags in hand. The module
+  // needs the machine to MOVE before it will trust a GNSS heading, and the 1104 bag holds
+  // 0.095 m of travel over the 62 s window - two orders of magnitude short of the 10 m
+  // default. Wiring it changes nothing until there is a recording with a drive-away.
+  //
+  // The up weight is 0.0 in the upstream default, i.e. GNSS altitude is DISCARDED. That is
+  // the opposite of what this project needs: dz_bias against the cab-mounted antenna is
+  // the metric the submap-optimisation work was judged on. Left at the upstream value here
+  // because raising it without a moving recording to measure against would be guesswork.
+  */
+  "gnss": {
+    "gnss_topic": "/gnss",
+    "min_baseline": 10.0,
+    "prior_inf_scale": [1e3, 1e3, 0.0]
+  }
+}

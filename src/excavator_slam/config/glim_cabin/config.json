@@ -2,6 +2,10 @@
   /*** Global Configuration ***/
   "global": {
     "config_path": "",
+    // A DIRECTORY, not a file - glim opens "<this>/config_ext.json". Inert until a
+    // glim_ext module is added to extension_modules in config_ros.json. /cfg is where
+    // both launch files mount config_dir inside the container.
+    "config_ext": "/cfg",
     "config_ros": "config_ros.json",
     "config_logging": "config_logging.json",
     "config_viewer": "config_viewer.json",

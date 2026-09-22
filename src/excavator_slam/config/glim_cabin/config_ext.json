@@ -1,0 +1,18 @@
+{
+  /*** glim_ext module configuration ***
+  // Read only when a glim_ext module is actually loaded, so this file is inert until
+  // "libgnss_global.so" is added to extension_modules in config_ros.json AND the built
+  // library is on LD_LIBRARY_PATH. scripts/build_glim_ext.sh builds it.
+  //
+  // config_path is a DIRECTORY, and glim looks up this whole file through the "config_ext"
+  // key in config.json which is ALSO a directory. Getting that wrong does not fail loudly:
+  // measured, pointing config.json's "config_ext" at a filename made glim try to open
+  // "config_ext.json/config_ext.json", log two "failed to open" lines, and then start the
+  // GNSS thread anyway on built-in defaults - a module running unconfigured while looking
+  // like it started fine.
+  */
+  "global_ext": {
+    "config_path": "/cfg",
+    "config_gnss_global": "config_gnss_global.json"
+  }
+}
