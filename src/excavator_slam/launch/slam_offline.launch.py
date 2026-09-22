@@ -70,7 +70,15 @@ def _run(context, *args, **kwargs):
         # knobs that can multiply, so the ceiling belongs here rather than in the hope
         # that every config keeps its threads modest.
         "--cpus", arg("cpus"),
+        # Run as the invoking user so the run outputs are not root-owned. This is not
+        # cosmetic: the entry script starts with "rm -rf $OUT", and a root-owned $OUT
+        # inside a user-owned parent cannot be removed by the user - measured, that made
+        # a later run die with NODE_EXITED_EARLY and no output at all, for reasons that
+        # have nothing to do with SLAM. The live sibling needs the same flag for a
+        # different and much worse reason; see the comment there.
+        "--user", "%d:%d" % (os.getuid(), os.getgid()),
         "--network", "host", "--entrypoint", "bash",
+        "-e", "HOME=/tmp",
         "-e", "RMW_IMPLEMENTATION=rmw_fastrtps_cpp",
         "-e", "ROS_DOMAIN_ID=" + arg("domain"),
         "-v", os.path.dirname(bag) + ":" + os.path.dirname(bag) + ":ro",
