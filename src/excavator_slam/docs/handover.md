@@ -94,6 +94,91 @@
 >   `enable_optimization` + `create_between_factors` 를 그대로 승계한다.
 >   실행: `ros2 launch excavator_slam slam_offline.launch.py bag:=<bag> \`
 >   `config_dir:=$PWD/src/excavator_slam/config/glim_cabin cpus:=4`
+>
+> **2026-09-22 후속 — 실험 없이 가능한 백로그 8건. 위 22행 블록의 재현성 진단은 이 블록으로 정정된다.**
+>
+> - **★정정: 런간 비재현성의 원인은 무작위 샘플링이 아니다.** 위 블록과 함정 표는
+>   `use_random_grid_downsampling` 의 시드 없는 무작위 10000점 추출을 원인으로 적었다.
+>   **틀렸다.** 같은 bag, 같은 설정, 2런씩 실측(2637포즈·타임스탬프 동일):
+>
+>   | 설정 | 궤적 차이(평균/최대) | 서브맵 | RTF |
+>   |---|---|---|---|
+>   | 랜딩본 (`num_threads` 2) | **0.1015 / 0.2697 m** | 22 / 22 | 1.83 / 1.75 |
+>   | 무작위 OFF (복셀 1.0 m) | **3.0417 / 5.1873 m** | 147 / 147 | 1.10 |
+>   | `num_threads` 1 | **0.0028 / 0.0558 m** | 25 / 25 | 1.57 |
+>
+>   무작위를 끄면 재현성이 **30배 나빠지고** 정합도 무너진다(창1 `dz_median` 0.9786,
+>   `dz_bias` +0.7878, `dz_p90` 1.8271, 수평 1.6892 **탐색 포화**, 자체 floor 도 0.0776 로
+>   악화. 랜딩본은 0.0329 / +0.0039 / 0.2701). 이유는 단순하다 — `downsample_resolution`
+>   이 **1.0 m 로 한 번도 쓰인 적 없는 기본값**이었고, 100 m 장면에 1 m 복셀이다.
+> - **실제로 듣는 손잡이는 스레드 수다.** `num_threads` 1 은 분산을 **36배** 좁히면서
+>   정합은 그대로다(창1 `dz_median` 0.0320 · `dz_bias` +0.0062, 창2 0.0344 · +0.0050 —
+>   09-15 의 3런 범위 안). 비용은 RTF 1.79 → **1.57** (12%, 여전히 실시간의 1.5배).
+>   **비트 단위 재현은 아니다**(최대 0.0558 m 남음). 얻는 것은 분산이 측정 대상 효과
+>   크기(0.05~0.2 m)보다 확실히 작아져 **설정당 1런이 신뢰 가능해진다**는 점이다.
+>   활성 CPU 경로의 `num_threads` 는 `config_preprocess.json` 과 `config_odometry_cpu.json`
+>   **딱 두 곳**이고, 두 설정 디렉터리에 반영했다.
+> - **비재현성은 런 길이·지도 크기와 함께 자란다.** 14초 캐빈 bag(서브맵 1개) 4런은
+>   평균 **0.0003 m** 밖에 안 벌어진다. 전역 최적화가 증폭기라는 해석과 맞는다.
+> - **`exit 139` 의 정체를 잡았다 — `librviz_viewer.so`.** 확장 모듈 이분탐색(캐빈 bag,
+>   네 경우 모두 포즈 111·서브맵 1 동일): 둘 다 **139**, 아무것도 **0**,
+>   `libmemory_monitor.so` 단독 **0**, `librviz_viewer.so` 단독 **139**. 백트레이스:
+>
+>   ~~~
+>   #0 glim::TrajectoryManager::update_anchor(double, Eigen::Transform<double,3,1,0> const&)
+>   #1 glim::RvizViewer::globalmap_on_update_submaps(vector<shared_ptr<SubMap>> const&)
+>   #2 glim::GlobalMapping::optimize()
+>   #3 glim::GlobalMapping::save(string const&)
+>   ~~~
+>
+>   `save()` 가 마지막 `optimize()` 를 돌리고 그 콜백에서 뷰어가 `update_anchor` 를
+>   부르다 죽는다. **경쟁 상태다**: `num_threads` 1 의 두 런이 각각 0 과 139 로 갈렸다.
+>   산출물은 온전하고(궤적 차이 0.3 mm 수준) 오프라인에서는 뷰어를 빼면 **exit 0** 이지만,
+>   **라이브에서는 뺄 수 없다** — 아래 `config_ros.json` 주석대로 ROS 퍼블리셔가 그 안에 있다.
+>   상주 노드로 만들면 매 종료마다 139 를 받게 되므로 수퍼바이저가 정상 종료와 구분 못 한다.
+> - **`glim_ext` GNSS 모듈을 빌드해서 GLIM 이 로드하는 것까지 확인했다.**
+>   `scripts/build_glim_ext.sh` 가 그 레시피다. 이미지에 gtsam·gtsam_points 헤더
+>   (`/usr/local/include`), glim cmake 설정, Eigen 이 전부 있어서 그대로 붙는다.
+>   런타임 로그: `load libgnss_global.so` → `gnss_global_config_path=/cfg/config_gnss_global.json`
+>   → `starting GNSS global thread` → `- /gnss (ext)` 구독, 포즈 111.
+>   - **ScanContext 는 PCL 때문에 막혔다.** 이미지에 `libpcl` 패키지가 **0개**다. 주행
+>     재방문 녹화 없이는 검증도 못 하는 루프 검출기를 위해 런타임 이미지에 PCL 을 넣는
+>     것은 아직 이득이 아니라고 판단해 껐다.
+>   - **지금 데이터로는 GNSS 팩터가 애초에 발동하지 않는다.** `min_baseline` 기본값이
+>     **10 m** 인데 1104 bag 의 총 이동은 **0.095 m** 다. 두 자릿수 차이다.
+>   - **상류 기본값은 GNSS 고도를 버린다**: `prior_inf_scale` 이 `[1e3, 1e3, 0.0]`.
+>     이 프로젝트가 재는 지표가 `dz_bias` 인데 정반대다. 주행 녹화로 재보기 전에 올리는
+>     것은 추측이라 상류 값 그대로 뒀다.
+>   - **함정**: `config.json` 의 `config_ext` 와 `config_ext.json` 의 `config_path` 는
+>     둘 다 **파일이 아니라 디렉터리**다. 파일명을 넣으면 `config_ext.json/config_ext.json`
+>     을 열려다 실패하고 **모듈은 기본값으로 그냥 뜬다** — 설정 없이 도는데 정상처럼 보인다.
+> - **라이브 경로가 생겼다** (`launch/slam_live.launch.py`, `scripts/glim_live_entry.sh`).
+>   FastDDS 는 디스커버리를 UDP, 페이로드를 **공유메모리**로 보낸다. 네트워크 네임스페이스만
+>   공유하면 토픽은 다 보이고 GLIM 도 다 뜨는데 콜백이 한 번도 안 불린다.
+>   `--ipc=host` 는 **필요하지만 충분하지 않다**: 리더가 root 로 `/dev/shm` 세그먼트를
+>   0644 로 만들고, 라이터는 그 세그먼트에 써야 하므로 uid 1000 호스트 퍼블리셔는
+>   **쓰기 권한이 없어 전부 조용히 버린다**. 같은 재생 세션 실측 — 호스트 2.504 Hz,
+>   `--network host` 0, `+--ipc=host` 0, `+--user 1000:1000` **1.801 Hz**,
+>   `--ipc=host` + UDP 전용 FastDDS 프로파일(root) **1.802 Hz**. `--user` 를 택했다
+>   (공유메모리를 살려 CPU 를 아끼고, 산출물이 root 소유가 되지 않는다).
+>   캐빈 bag 재생 상대 실측: `/glim_ros/lidar_odom` **2.558 / 2.543 Hz** (0.25배 재생의
+>   공칭 2.5 Hz = 프레임 누락 없음), 26포즈, 서브맵 1.
+> - **캐빈 설정 경로를 처음 실행했다** (C1): 붐 설정 × 캐빈 bag = **0포즈**(토픽 불일치),
+>   캐빈 설정 × 캐빈 bag = **111포즈 · 서브맵 1 · RTF 4.74**, 로그에
+>   `estimate initial IMU state` 확인.
+> - **두 라이다 융합의 수학을 코드로 고정했다** (`excavator_slam/dual_lidar.py`, 8테스트).
+>   붐 반사는 SLAM 포즈 + 붐 조인트로 **배치**하고 스스로 위치를 찾게 하지 않는다.
+>   **스윙 각은 일부러 빠진다** — 두 센서가 같은 상부체에 달려 있어 상쇄되므로 넣으면
+>   이중 적용이다(테스트가 이걸 고정한다). 수직 성분은 `r*(sinα-sinβ)` = **0.445 m** 이고,
+>   위 블록의 0.55 m 는 호장 `r*Δθ` 다(오차 크기 가늠에는 되고 점 배치에는 안 된다).
+> - **지도 영속화가 datum 을 들고 다닌다** (`excavator_slam/map_export.py` 7테스트,
+>   `excavator_slam/glim_dump.py` 7테스트, `scripts/export_glim_map.py`).
+>   GLIM 덤프는 서브맵당 디렉터리 하나이고 `points_compact.bin` 은 **헤더 없는
+>   리틀엔디안 float32 x,y,z** 다(문서 없음, 테스트로 고정). 실제 1104 덤프로 검증:
+>   **28서브맵 1,044,799점**, 축당 약 196 m, 내보낸 뒤 다시 읽어 datum·yaw 보존,
+>   ENU 중심이 선언한 원점에 떨어진다. 점은 **로컬 미터 + float32** 로 저장하고
+>   절대좌표(UTM/ECEF)는 거부한다 — float32 간격이 크기에 비례해서 500 km easting 은
+>   3 cm 격자에 얹히기 때문이다.
 
 ---
 
