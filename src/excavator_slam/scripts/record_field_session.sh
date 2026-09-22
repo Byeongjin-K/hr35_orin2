@@ -27,7 +27,23 @@ source /home/kimm/robot_ws/install/setup.bash
 set -u
 
 REQUIRED="/lidar_cabin/points /lidar_cabin/imu /lidar_boom/points /lidar_boom/imu /gps_msg /gps_att /excavator/sensors/swing_encoder_output /kine_data"
-OPTIONAL="/tf /tf_static /excavator/sensors/gnss_position /excavator/sensors/gnss_velocity /excavator/sensors/joint_boom /excavator/sensors/joint_arm /excavator/sensors/joint_bucket /excavator/sensors/boom_inclino /excavator/sensors/swing_angle"
+OPTIONAL="/tf /tf_static /lidar_cabin/metadata /lidar_boom/metadata /excavator/sensors/gnss_position /excavator/sensors/gnss_velocity /excavator/sensors/joint_boom /excavator/sensors/joint_arm /excavator/sensors/joint_bucket /excavator/sensors/boom_inclino /excavator/sensors/swing_angle"
+
+# A waiver is named, never blanket. SKIP_REQUIRED lists exactly which required topics the
+# operator has decided to go without; they move to OPTIONAL, so they are still recorded if
+# they appear mid-session, and the waiver is printed where the session log keeps it. A
+# blanket "record anyway" flag would also swallow a missing GNSS, which is the one failure
+# this script exists to prevent.
+SKIP_REQUIRED="${SKIP_REQUIRED:-}"
+if [ -n "$SKIP_REQUIRED" ]; then
+  for T in $SKIP_REQUIRED; do
+    REQUIRED=$(printf '%s\n' $REQUIRED | grep -vx -- "$T" | tr '\n' ' ')
+    OPTIONAL="$OPTIONAL $T"
+  done
+  echo "PREFLIGHT_WAIVED $SKIP_REQUIRED"
+  echo "  These are no longer required. Anything that depends on them cannot be computed"
+  echo "  from this bag - joint angles place the boom returns, and nothing else supplies them."
+fi
 
 # Which middleware actually sees the data? Decided by counting, not by belief.
 BEST_RMW=""
@@ -64,7 +80,7 @@ echo "  quality=$QUALITY sat=$SATS   (1 GPS fix, 2 DGPS, 4 RTK fix, 5 RTK float)
 
 echo "--- preflight: LiDAR must stamp on the ROS clock, not its own oscillator"
 for T in /lidar_cabin/points /lidar_boom/points; do
-  STAMP=$(timeout 15 ros2 topic echo "$T" --once --field header.stamp.sec 2>/dev/null | head -1)
+  STAMP=$(timeout 15 ros2 topic echo "$T" --once --field header.stamp.sec 2>/dev/null | grep -m1 -E '^[0-9]+$')
   NOW=$(date +%s)
   if [ -n "$STAMP" ]; then
     SKEW=$((NOW - STAMP))
@@ -87,8 +103,19 @@ echo "PREFLIGHT_OK"
 
 # Camera is optional and discovered rather than named: it is a second opinion for reading
 # the session afterwards, never a SLAM input, and it must never cost a LiDAR packet.
-ZED=$(timeout 15 ros2 topic list 2>/dev/null | grep zedx_cabin | grep -E "image_rect_color/compressed$|camera_info$|imu/data$" | tr '\n' ' ')
-echo "ZED_TOPICS $ZED"
+# That invariant is not free, and measurement says it was already being broken, so the
+# camera is OFF unless RECORD_ZED=1 asks for it. Same rig, same 15 s, cabin/boom clouds:
+#   with ZED     8.624 / 9.306 Hz   gap_max 0.311 / 0.305 s   51.2 MB/s
+#   without ZED  9.305 / 9.728 Hz   gap_max 0.300 / 0.204 s   38.2 MB/s
+# The camera costs 0.68 Hz of cabin scans, and a scan lost here cannot be recovered from
+# the bag. (It is not the whole cause - both columns still sit under the nominal 10 Hz.)
+if [ "${RECORD_ZED:-0}" = "0" ]; then
+  ZED=""
+  echo "ZED_TOPICS (off - it costs LiDAR scans; RECORD_ZED=1 to include it anyway)"
+else
+  ZED=$(timeout 15 ros2 topic list 2>/dev/null | grep zedx_cabin | grep -E "image_rect_color/compressed$|camera_info$|imu/data$" | tr '\n' ' ')
+  echo "ZED_TOPICS $ZED"
+fi
 
 TOPICS="$REQUIRED"
 for T in $OPTIONAL; do
