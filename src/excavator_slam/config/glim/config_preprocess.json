@@ -31,6 +31,23 @@
     "crop_bbox_min": [-1.0, -1.0, -1.0],
     "crop_bbox_max": [1.0, 1.0, 1.0],
     "k_correspondences": 10,
-    "num_threads": 2
+    // 1, NOT 2, and this is the run-to-run reproducibility fix - measured 2026-09-22.
+    //
+    // The previous diagnosis in the handover blamed the unseeded random 10000-point
+    // subsampling above. That is WRONG: turning it off (use_random_grid_downsampling
+    // false) made two runs of one bag differ by a mean of 3.042 m instead of 0.101 m,
+    // AND collapsed registration (dz_median 0.979 m against 0.027 m, horizontal search
+    // saturated) because downsample_resolution 1.0 had never been exercised.
+    //
+    // The thread count is what actually carries it. Same bag, same config, two runs:
+    //   num_threads 2   mean 0.1015 m   max 0.2697 m   RTF 1.83 / 1.75
+    //   num_threads 1   mean 0.0028 m   max 0.0558 m   RTF 1.57
+    // and the accuracy is unchanged - dz_median 0.0320 / 0.0344 m and dz_bias +0.0062 /
+    // +0.0050 m on the two window pairs, inside the landed three-run ranges.
+    //
+    // It is still not bit-reproducible, so a 0.056 m worst case remains. What it buys is
+    // that the spread is now well under the effect sizes being measured (0.05-0.2 m), so
+    // ONE run per config is finally trustworthy instead of three.
+    "num_threads": 1
   }
 }

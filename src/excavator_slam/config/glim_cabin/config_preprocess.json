@@ -31,6 +31,9 @@
     "crop_bbox_min": [-1.0, -1.0, -1.0],
     "crop_bbox_max": [1.0, 1.0, 1.0],
     "k_correspondences": 10,
-    "num_threads": 2
+    // 1, matching config/glim - the reproducibility measurement lives in that file's
+    // comment. Cost on the boom bag was RTF 1.79 -> 1.57, so still comfortably ahead of
+    // real time, and a cabin frame is 512x32 points against 65536 from the boom.
+    "num_threads": 1
   }
 }

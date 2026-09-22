@@ -33,6 +33,8 @@
     // Optimizer params
     "validate_imu": true,
     "save_imu_rate_trajectory": true,
-    "num_threads": 2
+    // 1 for the same reason as config_preprocess.json's num_threads - see the
+    // measurement there. These two are the only num_threads on the active CPU path.
+    "num_threads": 1
   }
 }
