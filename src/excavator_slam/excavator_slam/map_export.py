@@ -91,9 +91,13 @@ def save_map(path, points_map, frame):
             "like absolute coordinates: keep the points site-local and put the offset in "
             "the frame's origin_enu.")
 
-    np.savez_compressed(path,
-                        points=points.astype(np.float32),
-                        frame=json.dumps(_frame_to_dict(frame)))
+    # Written through a file handle, not a path: given a path, savez APPENDS ".npz" when
+    # it is missing, so "--out site_map" would write site_map.npz while every message and
+    # every reader still says site_map. A handle makes save and load agree on any name.
+    with open(path, "wb") as handle:
+        np.savez_compressed(handle,
+                            points=points.astype(np.float32),
+                            frame=json.dumps(_frame_to_dict(frame)))
 
 
 def load_map(path):

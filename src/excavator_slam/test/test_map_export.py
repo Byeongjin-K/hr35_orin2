@@ -46,6 +46,16 @@ def test_a_saved_map_reopens_with_its_points_and_its_frame(tmp_path):
     assert stored.frame.yaw_rad == pytest.approx(0.0, abs=1e-12)
 
 
+def test_a_filename_without_the_npz_suffix_round_trips_under_that_exact_name(tmp_path):
+    """numpy's savez appends .npz to a bare path; load does not. This pins the symmetry."""
+    path = tmp_path / "site_map"
+    save_map(path, _points(), _frame())
+
+    assert path.exists()
+    assert not (tmp_path / "site_map.npz").exists()
+    assert load_map(path).points == pytest.approx(_points(), abs=1e-3)
+
+
 def test_a_map_without_a_recorded_frame_is_refused_rather_than_assumed(tmp_path):
     """The whole point of the format. A bare point array must not load as "probably here"."""
     path = tmp_path / "bare.npz"
