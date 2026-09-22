@@ -132,18 +132,38 @@ fi
 
 # The guard in front of reload-drivers used to test $refcnt, a value captured BEFORE a probe
 # that had since driven it back to -1, so it waved through an rmmod at atomic 0. It has to
-# consult the module afresh, immediately before the daemon restart.
+# consult the module afresh, in the quiet window, before the daemon is started again.
 if [ -n "$ord_reload" ]; then
   tail_from_reload="$(sed -n "${ord_reload},\$p" "$SCRIPT")"
   g="$(printf '%s' "$tail_from_reload" | grep -n 'repair_refcnt' | head -1 | cut -d: -f1)"
-  r="$(printf '%s' "$tail_from_reload" | grep -n 'systemctl restart zed_x_daemon' | head -1 | cut -d: -f1)"
+  r="$(printf '%s' "$tail_from_reload" | grep -n 'systemctl start zed_x_daemon' | head -1 | cut -d: -f1)"
   if [ -n "$g" ] && [ -n "$r" ] && [ "$g" -lt "$r" ]; then
-    ok "reload-drivers re-reads and repairs the refcount before restarting the daemon"
+    ok "reload-drivers repairs the refcount before it starts the daemon"
   else
-    no "the rmmod guard must re-read sysfs right before the daemon restart (guard=$g restart=$r)"
+    no "the rmmod guard must re-read sysfs before the daemon is started (guard=$g start=$r)"
+  fi
+
+  s="$(printf '%s' "$tail_from_reload" | grep -n 'systemctl stop zed_x_daemon' | head -1 | cut -d: -f1)"
+  if [ -n "$s" ] && [ -n "$g" ] && [ "$s" -lt "$g" ]; then
+    ok "the daemon is stopped before the refcount is repaired ($s < $g)"
+  else
+    no "repairing before the daemon stops is pointless; its teardown burns the reference (stop=$s repair=$g)"
   fi
 else
   no "cannot locate the reload-drivers rung to check its guard"
+fi
+
+# 2026-09-22: `systemctl restart zed_x_daemon` can NEVER reload the driver while the daemon
+# holds a GMSL port. systemd stopping it runs the port teardown, that teardown hits the
+# tegracam double module_put bug, and the reference dies in the same instant -- kernel logged
+# "Error turning off streaming" x2 at 09:55:38, the exact second of "Stopping ZED-X Daemon
+# service", and the fresh daemon's rmmod was refused with "sl_max9295 is in use by: sl_zedx".
+# The repair only lands if it happens between stop and start.
+if grep -q 'systemctl restart zed_x_daemon' "$SCRIPT"; then
+  no "reload-drivers must not use 'systemctl restart zed_x_daemon'" \
+     "$(grep -n 'systemctl restart zed_x_daemon' "$SCRIPT")"
+else
+  ok "the ladder never restarts zed_x_daemon in one step"
 fi
 
 # Camera.reboot(sn, ...) is the USB entry point: on this GMSL rig it answered

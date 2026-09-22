@@ -19,9 +19,20 @@
 #                      Number", "camera pipeline operational") and open still failed
 #                      with (Argus) Error Timeout + ZEDX#1#8#FROZEN, because the camera
 #                      MCU stays frozen no matter what the host does to its drivers.
-#   5 reload-drivers   last resort: systemctl restart zed_x_daemon, i.e. the vendor's
-#                      real rmmod+insmod, VERIFY it happened, then repair and reset the
-#                      MCU once more -- that trio is the 2026-09-21 proven sequence
+#   5 reload-drivers   last resort: STOP zed_x_daemon and nvargus-daemon, repair the
+#                      reference in the quiet window, confirm it stays put, then START the
+#                      daemon so its rmmod+insmod actually runs; VERIFY it happened, then
+#                      repair and reset the MCU once more. Never `systemctl restart`: see
+#                      below.
+#
+# WHY STOP+START AND NOT RESTART: systemd stopping zed_x_daemon while it holds a GMSL port
+# open runs the port teardown, which hits the same tegracam double module_put bug and burns
+# the base reference in the same instant the daemon dies. Measured 2026-09-22: kernel logged
+# "Error turning off streaming" x2 at 09:55:38, the exact timestamp of "Stopping ZED-X Daemon
+# service", and the fresh daemon's rmmod was refused with "sl_max9295 is in use by: sl_zedx".
+# A restart hands the new daemon a refcount of -1 every time, so it can never reload the
+# driver. Repairing between stop and start is what made the reload real (REFUSALS=0,
+# 4x "zedx_probe: Serial Number").
 #
 # WHY NO PROBE SITS BETWEEN repair-refcnt AND reload-drivers: opening a wedged camera
 # always fails, and the failing teardown hits the tegracam double module_put bug, which
@@ -327,19 +338,49 @@ if [ "$SAFE" = 1 ]; then
 fi
 
 say "5 reload-drivers"
-# Re-read sysfs instead of trusting anything measured earlier: the probe above may have burned
-# the reference again, and letting the daemon run rmmod at atomic 0 is the BUG_ON that panics
-# this kernel.
+# NOT `systemctl restart`. Stopping zed_x_daemon while it holds a GMSL port open runs the port
+# teardown, and that teardown hits the tegracam double module_put bug, so the reference is
+# burned in the same instant the daemon dies. Measured 2026-09-22: "Error turning off
+# streaming" x2 at 09:55:38, the exact timestamp of "Stopping ZED-X Daemon service", and the
+# fresh daemon's rmmod was then refused. A restart can therefore NEVER reload the driver while
+# a port is open -- the repair has to happen in the quiet window between stop and start.
+$SUDO systemctl stop zed_x_daemon
+$SUDO systemctl stop nvargus-daemon
+for _ in $(seq 1 20); do
+  [ "$($SYSTEMCTL is-active zed_x_daemon)" = active ] || break
+  sleep "$POLL_SLEEP"
+done
+echo "stopped: zed_x_daemon=$($SYSTEMCTL is-active zed_x_daemon) nvargus-daemon=$($SYSTEMCTL is-active nvargus-daemon)"
+
+held="$(ls -l /proc/[0-9]*/fd 2>/dev/null | grep -cE '/dev/video')"
+if [ "$held" -ne 0 ]; then
+  echo "ABORT: something still holds /dev/video* with both daemons stopped:"
+  ls -l /proc/[0-9]*/fd 2>/dev/null | grep -E '/dev/video' | head -5 | sed 's/^/    /'
+  exit 3
+fi
+
 if ! repair_refcnt; then
   echo "ABORT: the refcount is still negative. Refusing to let zed_x_daemon run rmmod:"
   echo "       BUG_ON in try_release_module_ref() would panic this kernel (panic_on_oops=1)."
   exit 5
 fi
+# With every camera user stopped, nothing may move the refcount. If it still slides, some
+# process we did not find is opening the camera, and starting the daemon now would only
+# reproduce the refusal we are here to avoid.
+sleep "$POLL_SLEEP"
+settled="$(cat "$MODULE_DIR/sl_zedx/refcnt" 2>/dev/null || echo unknown)"
+if [ "$settled" = unknown ] || [ "$settled" -lt 0 ] 2>/dev/null; then
+  echo "ABORT: the refcount fell back to $settled with both daemons stopped."
+  echo "       Something outside this ladder is still opening the camera."
+  exit 5
+fi
+echo "refcount is stable at $settled with the stack quiet"
+
 reload_t0="$(date '+%Y-%m-%d %H:%M:%S')"
-$SUDO systemctl restart zed_x_daemon
+$SUDO systemctl start zed_x_daemon
 inv="$(daemon_invocation)"
 if ! wait_for_driver_reload "$inv" 40; then
-  echo "FAILED: zed_x_daemon never finished starting after the restart"
+  echo "FAILED: zed_x_daemon never finished starting"
   echo "        (no 'ZED-X Driver loaded' + 'Created Pub Endpoint' for invocation ${inv:-<unknown>})"
   exit 6
 fi
@@ -347,11 +388,19 @@ fi
 # what produced the false "reboot required" on 2026-09-18.
 wait_for_argus_active 30 || echo "WARNING: nvargus-daemon is not active yet; the probe may fail"
 if reload_refused "$inv"; then
-  echo "reload did NOT happen (rmmod/insmod refused):"
+  now="$(cat "$MODULE_DIR/sl_zedx/refcnt" 2>/dev/null || echo unknown)"
+  echo "reload did NOT happen (rmmod/insmod refused), refcnt is $now:"
   reload_refusal_lines "$inv"
-  echo "       That is a burned reference seen from the daemon's side: sl_zedx never unloaded,"
-  echo "       so the kernel is still running the module that was already wedged."
-  echo "FAILED: reboot required"
+  # Do not guess the cause. refcnt < 0 and refcnt >= 0 are different faults with different
+  # answers, and calling both "a burned reference" is what made the 2026-09-22 report wrong.
+  if [ "$now" != unknown ] && [ "$now" -lt 0 ] 2>/dev/null; then
+    echo "       The reference was burned again between the repair and the daemon's rmmod."
+    echo "       Find what opened the camera in that window; it is not the daemon this time."
+  else
+    echo "       The refcount is fine, so this is NOT a burned reference: sl_zedx refused to"
+    echo "       unload for another reason. Check what still binds it:"
+    echo "         ls /sys/bus/i2c/drivers/zedx/   and   cat /sys/module/sl_zedx/holders/*"
+  fi
   exit 6
 fi
 echo "driver reload verified (no 'is in use' / 'File exists' in the daemon log)"
