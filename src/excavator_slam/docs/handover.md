@@ -282,6 +282,182 @@
 >   절대좌표(UTM/ECEF)는 거부한다 — float32 간격이 크기에 비례해서 500 km easting 은
 >   3 cm 격자에 얹히기 때문이다.
 
+> **2026-09-22 후속 2 — 현장 녹화 경로의 빠진 절반을 채웠다. 그리고 지금 장비에서는 녹화가 불가능하다.**
+>
+> - **`record_field_session.sh` 만으로는 이 장비에서 절대 녹화가 안 됐다.** 그 스크립트는
+>   `/lidar_cabin/points`·`/lidar_cabin/imu` 를 **필수**로 요구하는데, 캐빈 드라이버를
+>   올리는 주체가 아무 데도 없었다. 배포 워크스페이스(`~/robot_ws`, main 빌드)에는
+>   `cabin_only_driver.launch.py` 가 **없다** — 이 브랜치에만 있다. 그래서 그냥 돌리면
+>   매번 프리플라이트에서 거부된다. **`scripts/field_session.sh`** 가 그 빠진 절반이다:
+>   캐빈 드라이버 기동 → 실제 메시지 도착으로 준비 판정 → 녹화 → 종료 시 드라이버 정리 +
+>   센서 STANDBY 복구. 오버레이 순서(`~/robot_ws` 다음에 워크트리)를 스크립트가 강제한다.
+> - **검증 실행이 `record_field_session.sh` 의 실제 버그를 잡았다.** 라이다 토픽이 안 뜨면
+>   `ros2 topic echo` 가 **stdout 으로** `WARNING: topic ... not published yet` 를 뱉고,
+>   그게 `SKEW=$((NOW - STAMP))` 의 산술 문맥에 들어가 `set -u` 아래에서
+>   `WARNING: unbound variable` 로 **프리플라이트가 죽는다**. 죽는 지점이 하필
+>   `PREFLIGHT_FAILED missing:...` 를 찍기 **직전**이라, 운전자는 무엇이 빠졌는지
+>   못 보고 셸 에러만 본다. 파싱을 `grep -m1 -E '^[0-9]+$'` 로 바꿔 고쳤다.
+> - **라이브 실측 (도메인 98 격리, 붐·OT 무손상)**: 캐빈 드라이버 CPU **1.5%**(붐 17.2%),
+>   OT 컨테이너 전후 `global_map 3.45→3.04`, `voxelizer 19.53→21.64`,
+>   `gridmap 30.08→22.75`, `surface 21.59→19.92` (전부 통상 변동 폭), eno1 rx **9.83 MB/s**
+>   (1 GbE 의 8%), `/lidar_cabin/imu` **99.958 Hz**, 종료 시 `CABIN_STANDBY http=204`,
+>   붐 드라이버 PID 불변, 추적 중인 붐 메타데이터 무손상.
+>   (teardown 이 `tf_publisher_cabin` 를 남기는 누수를 그 실행에서 발견해 `setsid` +
+>   프로세스 그룹 시그널로 고쳤다.)
+> - **★지금은 녹화해도 못 쓴다 — 기계 쪽 발행자가 전부 죽어 있다.** 도메인 7 실측:
+>
+>   | 토픽 | 발행자 | 구독자 |
+>   |---|---|---|
+>   | `/lidar_boom/points` | **1** | 2 |
+>   | `/gps_msg`, `/gps_att` | **0** | 1 |
+>   | `/kine_data` | **0** | 3 |
+>   | `/excavator/sensors/swing_encoder_output`, `/joint_boom` | **0** | 1~2 |
+>
+>   토픽 이름이 `ros2 topic list` 에 보이는 것은 **OT 노드가 구독만 하고 있어서**다.
+>   `can0`·`can1` 은 **DOWN** 이고, ARP 상 `192.168.0.x` 에서 응답하는 것은 라우터(.1),
+>   붐 라이다(.5), 캐빈 라이다(.6) **뿐**이다(.2/.4/.100/.200/.225 전부 incomplete).
+>   즉 굴착기 전장/제어 PC 쪽이 꺼져 있다. GNSS 와 관절각 없이 녹화한 bag 은
+>   수평 판정에도 GNSS 팩터에도 쓸 수 없다 — 프리플라이트가 거부하는 것이 맞다.
+> - **반복 재부팅은 소프트웨어가 시킨 게 아니다.** `syslog` 전체에서 `systemd-shutdown`
+>   **0건**, `Powering off` **0건**, `Rebooting` **0건**이고 `last -x` 의 세션은 전부
+>   `crash` 로 끊긴다. 커널 로그에 `Kernel panic`/`Oops`/`BUG:` 도 **0건**이며 온도는
+>   정상(tj 56.6°C), OOM 없음. 남는 해석은 **전원 차단 또는 SoC 레벨 리셋**이다.
+>   `can0/can1` DOWN 과 같은 방향이다 — 기계 전원이 내려가면 Jetson 도 같이 죽는다.
+>   저널은 부팅 간 보존이 안 되므로(`journalctl -b -1` 없음) 다음 증거는 `/var/log/kern.log`
+>   에서 봐야 한다.
+> - **별개 이슈 하나 — ZED X 가 커널 모듈 참조계수를 계속 언더플로우시킨다.**
+>   `WARNING: CPU: n PID: m at kernel/module.c:1095 module_put+0x18c/0x1b0` 이
+>   `tegracam_v4l2subdev_register` → `tegra_channel_set_stream` 경로에서 **하루에 수십 번**
+>   찍힌다(오늘만 10시 748건, 15시 199건). 이미 누군가 `zedx_refcnt` 라는 복구 모듈을
+>   만들어 돌리고 있다(`restored the base reference of sl_zedx: 0 -> 1`). SLAM 과는
+>   무관하지만, 재부팅과 같은 시간대에 몰려 있어 기록해 둔다.
+> - **OT 스택 자동복구는 아직 없다**: 네 컨테이너 모두 `policy=no`, `RestartCount=0`,
+>   systemd 유닛 없음. compose 파일은 `~/repos/ontariotech_koceti_jetson_docker/docker-compose.yml`.
+>   컨테이너를 재생성하지 않고 즉시 거는 방법은
+>   `docker update --restart=unless-stopped OT_voxelizer OT_global_map OT_gridmap OT_surface_reconstruction`
+>   이다(실행 중 컨테이너를 건드리지 않는다). 다른 리포라서 손대지 않았다.
+
+> **2026-09-22 후속 3 — RTK GNSS 를 라이브 도메인에 올렸다. 현장 녹화가 실행 가능해졌다.**
+>
+> - **★앞 블록의 "기계 쪽이 꺼져 있다"는 진단은 틀렸다.** GNSS 수신기는 살아 있었다.
+>   `192.168.0.7` 이 NMEA 를 **UDP 5017 로 브로드캐스트**한다(8초에 81패킷, ~10 Hz):
+>
+>   ~~~
+>   $INGGA,070958.80,3624.00667690,N,12721.68108218,E,4,15,0.8,59.574,M,...
+>                                                    ↑ quality 4 = RTK Fix, 위성 15, HDOP 0.8
+>   $INHDT,138.848,T          헤딩
+>   $PASHR,...,0.888,2.857    roll/pitch
+>   ~~~
+>
+>   `192.168.0.10`(이 Jetson) 으로 유니캐스트가 아니라 **브로드캐스트**다 — 바인드 주소를
+>   `192.168.0.10:5017` 로 주면 **0패킷**, `0.0.0.0:5017` 로 주면 다 들어온다. 즉 여러
+>   소비자가 동시에 받을 수 있고, 여기서 노드를 띄워도 다른 소비자와 경합하지 않는다.
+> - **빠진 것은 하드웨어가 아니라 ROS 브링업이었다.** `/gps_msg`·`/gps_att` 를 만드는 것은
+>   **`~/hr35` 의 `excavator_signal_manager`** 이고(`gnss_gps_node` 가 UDP 5017 을 파싱),
+>   이 호스트에서는 **어느 도메인에서도 돌고 있지 않았다**(0~99 중 노드가 보인 것은 도메인 7
+>   하나뿐이고 13개 전부 이 Jetson 것). `gnss_config.yaml` 머리의 `serial_config`
+>   (`/dev/ttyUSB0`) 는 **사문화된 잔재**다 — 설정에 UDP 블록이 없어 노드 기본값
+>   `0.0.0.0:5017` 이 그대로 쓰인다.
+> - **GNSS 노드 하나만 도메인 7 에 올렸다**(CAN·제어 노드 무접촉). 실측:
+>   `/gps_msg` **10.003 Hz**, `quality 4`, `sat 16`, `HDOP 0.7`, `/gps_att` 10.002 Hz,
+>   `/excavator/sensors/gnss_position`·`gps_attitude` 도 함께 발행. 붐 드라이버 PID 불변,
+>   OT 컨테이너 4개 그대로.
+>   **이것이 이 프로젝트가 기다리던 데이터다** — 보유 bag 은 전부 quality 1 이라 배포 노드
+>   (`min_quality_=4`)가 전량 거부했을 데이터였다. 이제 처음으로 공정한 baseline 비교가 된다.
+>   실행: `bash src/excavator_slam/scripts/gnss_node_detached.sh`
+>   (`setsid` 로 분리한다 — 에이전트/SSH 세션의 자식으로 두면 세션이 끊길 때 같이 죽고,
+>   현장 녹화 중 GNSS 를 잃으면 복구가 안 된다. 그리고 `ros2 run` 래퍼가 아니라 설치된
+>   바이너리를 직접 exec 한다 — 이 리포가 이미 기록한 SIGINT 미전달 함정.)
+> - **CAN 은 내가 못 올린다. 이유가 두 개다.**
+>   `can_config.yaml` 의 채널이 **`can2`** 인데 그 장치는 **존재하지 않는다**
+>   (`Device "can2" does not exist`). 이 호스트에 있는 것은 `can0`·`can1` 이고 둘 다
+>   `state STOPPED` / `DOWN` (드라이버는 `mttcan` 으로 적재돼 있다). 게다가
+>   **passwordless sudo 가 없다**. 따라서 `/kine_data` 와
+>   `/excavator/sensors/swing_encoder_output` 은 현재 만들 수 없다.
+> - **그래서 프리플라이트에 지명 면제를 넣었다** (`SKIP_REQUIRED`). 일괄 "그냥 녹화" 플래그가
+>   아니다 — 그건 GNSS 누락까지 삼켜버리고, 그게 이 스크립트가 존재하는 이유다. 지명된
+>   토픽만 필수에서 빠져 OPTIONAL 로 옮겨가므로, **세션 중간에 CAN 이 살아나면 그때부터
+>   그대로 녹화된다**. 면제 사실은 `PREFLIGHT_WAIVED` 로 세션 로그에 남는다.
+> - **CAN 없이도 이번 녹화의 핵심 목표는 살아 있다.** 3-6 절의 실측 결론이 바로 그것이다 —
+>   **캐빈 라이다는 GNSS 안테나와 강체**라 운동학 체인이 필요 없다. 수평 정합 판정과
+>   `glim_ext` GNSS 팩터는 둘 다 캐빈+RTK 만으로 성립한다. 잃는 것은 **붐 반사 배치**
+>   (`dual_lidar.py` 가 붐 관절각으로 하는 일) 하나다.
+> - **★장비가 오늘만 다섯 번째 재부팅했다 (15:47).** 이번에도 비정상이다:
+>   `systemd-shutdown`·`Powering off`·`System is rebooting` **전부 0건**이고, 커널 로그는
+>   **15:38:53 에서 그냥 끊긴 뒤 15:47:57 부팅 배너로 점프**한다. 패닉도 Oops 도 없다 —
+>   플러시할 시간조차 없이 전원이 끊긴 서명이다. 재부팅마다 붐 드라이버 PID 가 바뀌고
+>   (241833 → 9960) OT 스택은 스스로 안 올라온다. **5~10분짜리 현장 녹화가 이것 하나로
+>   날아갈 수 있다.** 재부팅으로 끊긴 bag 은 `metadata.yaml` 이 없어 `ros2 bag reindex`
+>   로 살려야 한다. 길게 한 번보다 **짧게 여러 번**이 안전하다.
+> - **현장 녹화 전 경로를 라이브에서 리허설했다 (15초, 두 번, 붐·OT 무손상).**
+>   `PREFLIGHT_OK` → 녹화 → `FIELD_SESSION_STATUS 0` → 캐빈 `STANDBY http=204` 까지 완주.
+>   프리플라이트가 `quality=4 sat=16` 을 읽고 라이다 헤더가 벽시계 0~1초 안임을 확인한다.
+>   **bag 은 `ros2 topic hz` 가 못 따라가는 스트림도 온전히 담는다** — `/lidar_boom/imu` 가
+>   bag 안에서 **638 Hz**(9288건/14.5초)다. `hz` 는 같은 순간 432 Hz 로 보고했다.
+>   **판정은 bag 타임스탬프로 하라**(`scripts/`가 아니라 sqlite 직접 조회로 쟀다).
+> - **★스캔 유실이 실재한다. 그리고 ZED 가 그 일부다.** 같은 장비·같은 15초·같은 설정,
+>   ZED 유무만 바꿔서 bag 타임스탬프로 잰 값:
+>
+>   | | 캐빈 points | 붐 points | 기록량 |
+>   |---|---|---|---|
+>   | ZED 포함 | **8.624 Hz** (gap_med 0.100, **max 0.311**) | **9.306 Hz** (max 0.305) | 51.2 MB/s |
+>   | ZED 제외 | **9.305 Hz** (gap_med 0.100, **max 0.300**) | **9.728 Hz** (max 0.204) | 38.2 MB/s |
+>
+>   ZED 를 빼면 캐빈이 **+0.68 Hz**(7.9%), 붐이 **+0.42 Hz**(4.5%) 회복되고 기록량이 25%
+>   준다. **그러나 그게 전부가 아니다** — ZED 없이도 캐빈은 9.305 Hz 로 공칭 10 Hz 에
+>   못 미치고 최대 갭 0.300 s 가 남는다(한 번에 2~3프레임). 작은 메시지는 완벽하다:
+>   `/lidar_cabin/imu` 99.988 Hz(max 0.021), `/gps_msg` 9.997 Hz(max 0.104). **큰 포인트
+>   클라우드만 빠진다.** 참고로 세션 초반, **녹화를 전혀 안 하던 시점**의
+>   `ros2 topic hz /lidar_boom/points` 도 `max: 0.303s` 였다 — recorder 단독 원인이 아니다.
+>   남은 용의자는 라이브 부하(ZED 노드 77% CPU + OT 4컨테이너 + 붐 드라이버)와
+>   BEST_EFFORT QoS 다. **다음에 팔 곳은 여기다.**
+> - **그래서 `RECORD_ZED` 기본값을 0(끄기)으로 뒤집었다.** 이 스크립트가 원래부터 주석에
+>   적어 둔 불변식이 "카메라는 **절대 LiDAR 패킷을 대가로 치르면 안 된다**" 인데, 실측이
+>   그 불변식 위반을 보여줬다. 카메라는 SLAM 입력이 아니라 사후 판독용 2차 의견이므로
+>   스캔과 바꿀 가치가 없다. 굳이 넣으려면 `RECORD_ZED=1`.
+> - **기록량과 디스크**: ZED 제외 **38.2 MB/s → 10분에 22.9 GB**. 여유 **547 GB** 라
+>   10분 세션 20회 이상 들어간다. 디스크는 제약이 아니다.
+> - **GNSS 노드를 분리 기동으로 되살렸다** (`scripts/gnss_node_detached.sh`).
+>   첫 기동은 에이전트 세션의 자식이라 **세션 재시작과 함께 죽었다**(실제로 죽었다).
+>   재기동 후 `ppid=1`, 자기 세션 리더, `/gps_msg` 9.988 Hz · quality 4 · sat 16 유지.
+> - **★재부팅이 여섯 번째다 (16:41). 간격이 짧아지고 있다.**
+>   `11:59 → 13:26`(87분) → `15:47`(141분) → `16:41`(**54분**). 전부 비정상이고
+>   (`systemd-shutdown`·`Powering off`·`System is rebooting` 누적 0건) 매번 붐 드라이버
+>   PID 가 바뀐다(241833 → 9960 → 7134). **10분 녹화가 이 확률과 경쟁한다** —
+>   5분 단위로 끊어 여러 번 받는 편이 기대값이 높다.
+> - **현장 녹화는 이제 명령 한 줄이다.** `field_session.sh` 가 GNSS 노드와 캐빈 드라이버를
+>   **둘 다** 올리고, 프리플라이트를 통과시키고, 녹화하고, 캐빈을 STANDBY 로 되돌린다.
+>
+>   ~~~bash
+>   cd ~/robot_ws-lidar-slam
+>   SKIP_REQUIRED='/kine_data /excavator/sensors/swing_encoder_output' \
+>   ROS_DOMAIN_ID=7 bash src/excavator_slam/scripts/field_session.sh ~/data/field_$(date +%m%d_%H%M) 300
+>   ~~~
+>
+>   마지막 인자가 초다. **명령부터 실제 녹화 시작까지 약 3~4분** 걸린다(캐빈 기동 +
+>   토픽별 레이트 실측). `RECORDING_TO` 가 찍히는 순간이 진짜 시작이고, 그 전에 움직여도
+>   기록되지 않는다. CAN 이 살아 있으면 `SKIP_REQUIRED` 를 빼라.
+> - **GNSS 중복 발행 가드는 프로세스가 아니라 그래프로 판정한다.** `pgrep` 은 이 호스트만
+>   본다 — 배포 `signal_manager` 가 다른 PC 에서 돌고 있으면 같은 UDP 브로드캐스트를 두 번
+>   파싱해 `/gps_msg` 에 모든 fix 가 두 벌 실린다. 그래서 `ros2 topic info /gps_msg` 의
+>   **발행자 수**로 막는다. 세 경로 모두 실측 확인: 이미 실행 중 → 거부,
+>   아무도 발행 안 함 → 기동, 직후 재실행 → 거부.
+> - **`scripts/bag_timing.py` 를 넣었다 — 녹화 직후 첫 번째로 돌릴 것.**
+>   `ros2 topic hz` 로는 판정이 안 된다(이 장비에서 640 Hz 를 432 로 낮게 보고하고, 애초에
+>   recorder 가 아니라 자기 구독자를 잰다). 이 도구는 bag 타임스탬프를 직접 읽어
+>   토픽별 **개수·구간·레이트·갭 중앙값·갭 최대값**과 MB/s 를 낸다. **중앙값은 공칭인데
+>   최대값만 크면 프레임이 통째로 빠진 것이다.** rosbag2 파이썬 API 가 아니라 sqlite 를
+>   직접 읽는데, 현장 bag 의 커스텀 타입(`msg_gps_interface` 등) 해석을 API 가 요구하기
+>   때문이다 — 타임스탬프에는 타입이 필요 없다.
+>
+>   ~~~bash
+>   python3 src/excavator_slam/scripts/bag_timing.py <bag> points imu gps_msg
+>   ~~~
+> - **기계는 이 세션을 시작했을 때 상태로 되돌려 뒀다**: 내가 띄웠던 GNSS 노드는 내렸고
+>   (나중에 배포 `signal_manager` 를 올릴 때 중복 발행자가 되지 않도록), 캐빈 라이다는
+>   `STANDBY`, 붐 드라이버와 OT 컨테이너 4개는 한 번도 건드리지 않았다. 녹화할 때
+>   `field_session.sh` 가 필요한 것을 알아서 올린다.
+
 ---
 
 ## 0. 한 줄 요약
