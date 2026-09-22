@@ -56,6 +56,44 @@
 > - 측정 레시피는 이제 `scripts/score_revisit.py` 에 상수로 박혀 있다(/tmp 와 함께 증발하지
 >   않도록). 두 창 캐시는 `~/data/ulw_slam_artifacts/submaps_1104_sta_raw.npz`(창 쌍 1),
 >   `submaps_1104_sta2_raw.npz`(창 쌍 2).
+>
+> **2026-09-22 — 캐빈 라이다 블로커 해소. 아래 1-(2) 는 이 블록으로 대체된다.**
+>
+> - **캐빈 센서를 처음으로 읽었다.** `OS-0-32-U1`, SN `122228000973`, PN `840-103574-06`,
+>   펌웨어 `ousteros-image-prod-aries-v2.5.3`. **붐과 하드웨어 세대가 다르다**
+>   (붐: PN `860-105000-07`, `bootes` v3.2.0).
+> - **원인은 전원 순서가 아니라 고정 IP 부재였다.** `/api/v1/system/network/ipv4` 가
+>   붐은 `override "192.168.0.5/24"`, 캐빈은 `override null` 이라 링크로컬
+>   (169.254.157.137)로 떨어져 있었다. 이 서브넷에는 캐빈용 DHCP 예약도 없으므로 매 부팅
+>   재발했을 상태다. `PUT .../ipv4/override "192.168.0.6/24"` (HTTP 200) 로 박았고 즉시 응답.
+>   **센서가 안 보이면 먼저 mDNS 로 찾아라**: `avahi-browse -rt _roger._tcp`. IPv6 링크로컬
+>   (`http://[fe80::be0f:a7ff:fe00:7325%eno1]/...`)은 호스트 설정 없이 항상 붙는다.
+> - **펌웨어는 이미 최신이다.** Ouster changelog: v2.5.3 은 Rev06/Rev05/RevC/RevD 용이고
+>   Rev7 OS0/OS1/OSDome 만 v3.x 를 쓴다 → **2.5.x 로 도는 OS-0 은 정의상 Rev7 이 아니다.**
+>   올릴 상위 버전이 없다. 붐의 `bootes` 이미지를 이 센서에 올리면 안 된다.
+> - **설정 두 개를 실측으로 고쳤다**(커밋 `806c50c`, `58b476c`):
+>   `udp_profile_imu` 는 `ACCEL32_GYRO32_NMEA`(3.2 전용, 이 센서엔 없음) → **`LEGACY`**,
+>   `udp_profile_lidar` 는 `RNG19_RFL8_SIG16_NIR16` → **`LEGACY`**. 후자가 없으면
+>   드라이버가 활성화 직후 `std::out_of_range: Field 'WINDOW' not found in LidarScan`
+>   으로 죽는다(아래 함정 표).
+> - **캐빈 전용 런치를 만들었다**: `hr35_bringup/launch/cabin_only_driver.launch.py`.
+>   `dual_lidar.launch.py` 는 붐 드라이버까지 재시작시켜 라이브 OT 스택을 끊으므로,
+>   캐빈만 올릴 안전한 경로가 없었다. 이 파일은 실행 경로 어디에서도 붐을 언급하지 않고,
+>   TF 퍼블리셔 노드 이름도 `tf_publisher_cabin` 으로 분리해 이름 충돌을 피한다.
+> - **라이브 실측 (ROS_DOMAIN_ID=98 격리, 붐·OT 무손상)**:
+>   `/lidar_cabin/points` **10.000 Hz**, `/lidar_cabin/imu` **100.003 Hz**,
+>   라이프사이클 `active`, 프레임 `lidar_cabin/os_lidar` · `os_imu`,
+>   포인트 필드에 `t`·`ring`·`range`·`intensity`·`reflectivity`·`ambient` 전부 존재.
+> - **부하는 문제가 아니다**: 캐빈 드라이버 CPU **2.3%** (붐 16.5%), OT 컨테이너 점유
+>   변동 없음, eno1 약 **8.6 → 10.1 MB/s** (1 GbE 의 약 8%).
+> - **캐빈 `T_lidar_imu`**(센서 자체 메타데이터에서 계산, 합성 잔차 0):
+>   `[-0.006253, 0.011775, -0.028535, 0.0, 0.0, 1.0, 0.0]`. **붐 값을 재사용하지 말 것**
+>   (붐은 `[0.002441, 0.009725, -0.030662, ...]`). 회전은 붐과 같은 Z축 180도.
+> - **캐빈용 GLIM 설정을 분리했다**: `src/excavator_slam/config/glim_cabin/`.
+>   토픽이 `/lidar_cabin/*`, `T_lidar_imu` 가 캐빈 값, 그리고 09-15 에 검증된
+>   `enable_optimization` + `create_between_factors` 를 그대로 승계한다.
+>   실행: `ros2 launch excavator_slam slam_offline.launch.py bag:=<bag> \`
+>   `config_dir:=$PWD/src/excavator_slam/config/glim_cabin cpus:=4`
 
 ---
 
@@ -127,7 +165,14 @@ curl -s http://192.168.0.5/api/v1/sensor/config | python3 -m json.tool
 # 3) 드라이버 로그에 IMU 관련 경고가 있는지 (드라이버는 PID 11973으로 떠 있었음)
 ~~~
 
-### (2) 캐빈 라이다가 안 켜져 있습니다
+### (2) ~~캐빈 라이다가 안 켜져 있습니다~~ → **해결됨 (2026-09-22)**
+
+> 센서 정체·고정 IP·프로파일·실측 레이트는 **위 2026-09-22 블록**에 있습니다. 요약하면
+> `192.168.0.6` 고정, `/lidar_cabin/points` 10.000 Hz, `/lidar_cabin/imu` 100.003 Hz 로
+> 캐빈 전용 런치에서 확인됐고, 붐 드라이버와 OT 스택은 건드리지 않았습니다.
+> 남은 것은 **현장 녹화**(아래 2절 3번)입니다.
+
+아래는 당시 기록입니다(센서가 왜 안 보였는지의 맥락으로 보존합니다).
 
 현재 붐 드라이버 하나만 떠 있습니다 (`os_driver ... __ns:=/lidar_boom`).
 `/lidar_cabin/*` 토픽 0개.
@@ -353,6 +398,9 @@ GLIM의 높이를 GNSS로 잡아주는 보정을 만들어 붙였더니 **모든
 | **GLIM 이 런간 재현되지 않음** | 같은 설정을 두 번 돌렸는데 점수가 다름 | 전처리가 매 프레임 **무작위 10000점**을 뽑고 시드가 없다. 궤적이 평균 1.42 m, 서브맵 개수가 21 vs 28 로 달라진다. **컨트롤 3회로 분산을 먼저 재고** 그 폭을 넘는 효과만 인정할 것 |
 | **서브맵 최적화만 켜기** | dz_bias 가 좋아져서 성공처럼 보임 | `create_between_factors` 없이는 서브맵이 변형된다 — `rms0 0.278/0.391`, `dz_p90 0.63/0.72` 로 **배포 설정보다 나쁨**. 두 플래그는 한 쌍 |
 | **오프라인 런의 종료코드 139/134** | 실패한 런으로 오판 | 덤프(`[global] saved`)가 끝난 **뒤의 teardown 크래시**다. 컨트롤 포함 모든 설정에서 난다. 판정은 `TRAJECTORY` 포즈 수로 |
+| **캐빈 라이다에 3.2 전용 라이다 프로파일** | 드라이버가 센서 설정·메타데이터까지 정상 통과한 뒤 **활성화 순간** `terminate called ... std::out_of_range: Field 'WINDOW' not found in LidarScan` 로 abort (exit -6) | ouster-ros 0.16.2 는 FW < 3.2 에서 LidarScan 의 WINDOW 채널을 **제거**하는데(`lidar_scan.cpp`), 네이티브 포인트 변환기의 `Profile_RNG19_RFL8_SIG16_NIR16` 은 여전히 WINDOW 를 **무조건 요구**한다. 설정 오류처럼 보이지만 드라이버 내부 불일치다. Rev06 에서는 `udp_profile_lidar: 'LEGACY'` 로 간다 — t·ring·range·signal·reflectivity·near-IR 이 전부 남아 SLAM 에 필요한 건 하나도 안 잃는다 |
+| **ouster 드라이버 `metadata: ''`** | 워크트리 루트의 **추적 중인 붐 메타데이터가 덮어써진다**(`git status` 에 `M 192.168.0-metadata.json`) | 빈 값은 "프로세스 CWD 에 `<udp_dest>-metadata.json`" 이라, 캐빈 드라이버가 붐 파일명과 충돌한다. 센서별로 경로를 명시할 것(`/tmp/lidar_cabin-metadata.json`) |
+| **캐빈 센서가 ping·HTTP 무응답** | "전원이 안 들어왔나" 로 오판 | 고정 IP override 가 **설정된 적이 없으면** 링크로컬(169.254/16)로 떨어지고, 그 주소는 docker0 라우트에 먹혀 호스트에서 못 간다. `avahi-browse -rt _roger._tcp` 로 찾고 **IPv6 링크로컬 HTTP** 로 붙어서 `PUT /api/v1/system/network/ipv4/override` 로 박아라 |
 | **실행 중인 컨테이너에 마운트된 스크립트 편집** | `/entry.sh: line 90: unexpected EOF`, 런이 요약 출력 없이 exit 2 | bash 는 스크립트를 **바이트 오프셋으로 증분 읽기** 한다. 앞부분에 한 줄만 길어져도 남은 실행이 줄 중간부터 재개된다. 실측: 덤프(2637포즈, 서브맵 29)는 멀쩡히 끝났고 **요약 줄만 날아갔다**. 런이 도는 동안에는 `entry.sh` 를 건드리지 말 것 |
 
 ---
