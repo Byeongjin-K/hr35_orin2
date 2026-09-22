@@ -25,9 +25,15 @@ lidar_cabin:
       # ptp_utc_tai_offset[optional]: UTC/TAI offset in seconds
       ptp_utc_tai_offset: -37.0
       # udp_profile_lidar[optional]: lidar packet profile
-      # Same reason as lidar_mode: this is the profile the boom sensor already uses,
-      # made explicit. It carries range, reflectivity, signal and near-IR.
-      udp_profile_lidar: 'RNG19_RFL8_SIG16_NIR16'
+      # LEGACY is deliberate on this Rev06/v2.5.3 sensor. ouster-ros 0.16.2 removes
+      # the WINDOW channel from LidarScan for firmware < 3.2, but its native point
+      # converter still unconditionally asks for WINDOW when this sensor uses
+      # RNG19_RFL8_SIG16_NIR16. Measured result: activation aborts with
+      #   std::out_of_range: Field 'WINDOW' not found in LidarScan.
+      # The LEGACY lidar profile keeps every field SLAM needs - per-point t, ring,
+      # range, signal, reflectivity and near-IR - without WINDOW, so it is the native
+      # compatibility path rather than a reduced point type or a driver fork.
+      udp_profile_lidar: 'LEGACY'
       # udp_profile_imu: LEGACY, and deliberately NOT the boom's value.
       #
       # This pin used to read ACCEL32_GYRO32_NMEA on the assumption that the cabin ran
@@ -52,7 +58,10 @@ lidar_cabin:
       # 36-118 day continuous-running restart that earlier firmware suffers from.
       udp_profile_imu: 'LEGACY'
       # metadata[optional]: path to save metadata file to
-      metadata: ''
+      # Empty means "192.168.0-metadata.json in the process CWD". The first cabin-only
+      # test therefore overwrote the tracked BOOM metadata at the workspace root before
+      # the driver aborted. Keep the two sensors physically separate here too.
+      metadata: '/tmp/lidar_cabin-metadata.json'
       # lidar_port[optional]: port value should be in the range [0, 65535]
       lidar_port: 7502
       # imu_port[optional]: port value should be in the range [0, 65535]
