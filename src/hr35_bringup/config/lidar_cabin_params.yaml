@@ -28,21 +28,29 @@ lidar_cabin:
       # Same reason as lidar_mode: this is the profile the boom sensor already uses,
       # made explicit. It carries range, reflectivity, signal and near-IR.
       udp_profile_lidar: 'RNG19_RFL8_SIG16_NIR16'
-      # udp_profile_imu: match the boom sensor. Firmware 3.2 deprecated the LEGACY
-      # IMU profile, and on the boom sensor LEGACY stops transmitting a few minutes
-      # after it starts without failing: the lidar stream holds 10 Hz, the HTTP API
-      # keeps answering, and the only symptom is the IMU topic going to zero. That
-      # cost the SLAM work a session, and a LiDAR-inertial pipeline has nothing to
-      # fall back on when its IMU goes quiet.
+      # udp_profile_imu: LEGACY, and deliberately NOT the boom's value.
       #
-      # This sensor could not be checked. On 2026-09-15 192.168.0.6 answered neither
-      # ping nor the HTTP API, so its firmware is unconfirmed and this pin assumes it
-      # matches the boom (ousteros 3.2.0). If it turns out to be older, the pin comes
-      # off -- but a sensor that refuses a profile at startup is recoverable and one
-      # that goes quiet an hour into a field session is not. Check it the first time
-      # the sensor is powered:
-      #   curl -s http://192.168.0.6/api/v1/sensor/metadata/sensor_info
-      udp_profile_imu: 'ACCEL32_GYRO32_NMEA'
+      # This pin used to read ACCEL32_GYRO32_NMEA on the assumption that the cabin ran
+      # the same firmware as the boom. It does not. Read from the sensor itself on
+      # 2026-09-22, the first time it was ever reachable:
+      #   prod_line OS-0-32-U1   prod_pn 840-103574-06
+      #   image_rev ousteros-image-prod-aries-v2.5.3+20240111055903
+      #   config    udp_profile_imu LEGACY
+      # The boom is a different hardware generation - prod_pn 860-105000-07, image
+      # bootes v3.2.0 - and ACCEL32_GYRO32_NMEA only exists on that later line, so
+      # pinning it here would have the sensor refuse the profile at startup.
+      #
+      # The boom's LEGACY failure does NOT apply to this sensor. That failure is
+      # firmware 3.2 deprecating LEGACY, after which the boom's IMU stream stopped a
+      # few minutes in while the lidar held 10 Hz and HTTP kept answering. On the
+      # 2.5.x line LEGACY is the native, supported profile.
+      #
+      # Nothing to update: Ouster's changelog lists v2.5.3 as the newest firmware for
+      # Rev06/Rev05/RevC/RevD, and states that Rev7 OS0/OS1/OSDome sensors use the v3.x
+      # line instead - so an OS-0 running 2.5.x is by definition not a Rev7, and there
+      # is no higher version to move to. v2.5.3 also already carries the fix for the
+      # 36-118 day continuous-running restart that earlier firmware suffers from.
+      udp_profile_imu: 'LEGACY'
       # metadata[optional]: path to save metadata file to
       metadata: ''
       # lidar_port[optional]: port value should be in the range [0, 65535]
