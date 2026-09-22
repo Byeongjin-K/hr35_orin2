@@ -81,10 +81,19 @@ def make_info() -> CameraInfo:
     return msg
 
 
-def feed(node) -> None:
+def kinematic_frames() -> dict:
+    """What TF looks like once the stack publishing the gm_ frames is up."""
+    identity = {"translation": [0.0, 0.0, 0.0], "rotation_xyzw": [0.0, 0.0, 0.0, 1.0]}
+    return {frame: dict(identity) for frame in ("gm_os_lidar", "gm_swing_axis")}
+
+
+def feed(node, transforms=None) -> None:
     node._on_cloud(make_cloud(POINTS))
     node._on_image(make_image())
     node._on_info(make_info())
+    node._freeze_transforms = lambda: (
+        kinematic_frames() if transforms is None else transforms
+    )
 
 
 def saved(node, tmp_path):
@@ -140,5 +149,12 @@ def test_a_stalled_camera_stops_the_second_capture(node, tmp_path):
 
 def test_incomplete_inputs_do_not_write_a_bundle(node, tmp_path):
     node._on_cloud(make_cloud(POINTS))
+    assert node._save(np.array([0.0]), "interval") is False
+    assert list(tmp_path.glob("*")) == []
+
+
+def test_a_bundle_the_solve_could_not_use_is_refused(node, tmp_path):
+    """Measured on 2026-09-22: sensors alone let three unusable shots through."""
+    feed(node, transforms={"gm_os_lidar": {"error": "frame does not exist"}})
     assert node._save(np.array([0.0]), "interval") is False
     assert list(tmp_path.glob("*")) == []

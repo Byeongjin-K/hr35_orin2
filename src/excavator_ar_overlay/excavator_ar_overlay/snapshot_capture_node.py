@@ -61,6 +61,10 @@ _TRACKED_FRAMES = (
     "lidar_boom/os_lidar",
 )
 
+# The offline solve moves the cloud gm_os_lidar -> gm_swing_axis. A bundle
+# without both is unsolvable, however good the cloud and the image are.
+_SOLVE_FRAMES = ("gm_os_lidar", "gm_swing_axis")
+
 
 class SnapshotCaptureNode(Node):
     def __init__(self) -> None:
@@ -307,6 +311,24 @@ class SnapshotCaptureNode(Node):
             self.get_logger().warn(reason, throttle_duration_sec=5.0)
             return False
 
+        # Without these two the bundle cannot be solved offline at all: the
+        # cloud never reaches the frame the extrinsic lives in. Refusing here
+        # costs a warning; finding out after the session costs another visit.
+        transforms = self._freeze_transforms()
+        missing = [
+            frame
+            for frame in _SOLVE_FRAMES
+            if "error" in transforms.get(frame, {"error": "missing"})
+        ]
+        if missing:
+            self.get_logger().warn(
+                f"still, but {' and '.join(missing)} are missing from TF, so this "
+                f"capture could not be solved offline. Nothing was written. Start "
+                f"the kinematic stack that publishes the gm_ frames first.",
+                throttle_duration_sec=5.0,
+            )
+            return False
+
         index = len(self._captured_keys)
         if mode == "bucket":
             stem = self._out / f"pose{index:02d}_bucket{key[0]:+05.2f}_{key[1]:+05.2f}"
@@ -365,7 +387,7 @@ class SnapshotCaptureNode(Node):
                 "k": [float(v) for v in self._info.k],
                 "d": [float(v) for v in self._info.d],
             },
-            "transforms": self._freeze_transforms(),
+            "transforms": transforms,
         }
         Path(f"{stem}_meta.json").write_text(json.dumps(meta, indent=2))
         self._gate.mark_saved(self._cloud_seq, self._image_seq)
