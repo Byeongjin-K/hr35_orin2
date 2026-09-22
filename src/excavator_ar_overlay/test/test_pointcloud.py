@@ -12,10 +12,13 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from excavator_ar_overlay.pointcloud import extract_xyz
+from excavator_ar_overlay.pointcloud import extract_organized, extract_xyz
 
 # Matches the live Ouster layout: x,y,z at 0/4/8, intensity at 16, step 48.
 POINT_STEP = 48
+# sensor_msgs/PointField datatype constants.
+FLOAT32 = 7
+UINT16 = 4
 
 
 def make_cloud(points, extra_fields=True, point_step=POINT_STEP):
@@ -29,14 +32,14 @@ def make_cloud(points, extra_fields=True, point_step=POINT_STEP):
             buf[base + 16 : base + 20] = np.array([i], dtype="<f4").tobytes()
 
     fields = [
-        SimpleNamespace(name="x", offset=0),
-        SimpleNamespace(name="y", offset=4),
-        SimpleNamespace(name="z", offset=8),
+        SimpleNamespace(name="x", offset=0, datatype=FLOAT32),
+        SimpleNamespace(name="y", offset=4, datatype=FLOAT32),
+        SimpleNamespace(name="z", offset=8, datatype=FLOAT32),
     ]
     if extra_fields:
         fields += [
-            SimpleNamespace(name="intensity", offset=16),
-            SimpleNamespace(name="range", offset=32),
+            SimpleNamespace(name="intensity", offset=16, datatype=FLOAT32),
+            SimpleNamespace(name="range", offset=32, datatype=FLOAT32),
         ]
     return SimpleNamespace(
         fields=fields, point_step=point_step, width=n, height=1, data=bytes(buf)
@@ -110,3 +113,51 @@ def test_organized_cloud_uses_width_times_height():
     cloud = make_cloud(pts)
     cloud.width, cloud.height = 4, 3
     assert extract_xyz(cloud, 0).shape[0] == 12
+
+
+def test_organized_keeps_the_row_and_column_grid():
+    """What a capture is for: the beam a point came from stays addressable."""
+    pts = [(float(i + 1), float(i + 1), 1.0) for i in range(12)]
+    cloud = make_cloud(pts)
+    cloud.width, cloud.height = 4, 3
+    out = extract_organized(cloud)
+    assert out.shape == (3, 4, 4)
+    assert out[2, 3, 0] == pytest.approx(12.0)
+
+
+def test_organized_carries_the_intensity_channel():
+    pts = [(1.0, 2.0, 3.0), (4.0, 5.0, 6.0)]
+    out = extract_organized(make_cloud(pts))
+    # make_cloud writes the point index as intensity.
+    assert out[0, :, 3] == pytest.approx([0.0, 1.0])
+
+
+def test_organized_reads_an_integer_intensity_field():
+    """Reflectivity is uint16 on the wire; reading it as float32 is garbage."""
+    cloud = make_cloud([(1.0, 2.0, 3.0)], extra_fields=False)
+    buf = bytearray(cloud.data)
+    buf[16:18] = np.array([4321], dtype="<u2").tobytes()
+    cloud.data = bytes(buf)
+    cloud.fields = list(cloud.fields) + [
+        SimpleNamespace(name="reflectivity", offset=16, datatype=UINT16)
+    ]
+    assert extract_organized(cloud)[0, 0, 3] == pytest.approx(4321.0)
+
+
+def test_organized_marks_invalid_returns_instead_of_dropping_them():
+    pts = [(1.0, 1.0, 1.0), (0.0, 0.0, 0.0), (np.nan, 0.0, 0.0), (2.0, 2.0, 2.0)]
+    out = extract_organized(make_cloud(pts))
+    assert out.shape == (1, 4, 4)
+    assert np.isfinite(out[0, :, 0]).tolist() == [True, False, False, True]
+
+
+def test_organized_without_an_intensity_field_leaves_it_nan():
+    out = extract_organized(make_cloud([(1.0, 2.0, 3.0)], extra_fields=False))
+    assert np.allclose(out[0, 0, :3], [1.0, 2.0, 3.0])
+    assert np.isnan(out[0, 0, 3])
+
+
+def test_organized_missing_xyz_fields_yield_empty_rather_than_raising():
+    cloud = make_cloud([(1.0, 2.0, 3.0)])
+    cloud.fields = [SimpleNamespace(name="intensity", offset=0, datatype=FLOAT32)]
+    assert extract_organized(cloud).shape == (0, 0, 4)

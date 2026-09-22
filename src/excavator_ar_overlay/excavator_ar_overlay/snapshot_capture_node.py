@@ -3,7 +3,7 @@
 Why this instead of a rosbag: a bag of the LiDAR runs about 35 MB/s, so a
 useful session is several GB and takes half an hour of moving a target around.
 None of that volume is needed. One cloud and one image per pose is enough, which
-is roughly 1.2 MB, so a whole session fits in ~10 MB and a couple of minutes.
+is roughly 1.5 MB, so a whole session fits in ~15 MB and a couple of minutes.
 
 Why boom motion alone is enough now: the camera sits on the cabin and the LiDAR
 rides the boom. Sweeping the boom therefore moves the LiDAR through a range of
@@ -41,7 +41,7 @@ from excavator_ar_overlay.capture_trigger import (
     IntervalTrigger,
     exposure_warning,
 )
-from excavator_ar_overlay.pointcloud import extract_xyz
+from excavator_ar_overlay.pointcloud import extract_organized
 
 _SENSOR_QOS = QoSProfile(
     depth=1,
@@ -324,8 +324,12 @@ class SnapshotCaptureNode(Node):
             if warning is not None:
                 self.get_logger().warn(warning)
 
-        points = extract_xyz(self._cloud, 0)
-        np.save(f"{stem}_cloud.npy", points.astype(np.float32))
+        # Organized, not a flat point list: the ring/column grid is what makes
+        # range discontinuities exact offline, and the intensity channel is the
+        # fallback path for detecting a retro-reflective target.
+        cloud = extract_organized(self._cloud)
+        valid = int(np.isfinite(cloud[..., :3]).all(axis=-1).sum())
+        np.save(f"{stem}_cloud.npy", cloud)
         Path(f"{stem}_image.jpg").write_bytes(bytes(self._image.data))
 
         meta = {
@@ -346,7 +350,13 @@ class SnapshotCaptureNode(Node):
                 else None
             ),
             "cloud_frame": self._cloud.header.frame_id,
-            "cloud_points": int(points.shape[0]),
+            "cloud_points": valid,
+            "cloud_layout": {
+                "shape": [int(n) for n in cloud.shape],
+                "channels": ["x", "y", "z", "intensity"],
+                "note": "rows/columns as the sensor scanned them; an invalid "
+                        "return is NaN rather than a dropped row",
+            },
             "image_topic": self._p("topics.image_in"),
             "camera_info": {
                 "width": int(self._info.width),
@@ -360,11 +370,11 @@ class SnapshotCaptureNode(Node):
         Path(f"{stem}_meta.json").write_text(json.dumps(meta, indent=2))
         self._gate.mark_saved(self._cloud_seq, self._image_seq)
 
-        size_mb = (points.nbytes + len(self._image.data)) / 1e6
+        size_mb = (cloud.nbytes + len(self._image.data)) / 1e6
         self.get_logger().info(
             f"pose {index} captured ({mode} "
             f"{np.array2string(key, precision=2)}) "
-            f"({points.shape[0]} pts, {size_mb:.1f} MB) -> {stem.name}  "
+            f"({valid} pts, {size_mb:.1f} MB) -> {stem.name}  "
             f"[{index + 1}/{self._p('capture.target_poses')}]"
         )
         return True

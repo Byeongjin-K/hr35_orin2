@@ -11,6 +11,7 @@ from excavator_ar_overlay.target_pick import (
     find_target,
     frozen_transform_matrix,
     points_between_frames,
+    xyz_from_capture,
 )
 
 IDENTITY = {"translation": [0.0, 0.0, 0.0], "rotation_xyzw": [0.0, 0.0, 0.0, 1.0]}
@@ -34,6 +35,28 @@ def ground_with_target(x=2.5, y=-1.0, ground_z=0.155, height=0.6):
         ground_z + rng.uniform(0.05, height, n),
     ])
     return np.vstack([ground, blob])
+
+
+def test_organized_capture_drops_the_beams_that_did_not_return():
+    cloud = np.full((2, 3, 4), np.nan, dtype=np.float32)
+    cloud[0, 0] = [1.0, 2.0, 3.0, 120.0]
+    cloud[1, 2] = [4.0, 5.0, 6.0, 90.0]
+    points = xyz_from_capture(cloud)
+    assert points.shape == (2, 3)
+    assert np.allclose(points, [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+
+
+def test_flat_captures_from_before_the_layout_change_still_load():
+    flat = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=np.float32)
+    assert np.allclose(xyz_from_capture(flat), flat)
+
+
+def test_a_capture_survives_the_trip_through_a_frame_change():
+    """The two halves of the offline solve have to compose, layout included."""
+    cloud = np.full((1, 2, 4), np.nan, dtype=np.float32)
+    cloud[0, 0] = [1.0, 0.0, 0.0, 10.0]
+    moved = points_between_frames(xyz_from_capture(cloud), yaw90(), IDENTITY)
+    assert np.allclose(moved, [[0.0, 1.0, 0.0]], atol=1e-9)
 
 
 def test_translation_only_frame_change():

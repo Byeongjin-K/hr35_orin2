@@ -18,6 +18,21 @@ import numpy as np
 from excavator_ar_overlay.geometry import quaternion_to_matrix
 
 
+def xyz_from_capture(cloud) -> np.ndarray:
+    """(N, 3) real returns from a saved cloud, whichever layout it was written in.
+
+    Captures written before 2026-09-22 hold a flat (N, 3) list of already
+    filtered points. Newer ones keep the sensor's (height, width, 4) grid with
+    an intensity channel and NaN where a beam did not come back, so the invalid
+    returns have to be dropped here instead.
+    """
+    array = np.asarray(cloud, dtype=np.float64)
+    if array.ndim == 3:
+        array = array.reshape(-1, array.shape[-1])
+    points = array[:, :3]
+    return points[np.isfinite(points).all(axis=1)]
+
+
 def frozen_transform_matrix(entry: dict) -> np.ndarray:
     """4x4 map<-frame matrix from a meta.json ``transforms`` entry."""
     matrix = np.eye(4, dtype=np.float64)

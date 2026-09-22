@@ -84,10 +84,14 @@ def target_3d(stem: str, near_xy, radius: float) -> None:
     3.128 m of ground-height drift against 0.029 m for the kinematic chain.
     """
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-    from excavator_ar_overlay.target_pick import find_target, points_between_frames
+    from excavator_ar_overlay.target_pick import (
+        find_target,
+        points_between_frames,
+        xyz_from_capture,
+    )
 
     meta = json.load(open(f"{stem}_meta.json"))
-    cloud = np.load(f"{stem}_cloud.npy")
+    cloud = xyz_from_capture(np.load(f"{stem}_cloud.npy"))
     frames = meta["transforms"]
     for name in ("gm_os_lidar", "gm_swing_axis"):
         if "error" in frames.get(name, {"error": "missing"}):
