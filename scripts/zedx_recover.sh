@@ -2,6 +2,11 @@
 # zedx_recover.sh - recover a wedged ZED X capture stack WITHOUT rebooting.
 #
 # Ladder, cheapest first; it stops as soon as the camera opens:
+#   0 load-fence       load host1x-fence.ko when it is missing. It is only autoloaded from the
+#                      host1x OF modalias, so some boots come up without it; /dev/host1x-fence
+#                      is then absent and every ZED SDK open SEGFAULTS in DrmCreateEventPollFd
+#                      before it reaches the sensor, with a perfectly healthy refcount and all
+#                      four sensors probed. No other rung can see this fault.
 #   1 stop-clients     retire every process holding a camera (the wedge deepens
 #                      while one is alive, and unbind/rmmod on an open fd is fatal)
 #   2 restart-nvargus  drop argus' orphaned capture session
@@ -62,7 +67,16 @@
 set -u
 
 MODULE_DIR="${ZEDX_MODULE_DIR:-/sys/module}"
-CLIENT_PATTERN="${ZEDX_CLIENT_PATTERN:-component_container|ZED_Explorer|ZED_Depth_Viewer|ZED_Media_Server}"
+# The ros2 launch supervisors belong in here. Without them the ladder saw client_n=0 while
+# `sensors` was up -- the container had already died, the supervisor was still alive, and rung 1
+# was skipped entirely, so every rung below ran against a launcher that kept coming back. That
+# is why running this by hand during a session almost always failed (measured 2026-09-22 13:17:
+# supervisor pid 10955 alive, client_n=0). Only the ZED launches are listed: matching
+# hr35_bringup broadly would also kill the Ouster lidar bringup.
+CLIENT_PATTERN="${ZEDX_CLIENT_PATTERN:-component_container|zedx_cabin\.launch|zedx_boom\.launch|dual_zedx\.launch|ZED_Explorer|ZED_Depth_Viewer|ZED_Media_Server}"
+# /dev/host1x-fence lingers in devtmpfs after the module goes away, so the node is not proof.
+FENCE_MODULE="${ZEDX_FENCE_MODULE:-host1x_fence}"
+MODULES_FILE="${ZEDX_MODULES_FILE:-/proc/modules}"
 SUDO="${SUDO:-sudo}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Resolved without ".." so it matches the sudoers rule literally: sudo compares the command
@@ -107,6 +121,19 @@ PY
   printf '%s\n' "$out" | grep -q '^OPEN SUCCESS'
 }
 say() { echo; echo "=== $* ==="; }
+
+# A fault with the same symptom as every other one in this file and a completely different
+# cause. host1x-fence.ko is only autoloaded from the host1x OF modalias, so on some boots it
+# loses that race and never loads. /dev/host1x-fence is then absent and EVERY ZED SDK open
+# SEGFAULTS inside DrmCreateEventPollFd -- before it ever reaches the sensor. Measured
+# 2026-09-22 13:13: refcnt 0, zero module_put underflows, all four sensors probed, GMSL fine,
+# and a bare pyzed open still dumped core; loading the module made the same probe answer
+# OPEN SUCCESS / FRAME 1920x1200. No rung below can see or fix this, which is why running the
+# ladder by hand kept failing. /etc/modules-load.d/zed-host1x-fence.conf makes it stick across
+# boots; this keeps a running system repairable.
+fence_loaded() {
+  grep -q "^${FENCE_MODULE} " "$MODULES_FILE" 2>/dev/null
+}
 
 # Reset the CAMERA, not the host. On 2026-09-21 the driver stack was provably healthy after a
 # real reload -- 4x "zedx_probe: Serial Number", "camera pipeline operational", refcnt 0, zero
@@ -259,6 +286,7 @@ echo "STATE refcnt=$refcnt clients=$client_n"
 
 n=0
 step() { n=$((n+1)); echo "STEP $n $1"; }
+fence_loaded || { step "load-fence"; echo "CMD  modprobe $FENCE_MODULE"; }
 [ "$client_n" -gt 0 ] && step "stop-clients"
 step "restart-nvargus"
 damaged=0
@@ -281,6 +309,20 @@ fi
 if [ "$PLAN_ONLY" = 1 ]; then
   echo "PLAN ONLY - nothing was executed. Add --run to execute."
   exit 0
+fi
+
+say "0 load-fence"
+if fence_loaded; then
+  echo "$FENCE_MODULE is loaded"
+else
+  echo "$FENCE_MODULE is NOT loaded -- every ZED SDK open segfaults without it. Loading."
+  $SUDO modprobe "$FENCE_MODULE" || echo "WARNING: modprobe $FENCE_MODULE failed"
+  if fence_loaded; then
+    echo "$FENCE_MODULE loaded; the camera may already work now"
+    probe_ok && { echo "RECOVERED after load-fence"; exit 0; }
+  else
+    echo "WARNING: $FENCE_MODULE still not loaded; opens will keep crashing"
+  fi
 fi
 
 say "1 stop-clients"

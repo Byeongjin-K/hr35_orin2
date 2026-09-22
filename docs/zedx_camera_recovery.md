@@ -725,3 +725,60 @@ sl.Camera.reboot_from_input(sl.INPUT_TYPE.GMSL)   # -> SUCCESS
 테스트로 교체했다. 실기 검증: `mcu_reboot` 기본 경로가 `MCU_REBOOT SUCCESS` (refcnt 불변),
 `--run` end-to-end 가 `RECOVERED after restart-nvargus` / `LADDER_EXIT=0`.
 
+---
+
+## 16. 2026-09-22 — "수동 복구가 대부분 실패한다"의 진짜 이유 두 가지
+
+사용자 보고: "zedx_recover 를 수동으로 해도 안 되는 경우가 많아. 대부분이야." 증거로 원인 **두 개**를
+찾았고 둘 다 기존 사다리로는 원리적으로 고칠 수 없는 것이었다.
+
+### 원인 A — `host1x_fence` 모듈이 없으면 SDK 가 세그폴트한다 (카메라 문제가 아니다)
+
+`host1x-fence.ko` 는 **host1x OF modalias 로만 자동 로드**된다. 그 경쟁에서 지는 부팅에는 아예
+안 올라오고, `/dev/host1x-fence` 가 없어서 **모든 ZED SDK open 이 `DrmCreateEventPollFd` 안에서
+코어 덤프**한다. 센서에 도달하기도 전이다.
+
+2026-09-22 13:13 실측 — 이 상태의 스택은 모든 기존 점검을 통과한다:
+
+| 지표 | 값 |
+|---|---|
+| `sl_zedx` refcnt | 0 (정상) |
+| `module_put` 언더플로 | 0 |
+| `Error turning off streaming` | 0 |
+| `zedx_probe: Serial Number` | 4 (양쪽 카메라 정상 프로브) |
+| FROZEN 보고 | 0 |
+| `zedx_health.sh` | **HEALTHY** ← 오진 |
+| 실제 `sl::Camera::open()` | **코어 덤프** |
+
+감별 증거: ROS 없이 순수 pyzed open 도 똑같이 덤프했고(`DrmCreateEventPollFd: failed to open
+host1x-fence device: -1`), `modprobe host1x_fence` 후 **같은 프로브가** `OPEN SUCCESS` /
+`FRAME 1920x1200` / `CLOSED_CLEAN` 을 냈다. 즉 GMSL·MCU·refcnt 와 무관하다.
+
+- 고정: `/etc/modules-load.d/zed-host1x-fence.conf` = `host1x_fence`.
+  **실제 재부팅(13:26)으로 검증** — 새 부팅에서 `host1x_fence loaded: 1`, 노드 타임스탬프도 그 부팅.
+- 사다리에 **rung 0 `load-fence`** 추가(없으면 `modprobe` 후 즉시 프로브, 되면 거기서 종료).
+- `zedx_health.sh` 가 이 상태를 **refcnt 보다 먼저** 판정한다(`RECOVERABLE`, exit 1).
+- **판정은 `/proc/modules` 로 한다.** `/dev/host1x-fence` 노드는 rmmod 후에도 devtmpfs 에 남으므로
+  노드 존재는 증거가 아니다(실측).
+- sudoers 에 `/usr/sbin/modprobe host1x_fence` 추가.
+
+### 원인 B — `stop-clients` 가 런치 감독을 보지 못했다
+
+`CLIENT_PATTERN` 이 `component_container|ZED_Explorer|ZED_Depth_Viewer|ZED_Media_Server` 뿐이라
+`ros2 launch ... zedx_cabin.launch.py` **감독 프로세스가 매칭되지 않았다**. 13:17 실측: 컨테이너는
+죽고 감독(pid 10955)은 살아 있는데 `client_n=0` → **rung 1 이 통째로 건너뛰어지고** 이후 모든
+rung 이 계속 되살아나는 런처를 상대로 돌았다. 사용자가 `sensors` 를 띄운 채 복구를 돌리면
+항상 이 경로다 — 그래서 "대부분 실패"였다.
+
+- 패턴에 `zedx_cabin\.launch|zedx_boom\.launch|dual_zedx\.launch` 추가.
+- **`hr35_bringup` 을 넓게 매칭하면 안 된다** — Ouster 라이다 브링업까지 죽는다.
+  테스트가 두 문자열을 직접 패턴에 물려 이 경계를 고정한다.
+- 실기 확인: 같은 상황에서 이제 `STATE refcnt=2 clients=2`, `STEP 1 stop-clients` 가 계획된다.
+
+### 검증
+
+`test_zedx_recover.sh` **41/41**, `test_zedx_health.sh` **10/10**,
+`test_zedx_preflight.sh` 6/6 (순차). health 테스트는 이제 `ZEDX_MODULES_FILE` 로 모듈 목록을
+**고정**한다 — 안 하면 그 부팅이 fence 를 로드했는지에 따라 판정이 흔들려, 이 테스트가 잡으려는
+비결정성이 테스트 자신에 들어온다. 실기: 카메라 9.83~9.89Hz, FROZEN 0, 언더플로 0.
+

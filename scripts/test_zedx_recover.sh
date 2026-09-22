@@ -383,6 +383,52 @@ else
      "$(grep -B4 'FAILED: every rung exhausted' "$SCRIPT")"
 fi
 
+# 2026-09-22: a boot without host1x-fence.ko looks perfect to every other check -- refcount 0,
+# zero module_put underflows, all four sensors probed, GMSL link up -- and yet a bare pyzed open
+# dumps core inside DrmCreateEventPollFd, because /dev/host1x-fence does not exist. The ladder
+# has to notice and load it, otherwise running it by hand can never help.
+loaded_modules="$TMP/modules_loaded"
+printf 'host1x_fence 16384 0 - Live 0x0\nsl_zedx 28672 0 - Live 0x0\n' > "$loaded_modules"
+: > "$TMP/modules_missing"
+
+out="$(ZEDX_MODULE_DIR="$(mk_mod fence_ok 0)" ZEDX_CLIENT_PATTERN="$NOCLIENT" \
+       ZEDX_MODULES_FILE="$TMP/modules_missing" bash "$SCRIPT" --plan 2>&1)"
+printf '%s' "$out" | grep -q 'STEP 1 load-fence' \
+  && ok "a missing host1x_fence makes load-fence the very first step" \
+  || no "load-fence must be planned first when the module is missing" "$out"
+
+out="$(ZEDX_MODULE_DIR="$(mk_mod fence_ok2 0)" ZEDX_CLIENT_PATTERN="$NOCLIENT" \
+       ZEDX_MODULES_FILE="$loaded_modules" bash "$SCRIPT" --plan 2>&1)"
+printf '%s' "$out" | grep -q 'load-fence' \
+  && no "load-fence must not be planned when the module is already loaded" "$out" \
+  || ok "a loaded host1x_fence plans no load-fence rung"
+
+# The node lingers in devtmpfs after the module is unloaded, so testing for it would pass while
+# every open still crashed.
+if grep -q 'MODULES_FILE' "$SCRIPT" && ! grep -qE 'test -[ec] .*/dev/host1x-fence|\[ -[ec] .*/dev/host1x-fence' "$SCRIPT"; then
+  ok "the fence check reads /proc/modules, not the lingering device node"
+else
+  no "the fence check must not rely on /dev/host1x-fence existing" "$(grep -n 'host1x-fence' "$SCRIPT")"
+fi
+
+# 2026-09-22 13:17: the container had died, `ros2 launch ... zedx_cabin.launch.py` (pid 10955)
+# was still alive, and CLIENT_PATTERN did not match it -- so client_n was 0, rung 1 was skipped,
+# and every rung below fought a launcher that kept coming back. That is the "manual recovery
+# almost always fails" report. The Ouster bringup must stay out of the pattern.
+pat="$(grep -m1 '^CLIENT_PATTERN=' "$SCRIPT" | sed 's/^CLIENT_PATTERN="\${ZEDX_CLIENT_PATTERN:-//; s/}"$//')"
+zed_launch='/usr/bin/python3 /opt/ros/humble/bin/ros2 launch hr35_bringup zedx_cabin.launch.py'
+ouster_launch='/usr/bin/python3 /opt/ros/humble/bin/ros2 launch hr35_bringup boom_only_driver.launch.py'
+if printf '%s' "$zed_launch" | grep -qE "$pat"; then
+  ok "the client pattern matches the ZED launch supervisor"
+else
+  no "the ladder must see 'ros2 launch ... zedx_cabin.launch.py' as a client" "pattern=$pat"
+fi
+if printf '%s' "$ouster_launch" | grep -qE "$pat"; then
+  no "the client pattern must NOT match the Ouster lidar bringup" "pattern=$pat"
+else
+  ok "the client pattern leaves the Ouster lidar bringup alone"
+fi
+
 echo "----"
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]

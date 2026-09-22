@@ -21,10 +21,19 @@ mk_mod() { # name refcnt|none -> prints dir
   echo "$TMP/$1"
 }
 
-run_case() { # name want_code want_verdict module_dir argus_log client_pattern
+# Every case below pins the module list too. Without it the suite would read the real
+# /proc/modules and flip verdicts depending on whether this boot happened to autoload
+# host1x-fence.ko -- the very nondeterminism these tests exist to pin down.
+MODULES_LOADED="$TMP/modules_loaded"
+printf 'host1x_fence 16384 0 - Live 0x0\nsl_zedx 28672 0 - Live 0x0\n' > "$MODULES_LOADED"
+MODULES_NO_FENCE="$TMP/modules_no_fence"
+printf 'sl_zedx 28672 0 - Live 0x0\n' > "$MODULES_NO_FENCE"
+
+run_case() { # name want_code want_verdict module_dir argus_log client_pattern [modules_file]
   local name="$1" want_code="$2" want_verdict="$3" moddir="$4" arguslog="$5" pattern="$6" out code
+  local modules="${7:-$MODULES_LOADED}"
   out="$(ZEDX_MODULE_DIR="$moddir" ZEDX_ARGUS_LOG_CMD="cat $arguslog" ZEDX_CLIENT_PATTERN="$pattern" \
-         bash "$SCRIPT" 2>&1)"
+         ZEDX_MODULES_FILE="$modules" bash "$SCRIPT" 2>&1)"
   code=$?
   if [ "$code" = "$want_code" ] && printf '%s' "$out" | grep -q "VERDICT=$want_verdict"; then
     echo "PASS $name (exit=$code VERDICT=$want_verdict)"; pass=$((pass+1))
@@ -55,6 +64,32 @@ run_case "underflow outranks argus"       1 RECOVERABLE     "$(mk_mod both -1)" 
 # Regression: nvargus logs the very same lines during ordinary contention while a node legitimately
 # holds the camera. A live client means the sensor is NOT orphaned. Goes through the real pgrep path.
 run_case "faults but client holds camera" 0 HEALTHY         "$(mk_mod busy 3)"      "$stale_log" "$LIVE_CLIENT_PATTERN"
+
+# 2026-09-22: this script reported HEALTHY on a boot where host1x-fence.ko had not autoloaded.
+# The refcount was 0, argus was quiet, all four sensors had probed and the GMSL link was up --
+# and every ZED SDK open still dumped core inside DrmCreateEventPollFd, because
+# /dev/host1x-fence did not exist. A verdict of HEALTHY sent the whole session chasing the GMSL
+# stack. The missing module has to outrank everything else, because nothing else can open the
+# camera while it is absent.
+run_case "missing host1x_fence"           1 RECOVERABLE     "$(mk_mod fence_missing 0)"  "$clean_log" "$NO_CLIENT_PATTERN" "$MODULES_NO_FENCE"
+run_case "missing fence outranks healthy" 1 RECOVERABLE     "$(mk_mod fence_busy 2)"     "$clean_log" "$NO_CLIENT_PATTERN" "$MODULES_NO_FENCE"
+
+out="$(ZEDX_MODULE_DIR="$(mk_mod fence_reason 0)" ZEDX_ARGUS_LOG_CMD="cat $clean_log" \
+       ZEDX_CLIENT_PATTERN="$NO_CLIENT_PATTERN" ZEDX_MODULES_FILE="$MODULES_NO_FENCE" \
+       bash "$SCRIPT" 2>&1)" || true
+if printf '%s' "$out" | grep -q 'host1x_fence : MISSING' \
+   && printf '%s' "$out" | grep -q 'modprobe host1x_fence'; then
+  ok_fence=1
+else
+  ok_fence=0
+fi
+if [ "$ok_fence" = 1 ]; then
+  echo "PASS the missing-fence report names the module and the one-line fix"; pass=$((pass+1))
+else
+  echo "FAIL the report must show 'host1x_fence : MISSING' and the modprobe fix"
+  printf '%s\n' "$out" | sed 's/^/    /'
+  fail=$((fail+1))
+fi
 
 # 2026-09-18: recovery had just restarted argus and the camera was fine, yet this script
 # printed "argus faults: 2 ... VERDICT=RECOVERABLE". Those two lines were the 15:55:18
@@ -87,7 +122,8 @@ EOF
 chmod +x "$TMP/fakebin/journalctl" "$TMP/fakebin/systemctl"
 
 out="$(PATH="$TMP/fakebin:$PATH" ZEDX_MODULE_DIR="$(mk_mod after_recovery 0)" \
-       ZEDX_CLIENT_PATTERN="$NO_CLIENT_PATTERN" bash "$SCRIPT" 2>&1)"
+       ZEDX_CLIENT_PATTERN="$NO_CLIENT_PATTERN" ZEDX_MODULES_FILE="$MODULES_LOADED" \
+       bash "$SCRIPT" 2>&1)"
 code=$?
 if [ "$code" = 0 ] && printf '%s' "$out" | grep -q 'VERDICT=HEALTHY'; then
   echo "PASS a fault from a previous argus instance does not count (exit=$code)"; pass=$((pass+1))

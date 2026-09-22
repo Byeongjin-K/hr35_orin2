@@ -48,8 +48,22 @@ argus_faults="$(printf '%s\n' "$argus_log" | grep -cE "$ARGUS_FAULT_RE")"
 clients="$(pgrep -af "$CLIENT_PATTERN" 2>/dev/null | head -5 || true)"
 client_n="$(printf '%s' "$clients" | grep -c . )"
 
+FENCE_MODULE="${ZEDX_FENCE_MODULE:-host1x_fence}"
+MODULES_FILE="${ZEDX_MODULES_FILE:-/proc/modules}"
+# Ask /proc/modules, not /dev/host1x-fence: the device node lingers in devtmpfs after the
+# module is gone, so the node's presence proves nothing.
+fence_loaded=1
+grep -q "^${FENCE_MODULE} " "$MODULES_FILE" 2>/dev/null || fence_loaded=0
+
 verdict=""; code=0; reason=""
-if [ -z "$refcnt" ]; then
+if [ "$fence_loaded" = 0 ]; then
+  # This one outranks the refcount: with the fence module missing every open segfaults inside
+  # DrmCreateEventPollFd before it reaches the sensor, so a perfectly healthy refcount still
+  # means an unusable camera. Reporting HEALTHY here sent 2026-09-22 chasing the GMSL stack for
+  # an hour.
+  verdict=RECOVERABLE; code=1
+  reason="$FENCE_MODULE is not loaded, so /dev/host1x-fence is missing and EVERY ZED SDK open segfaults in DrmCreateEventPollFd before it reaches the camera. Nothing about the refcount or GMSL link is wrong. Fix: sudo modprobe $FENCE_MODULE (or $(dirname "$0")/zedx_recover.sh --run). It is only autoloaded from the host1x OF modalias, so some boots come up without it; /etc/modules-load.d/zed-host1x-fence.conf pins it."
+elif [ -z "$refcnt" ]; then
   verdict=REBOOT_REQUIRED; code=2
   reason="sl_zedx driver is not loaded ($REFCNT_FILE unreadable)."
 elif ! printf '%s' "$refcnt" | grep -qE '^-?[0-9]+$'; then
@@ -72,6 +86,11 @@ fi
 
 echo "=== ZED X stack health — $(hostname) $(date '+%F %T') ==="
 echo "sl_zedx refcnt : ${refcnt:-<driver not loaded>}   (0 = idle; 1 per open camera; NEGATIVE = broken)"
+if [ "$fence_loaded" = 1 ]; then
+  echo "$FENCE_MODULE : loaded"
+else
+  echo "$FENCE_MODULE : MISSING  (every SDK open segfaults without it)"
+fi
 echo "argus faults   : $argus_faults line(s) in $ARGUS_SCOPE"
 if [ "$client_n" -gt 0 ]; then
   echo "camera clients : $client_n"; printf '%s\n' "$clients" | cut -c1-110 | sed 's/^/                 /'
