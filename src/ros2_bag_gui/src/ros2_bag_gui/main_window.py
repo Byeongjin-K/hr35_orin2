@@ -108,6 +108,10 @@ class MainWindow(QMainWindow):
     def _on_recording_active_changed(self, recording: bool):
         self.start_recording_action.setEnabled(not recording)
         self.stop_recording_action.setEnabled(recording)
+        if not recording:
+            # Also reached when the recording ended by itself (recorder died,
+            # disk full): the bar must not go on saying "Recording started".
+            self.status_bar.showMessage("Not recording")
 
     def _on_start_recording(self):
         self.recording_started.emit()

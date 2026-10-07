@@ -46,3 +46,12 @@ def test_recording_menu_follows_recording_state(main_window):
     main_window.recording_tab.recording_active_changed.emit(False)
     assert main_window.start_recording_action.isEnabled()
     assert not main_window.stop_recording_action.isEnabled()
+
+def test_status_bar_does_not_keep_saying_started_when_recording_ends_by_itself(main_window):
+    main_window.recording_tab.recording_active_changed.emit(True)
+    main_window.recording_tab.recording_start_requested.emit({'session_name': 's'})
+    started = main_window.status_bar.currentMessage()
+
+    main_window.recording_tab.recording_active_changed.emit(False)  # e.g. the recorder died
+
+    assert main_window.status_bar.currentMessage() != started
