@@ -8,18 +8,21 @@
 | 상황 | 화면에 보이는 것 | 남는 기록 |
 |---|---|---|
 | `ros2 bag record`가 녹화 중에 끝남 (신호, 자체 오류, 크래시) | 상태가 빨간 `ERROR - NOT RECORDING`으로 바뀌고 오류 창에 종료 코드와 recorder의 마지막 출력이 나온다 | `sync_info.json`의 `forced_stop`, `stop_reason` |
-| recorder를 시작하지 못함 (`ros2` 없음 등) | Start가 실패하고 오류 창이 뜬다. 상태는 Recording이 되지 않는다 | 세션 로그 |
+| recorder를 시작하지 못함 (`ros2` 없음), 또는 시작 1초 안에 끝남 (출력 폴더가 이미 있음, 잘못된 인자) | Start가 실패하고 오류 창이 뜬다. 상태는 Recording이 되지 않는다 | 세션 로그 |
 | Stop을 눌렀는데 recorder가 이미 죽어 있었음 | 오류 창 "had already ended before Stop" | `forced_stop` |
+| Stop 때 recorder가 bag을 닫지 못해 강제 종료됨 | 오류 창과 복구 명령(`ros2 bag reindex`). 상태는 `ERROR - NOT RECORDING` | `forced_stop`, `topic_message_counts`는 null |
+| recorder 프로세스가 신호로 일시정지됨 (SIGSTOP, Ctrl+Z) | 알림과 경고 창 (1초 안). Stop은 먼저 재개시킨 뒤 bag을 닫는다 | 세션 로그 |
 | Camera = SVO2인데 ZED SDK가 없거나 카메라가 30초 안에 열리지 않음 | 노란 알림과 경고 창. 이미지 토픽은 bag에 그대로 기록된다 | `sync_info.json`의 `notices`, `recording_modes`(실제 적용된 모드) |
 | Camera = SVO2이고 카메라 2대의 이미지 토픽이 선택됨 | 알림. SVO2는 카메라 1대(index 0)만 기록하므로 이미지는 전부 bag에도 남긴다 | `notices` |
 | SVO2/LAZ 기록이 녹화 도중 실패 | 오류 창 (녹화는 계속된다) | 세션 로그 |
 | LAZ 구독 실패 | 알림. 그 라이다 토픽은 bag에 기록된다 | `notices` |
 | LAZ 프레임 드롭 | 첫 드롭 때 경고, Stop 때 합계 | `data_sources.pointcloud.dropped_frames`, `write_errors` |
-| recorder가 경고를 출력 (느린 디스크로 메시지 유실 등) | 첫 경고를 알림과 경고 창으로 보여 준다 | `recorder_warnings`, 세션 로그 |
+| recorder가 경고를 출력 (느린 디스크로 메시지 유실 등) | 녹화 중 첫 경고, 그리고 bag을 닫으며 출력한 내용("Total lost: N" 포함)을 알림과 경고 창으로 보여 준다 | `recorder_warnings`, 세션 로그 |
 | 선택한 토픽이 지금 없음 | 목록 아래 빨간 글씨, Start 때 확인 창. "Yes"면 그 토픽도 recorder에 넘겨 나타나는 순간부터 기록한다 | 알림 |
 | 다른 `ros2 bag record`가 이미 돌고 있음 | Start 때 pid와 함께 확인 창 | - |
 | 디스크 여유 5 GB 미만 | Start 때 확인 창, 녹화 중에는 경고 1회 | - |
-| 디스크 여유 1 GB 미만 | Start 거부. 녹화 중이면 정상 Stop으로 자동 정지하고 사유를 보여 준다 | `forced_stop`, `stop_reason` |
+| 디스크 여유 1 GB 미만 | Start 거부. 녹화 중이면 정상 Stop으로 자동 정지하고 사유를 보여 준다. 경고 창이 열려 있어도, 같은 디스크에서 다시 녹화해도 동작한다 | `forced_stop`, `stop_reason` |
+| GUI가 SIGTERM을 받음 | GUI는 남고 연결 표시가 `ROS2 Disconnected`로 바뀐다. recorder는 계속 기록하며 Stop으로 bag을 닫을 수 있다 | - |
 | Stop 후 | 표가 "In bag"(bag에서 읽은 실제 개수)과 "Received (GUI)"로 바뀐다. bag에 0건인 선택 토픽은 알림으로 나온다 | `topic_message_counts`(bag 기준), `gui_received_counts` |
 
 녹화 중 표의 숫자("Received (GUI)")는 GUI가 따로 만든 best-effort 구독이 받은 개수다.
@@ -98,7 +101,9 @@ dd if=/dev/zero of=<출력경로>/ddtest bs=1M count=2000 oflag=direct && rm <�
 
 ## 5. 알려진 한계
 
-- Stop은 recorder가 bag을 닫을 때까지 화면을 멈춘다(최대 13초). 10초 안에 닫히지 않으면 강제 종료하며 이때는 `metadata.yaml`이 없다.
-- Start 시점에 없던 토픽은 확인 창에서 "Yes"를 고른 경우에만 recorder에 넘어간다. 체크하지 않은 토픽이 나중에 나타나도 기록되지 않는다.
+- Start는 recorder가 1초 동안 살아 있는지 확인한 뒤에 Recording으로 바뀐다.
+- Stop은 recorder가 bag을 닫을 때까지 화면을 멈춘다. 보통 0.2초 안이다. 10초가 지나도 끝나지 않으면 강제 종료하되, 캐시를 디스크에 쓰는 중이라 bag 파일이 계속 커지고 있으면 최대 60초까지 기다린다. 강제 종료되면 `metadata.yaml`이 없고 오류 창이 뜬다.
+- recorder가 종료하지도 일시정지하지도 않은 채 내부에서 멈춘 경우는 감지하지 못한다. 파일 크기 증가 감시는 조용한 토픽만 녹화하는 세션에서 오경보를 내므로 넣지 않았다.
+- Start 시점에 없던 토픽은 확인 창에서 "Yes"를 고른 경우에만 recorder에 넘어간다. 체크하지 않은 토픽이 나중에 나타나도 기록되지 않는다. 그렇게 넘어간 토픽은 녹화 중 표에는 나오지 않고 Stop 후 "In bag"에 나온다.
 - bag의 타임스탬프는 수신 시각이다. 센서 간 동기는 헤더 시각으로 한다.
 - 전원 차단은 시험하지 못했다. 분할 크기를 작게 두면 잃는 범위가 마지막 파일로 줄어든다.
