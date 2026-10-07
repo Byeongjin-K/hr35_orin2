@@ -107,6 +107,8 @@ class Recorder(QObject):
         self._bag_topics: List[str] = []
         self._bag_counts: Optional[Dict[str, int]] = None
         self._bag_warnings: List[str] = []
+        self._laz_drop_reported = False
+        self._laz_summary: Optional[Dict] = None
 
     def start_recording(self, config: RecordingConfig, node) -> bool:
         if self._recording.is_set():
@@ -137,6 +139,8 @@ class Recorder(QObject):
             cb_group = ReentrantCallbackGroup()
             notices: List[str] = []
             self._laz_error_reported = False
+            self._laz_drop_reported = False
+            self._laz_summary = None
 
             # Side recorders come up first: a topic is left out of the bag only
             # once the recorder that takes it instead is known to be running.
@@ -252,8 +256,18 @@ class Recorder(QObject):
             return set()
         pointcloud_dir = os.path.join(session_folder, 'pointcloud')
         os.makedirs(pointcloud_dir, exist_ok=True)
-        self._laz_writer = LAZWriterThread(pointcloud_dir, parent=None)
+        laz_topics = [
+            t['name'] for t in config.topics
+            if should_record_lidar_laz(t['name'], config.lidar_mode)
+        ]
+        # One lidar keeps the flat pointcloud/ folder the export tools read.
+        # Two or more get a folder each: the files are named by timestamp only.
+        subdirs = {}
+        if len(laz_topics) > 1:
+            subdirs = {t: t.strip('/').replace('/', '_') for t in laz_topics}
+        self._laz_writer = LAZWriterThread(pointcloud_dir, parent=None, topic_subdirs=subdirs)
         self._laz_writer.error_occurred.connect(self._on_laz_error)
+        self._laz_writer.dropped.connect(self._on_laz_dropped)
         self._laz_writer.start()
         logger.info("LAZ writer started: %s", pointcloud_dir)
 
@@ -293,6 +307,19 @@ class Recorder(QObject):
             else:
                 consequence = "Point cloud frames are being lost."
             self.error_occurred.emit(f"LAZ writing failed: {msg}. {consequence}")
+
+    @Slot(int)
+    def _on_laz_dropped(self, count: int):
+        """The LAZ queue was full and a frame was thrown away (writing is too slow)."""
+        if self._recording.is_set() and not self._laz_drop_reported:
+            self._laz_drop_reported = True  # the total is reported at Stop
+            if self._effective_modes[0] == "both":
+                consequence = "The frames are still recorded into the bag."
+            else:
+                consequence = "These frames are lost: in LAZ mode the lidar is not in the bag."
+            self.warning_occurred.emit(
+                f"LAZ writing cannot keep up: point cloud frames are being dropped. {consequence}"
+            )
 
     def _destroy_subscriptions(self, node):
         if node is not None:
@@ -376,7 +403,7 @@ class Recorder(QObject):
         if not self._recording.is_set() or self._laz_writer is None:
             return
         try:
-            self._laz_writer.enqueue_raw(bytes(raw_bytes), msg_class)
+            self._laz_writer.enqueue_raw(bytes(raw_bytes), msg_class, topic_name)
         except Exception as e:
             logger.debug("LAZ enqueue error for %s: %s", topic_name, e)
 
@@ -398,8 +425,28 @@ class Recorder(QObject):
             self._destroy_subscriptions(node)
 
             if self._laz_writer is not None:
-                self._retire_thread(self._laz_writer)
-                logger.info("LAZ writer stopped: %d files", self._laz_writer.file_count)
+                laz = self._laz_writer
+                self._retire_thread(laz)
+                self._laz_summary = {
+                    'dropped_frames': laz.drop_count,
+                    'write_errors': laz.error_count,
+                    'topics': {
+                        topic: {
+                            'path': os.path.join('pointcloud', laz.subdir_for(topic), ''),
+                            'file_count': count,
+                        }
+                        for topic, count in laz.file_counts.items()
+                    },
+                }
+                logger.info("LAZ writer stopped: %d files, %d frames dropped, %d errors",
+                            laz.file_count, laz.drop_count, laz.error_count)
+                if laz.drop_count or laz.error_count:
+                    message = (
+                        f"LAZ recording is incomplete: {laz.drop_count} frames dropped, "
+                        f"{laz.error_count} write errors, {laz.file_count} files written."
+                    )
+                    logger.warning(message)
+                    self.warning_occurred.emit(message)
                 self._laz_writer = None
 
             if self._bag_proc is not None:
@@ -447,8 +494,8 @@ class Recorder(QObject):
 
         laz_file_count = 0
         pointcloud_dir = os.path.join(session_folder, 'pointcloud')
-        if os.path.isdir(pointcloud_dir):
-            laz_file_count = len([f for f in os.listdir(pointcloud_dir) if f.endswith('.laz')])
+        for _root, _dirs, files in os.walk(pointcloud_dir):
+            laz_file_count += len([f for f in files if f.endswith('.laz')])
 
         svo2_files = []
         if os.path.isdir(session_folder):
@@ -469,6 +516,7 @@ class Recorder(QObject):
             notices=self._notices,
             bag_message_counts=self._bag_counts,
             recorder_warnings=self._bag_warnings,
+            laz_summary=self._laz_summary,
             laz_file_count=laz_file_count,
             svo2_files=svo2_files,
             forced_stop=failure is not None,

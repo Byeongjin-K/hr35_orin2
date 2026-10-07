@@ -37,6 +37,7 @@ def create_sync_info(
     notices: Optional[List[str]] = None,
     bag_message_counts: Optional[Dict[str, int]] = None,
     recorder_warnings: Optional[List[str]] = None,
+    laz_summary: Optional[Dict] = None,
 ) -> str:
     """Create sync_info.json in session folder.
 
@@ -52,6 +53,8 @@ def create_sync_info(
         camera_mode: "bag", "svo2", or "both" (the mode really in effect).
         notices: What was done differently from what was asked (mode fallbacks).
         recorder_warnings: Problem lines printed by ros2 bag record (first 50).
+        laz_summary: LAZ writer totals: dropped_frames, write_errors and, per
+            topic, the folder and file count.
         laz_file_count: Number of LAZ files written (if lidar_mode != "bag").
         svo2_files: List of SVO2 file paths (if camera_mode != "bag").
         forced_stop: Whether recording was force-stopped.
@@ -86,6 +89,8 @@ def create_sync_info(
             "file_count": laz_file_count,
             "time_source": "filename_epoch_ns"
         }
+        if laz_summary:
+            data_sources["pointcloud"].update(laz_summary)
 
     # SVO2 camera source — present when camera writes SVO2 files
     if camera_mode in ("svo2", "both") and svo2_files:

@@ -40,6 +40,7 @@ class PointCloud2Payload:
     is_bigendian: bool
     is_dense: bool
     timestamp_ns: int
+    topic: str = ""
 
 
 @dataclass
@@ -47,6 +48,7 @@ class RawCloudItem:
     """Raw CDR-serialized PointCloud2 for off-executor deserialization."""
     serialized: bytes
     msg_class: type
+    topic: str = ""
 
 class LAZWriterThread(QThread):
     """Worker thread for LAZ file writing."""
@@ -58,17 +60,27 @@ class LAZWriterThread(QThread):
     
     QUEUE_MAXSIZE = 100  # ~10 seconds at 10Hz
     
-    def __init__(self, output_dir: str, parent=None):
+    def __init__(self, output_dir: str, parent=None, topic_subdirs: Optional[Dict[str, str]] = None):
+        """topic_subdirs: topic name -> subfolder of output_dir for its files.
+
+        Without it all files go into output_dir. Files are named by timestamp
+        only, so two lidars need a folder each to stay apart.
+        """
         super().__init__(parent)
         self._output_dir = output_dir
+        self._topic_subdirs = dict(topic_subdirs or {})
         self._queue: Queue = Queue(maxsize=self.QUEUE_MAXSIZE)
         self._running = False
         self._drop_count = 0
         self._file_count = 0
+        self._error_count = 0
+        self._file_counts: Dict[str, int] = {}
     
     def run(self):
         """Process queue and write LAZ files."""
         os.makedirs(self._output_dir, exist_ok=True)
+        for subdir in self._topic_subdirs.values():
+            os.makedirs(os.path.join(self._output_dir, subdir), exist_ok=True)
         self._running = True
 
         while True:
@@ -104,8 +116,11 @@ class LAZWriterThread(QThread):
                 header_ts = msg.header.stamp.sec * 10**9 + msg.header.stamp.nanosec
                 if header_ts >= self._MIN_EPOCH_NS:
                     ts = header_ts
-            return create_payload_from_msg(msg, ts)
+            payload = create_payload_from_msg(msg, ts)
+            payload.topic = item.topic
+            return payload
         except Exception as e:
+            self._error_count += 1
             self.error_occurred.emit(f"LAZ deserialize error: {e}")
             return None
 
@@ -128,6 +143,7 @@ class LAZWriterThread(QThread):
 
             output_path = os.path.join(
                 self._output_dir,
+                self._topic_subdirs.get(payload.topic, ""),
                 f"{payload.timestamp_ns}.laz"
             )
             
@@ -147,9 +163,11 @@ class LAZWriterThread(QThread):
             
             las.write(output_path)
             self._file_count += 1
+            self._file_counts[payload.topic] = self._file_counts.get(payload.topic, 0) + 1
             self.file_written.emit(output_path, len(x))
             
         except Exception as e:
+            self._error_count += 1
             self.error_occurred.emit(f"LAZ write error: {e}")
     
     def _parse_pointcloud(self, payload: PointCloud2Payload):
@@ -202,9 +220,11 @@ class LAZWriterThread(QThread):
             self.dropped.emit(self._drop_count)
             return False
 
-    def enqueue_raw(self, serialized: bytes, msg_class: type) -> bool:
+    def enqueue_raw(self, serialized: bytes, msg_class: type, topic: str = "") -> bool:
         try:
-            self._queue.put_nowait(RawCloudItem(serialized=serialized, msg_class=msg_class))
+            self._queue.put_nowait(
+                RawCloudItem(serialized=serialized, msg_class=msg_class, topic=topic)
+            )
             return True
         except Full:
             self._drop_count += 1
@@ -224,6 +244,18 @@ class LAZWriterThread(QThread):
     @property
     def drop_count(self) -> int:
         return self._drop_count
+
+    @property
+    def error_count(self) -> int:
+        return self._error_count
+
+    @property
+    def file_counts(self) -> Dict[str, int]:
+        """Files written per topic."""
+        return dict(self._file_counts)
+
+    def subdir_for(self, topic: str) -> str:
+        return self._topic_subdirs.get(topic, "")
 
 def create_payload_from_msg(msg, timestamp_ns: int) -> PointCloud2Payload:
     """Create PointCloud2Payload from ROS message."""

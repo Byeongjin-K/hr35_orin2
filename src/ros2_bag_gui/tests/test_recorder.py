@@ -360,6 +360,32 @@ STATUS = {'name': '/excavator/status', 'type': 'std_msgs/msg/String'}
 BOOM_IMAGE = {'name': '/zedx_boom/zed_node/left/image_rect_color', 'type': 'sensor_msgs/msg/Image'}
 CABIN_IMAGE = {'name': '/zedx_cabin/zed_node/left/image_rect_color', 'type': 'sensor_msgs/msg/Image'}
 BOOM_CLOUD = {'name': '/lidar_boom/points', 'type': 'sensor_msgs/msg/PointCloud2'}
+OUSTER_CLOUD = {'name': '/ouster/points', 'type': 'sensor_msgs/msg/PointCloud2'}
+
+
+def _cloud_bytes(stamp_sec):
+    """A serialized two-point PointCloud2, as the LAZ subscription receives it."""
+    import numpy as np
+    from rclpy.serialization import serialize_message
+    from sensor_msgs.msg import PointCloud2, PointField
+    msg = PointCloud2()
+    msg.header.stamp.sec = stamp_sec
+    msg.height, msg.width, msg.point_step, msg.row_step, msg.is_dense = 1, 2, 12, 24, True
+    msg.fields = [PointField(name=n, offset=4 * i, datatype=7, count=1) for i, n in enumerate('xyz')]
+    msg.data = np.array([[1, 2, 3], [4, 5, 6]], dtype=np.float32).tobytes()
+    return serialize_message(msg)
+
+
+def _laz_callback(node, topic):
+    """The LAZ subscription of a topic: it is created before the monitoring one."""
+    return next(s['callback'] for s in node.subscriptions if s['topic'] == topic)
+
+
+def _laz_files(recorder):
+    found = []
+    for root, _dirs, files in os.walk(os.path.join(recorder.session_path, 'pointcloud')):
+        found += [os.path.join(root, f) for f in files if f.endswith('.laz')]
+    return found
 
 
 def _fake_zed_sdk(monkeypatch, opens=True, fail_after_grabs=None):
@@ -420,7 +446,7 @@ class TestSideRecorders:
             qtbot.waitUntil(lambda: os.path.exists(ready), timeout=10000)
             return json.loads(args_file.read_text())
 
-        yield SimpleNamespace(recorder=recorder, log=log, start=start)
+        yield SimpleNamespace(recorder=recorder, log=log, start=start, node=fake_node)
         recorder.stop_recording(fake_node)
 
     def test_svo2_without_sdk_keeps_images_in_bag(self, session, monkeypatch):
@@ -487,3 +513,52 @@ class TestSideRecorders:
 
         assert BOOM_CLOUD['name'] not in bag_args
         assert session.log['warnings'] == []
+
+    def test_two_lidars_do_not_overwrite_each_others_laz_files(self, session):
+        session.start([BOOM_CLOUD, OUSTER_CLOUD], lidar_mode='laz')
+        same_instant = _cloud_bytes(1_700_000_000)
+
+        _laz_callback(session.node, BOOM_CLOUD['name'])(same_instant)
+        _laz_callback(session.node, OUSTER_CLOUD['name'])(same_instant)
+        session.recorder.stop_recording()
+
+        files = _laz_files(session.recorder)
+        assert len(files) == 2
+        assert len({os.path.dirname(f) for f in files}) == 2
+        pointcloud = _sync_info(session.recorder)['data_sources']['pointcloud']
+        assert pointcloud['file_count'] == 2
+        assert {t: v['file_count'] for t, v in pointcloud['topics'].items()} == {
+            BOOM_CLOUD['name']: 1, OUSTER_CLOUD['name']: 1,
+        }
+
+    def test_one_lidar_keeps_the_flat_pointcloud_folder(self, session):
+        session.start([BOOM_CLOUD], lidar_mode='laz')
+
+        _laz_callback(session.node, BOOM_CLOUD['name'])(_cloud_bytes(1_700_000_000))
+        session.recorder.stop_recording()
+
+        pointcloud_dir = os.path.join(session.recorder.session_path, 'pointcloud')
+        assert os.listdir(pointcloud_dir) == ['1700000000000000000.laz']
+
+    def test_dropped_laz_frames_are_counted_and_reported(self, session, monkeypatch):
+        from ros2_bag_gui.ros2.laz_writer import LAZWriterThread
+        writer_may_run = threading.Event()
+        write = LAZWriterThread._handle_item
+
+        def slow_disk(self, item):
+            writer_may_run.wait(10)
+            write(self, item)
+
+        monkeypatch.setattr(LAZWriterThread, '_handle_item', slow_disk)
+        monkeypatch.setattr(LAZWriterThread, 'QUEUE_MAXSIZE', 1)
+        session.start([BOOM_CLOUD], lidar_mode='laz')
+
+        for i in range(5):
+            _laz_callback(session.node, BOOM_CLOUD['name'])(_cloud_bytes(1_700_000_000 + i))
+        writer_may_run.set()
+        session.recorder.stop_recording()
+
+        pointcloud = _sync_info(session.recorder)['data_sources']['pointcloud']
+        assert pointcloud['dropped_frames'] >= 3
+        assert pointcloud['dropped_frames'] + len(_laz_files(session.recorder)) == 5
+        assert len(session.log['warnings']) >= 1
