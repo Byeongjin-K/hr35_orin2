@@ -2,6 +2,7 @@
 import pytest
 from pathlib import Path
 from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication
 from ros2_bag_gui.widgets.recording_tab import RecordingTab
 from ros2_bag_gui.widgets.recording_status import RecordingState
 from ros2_bag_gui.config.profiles import RecordingProfile
@@ -53,6 +54,9 @@ class FakeRecorder:
 
     def get_topic_hz(self):
         return {}
+
+    def check_health(self):
+        pass
 
 
 @pytest.fixture
@@ -526,11 +530,70 @@ def test_recording_is_stopped_once_when_the_disk_runs_full(recording_tab, qtbot,
 
     for _ in range(5):  # five one-second ticks with the disk nearly full
         recording_tab.status_panel._on_timer_tick()
+    QApplication.processEvents()
 
     assert recording_tab._recorder.stop_calls == 1
     assert recording_tab._recorder.stop_reason
     assert len(shown) == 1
     assert recording_tab.start_btn.isEnabled()
+
+
+def test_a_later_recording_is_stopped_automatically_too(recording_tab, qtbot, monkeypatch):
+    """The disk can stay below the warning level between two recordings."""
+    from PySide6.QtWidgets import QMessageBox
+    for dialog in ('critical', 'warning'):
+        monkeypatch.setattr(QMessageBox, dialog, lambda *args, **kwargs: None)
+    monkeypatch.setattr(QMessageBox, 'question', lambda *args, **kwargs: QMessageBox.StandardButton.Yes)
+
+    for recording_number in (1, 2):
+        _disk_with(monkeypatch, free_gb=3)
+        _start_with_one_topic(recording_tab)
+        assert recording_tab._recorder.is_recording
+        _disk_with(monkeypatch, free_gb=0.5)
+        recording_tab.status_panel._on_timer_tick()
+        QApplication.processEvents()
+
+        assert recording_tab._recorder.stop_calls == recording_number
+
+
+def test_recording_is_stopped_while_the_low_space_warning_is_still_open(recording_tab, qtbot, monkeypatch):
+    """Driven by the panel's real timer: an open dialog must not hold it back."""
+    from PySide6.QtWidgets import QMessageBox
+    recorder = recording_tab._recorder
+    monkeypatch.setattr(QMessageBox, 'critical', lambda *args, **kwargs: None)
+    monkeypatch.setattr(QMessageBox, 'question', lambda *args, **kwargs: QMessageBox.StandardButton.Yes)
+    stopped_while_open = []
+
+    def warning_left_open(*args, **kwargs):
+        # The operator does not dismiss it; meanwhile the disk runs full.
+        _disk_with(monkeypatch, free_gb=0.5)
+        qtbot.waitUntil(lambda: recorder.stop_calls == 1, timeout=5000)
+        stopped_while_open.append(True)
+
+    monkeypatch.setattr(QMessageBox, 'warning', warning_left_open)
+    _disk_with(monkeypatch, free_gb=3)
+    recording_tab.topic_list.list_btn.setChecked(True)
+    recording_tab.topic_list.tree.topLevelItem(0).setCheckState(0, Qt.CheckState.Checked)
+    recording_tab._on_start_clicked()
+    recording_tab.status_panel._timer.setInterval(20)
+
+    qtbot.waitUntil(lambda: stopped_while_open == [True], timeout=10000)
+
+    assert recorder.stop_calls == 1
+
+
+def test_elapsed_time_starts_at_zero_for_each_recording(recording_tab, qtbot):
+    panel = recording_tab.status_panel
+    panel.set_state(RecordingState.RECORDING)
+    panel._timer.stop()
+    panel._on_timer_tick()
+    panel._on_timer_tick()
+    panel.set_state(RecordingState.STOPPED)
+
+    panel.set_state(RecordingState.RECORDING)
+    panel._timer.stop()
+
+    assert panel.elapsed_label.text() == "00:00:00"
 
 
 def test_disk_critical_is_reported_once_not_every_second(recording_tab, qtbot, monkeypatch):
@@ -542,6 +605,7 @@ def test_disk_critical_is_reported_once_not_every_second(recording_tab, qtbot, m
 
     for _ in range(5):
         recording_tab.status_panel._on_timer_tick()
+    QApplication.processEvents()
 
     assert len(shown) == 1
     assert recording_tab._recorder.stop_calls == 0
@@ -550,6 +614,7 @@ def test_disk_critical_is_reported_once_not_every_second(recording_tab, qtbot, m
     recording_tab.status_panel._on_timer_tick()
     _disk_with(monkeypatch, free_gb=3)
     recording_tab.status_panel._on_timer_tick()
+    QApplication.processEvents()
 
     assert len(shown) == 2  # a new fall below the limit is a new warning
 

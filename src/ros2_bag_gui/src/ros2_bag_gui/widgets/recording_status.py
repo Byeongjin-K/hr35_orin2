@@ -143,6 +143,12 @@ class RecordingStatusPanel(QWidget):
             self.state_label.setStyleSheet(
                 "font-size: 13px; font-weight: bold; color: #e74c3c;"
             )
+            # A new recording: its elapsed time starts at zero, and it gets its
+            # own automatic stop even if the disk stayed below the warning level
+            # since the last one.
+            self._elapsed_seconds = 0
+            self._update_elapsed_display()
+            self._disk_full_reported = False
             self._timer.start(1000)
         elif state == RecordingState.STOPPED:
             self.state_label.setStyleSheet(

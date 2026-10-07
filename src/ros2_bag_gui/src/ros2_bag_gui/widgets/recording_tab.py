@@ -151,8 +151,14 @@ class RecordingTab(QWidget):
     
     def _connect_signals(self):
         self.settings_panel.settings_changed.connect(self._on_settings_changed)
-        self.status_panel.disk_critical.connect(self._on_disk_critical)
-        self.status_panel.disk_full.connect(self._on_disk_full)
+        # Queued: these come out of the status panel's one-second timer, and a
+        # timer does not fire again while its own slot is inside a dialog. Shown
+        # directly, the low-space warning would switch off the automatic stop
+        # for as long as it stays open.
+        self.status_panel.disk_critical.connect(
+            self._on_disk_critical, Qt.ConnectionType.QueuedConnection)
+        self.status_panel.disk_full.connect(
+            self._on_disk_full, Qt.ConnectionType.QueuedConnection)
     
     def _setup_ros2(self):
         self._ros2_thread = ROS2Thread(self)
@@ -242,6 +248,7 @@ class RecordingTab(QWidget):
         if not self._recorder.is_recording:
             return
 
+        self._recorder.check_health()
         counts = self._recorder.topic_counts
         hz_map = self._recorder.get_topic_hz()
         stats = {}
