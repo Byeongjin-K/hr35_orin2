@@ -71,15 +71,44 @@ def _tick(widget, names):
             item.setCheckState(0, Qt.CheckState.Checked)
 
 
+def _ticked_rows(widget):
+    """What the operator sees ticked in the tree right now."""
+    ticked = []
+
+    def visit(item):
+        name = item.data(0, Qt.ItemDataRole.UserRole)
+        if name and item.checkState(0) == Qt.CheckState.Checked:
+            ticked.append(name)
+        for i in range(item.childCount()):
+            visit(item.child(i))
+
+    for i in range(widget.tree.topLevelItemCount()):
+        visit(widget.tree.topLevelItem(i))
+    return sorted(ticked)
+
+
 def test_selection_survives_search_filter(topic_list, qtbot):
     _tick(topic_list, FIVE)
     assert sorted(topic_list.get_selected_topics()) == sorted(FIVE)
 
     topic_list.search_input.setText("lidar")
     assert sorted(topic_list.get_selected_topics()) == sorted(FIVE)
+    assert _ticked_rows(topic_list) == ['/lidar_boom/points']
 
     topic_list.search_input.setText("")
     assert sorted(topic_list.get_selected_topics()) == sorted(FIVE)
+    assert _ticked_rows(topic_list) == sorted(FIVE)
+
+
+def test_rebuilt_tree_shows_the_selection(topic_list, qtbot):
+    """The ticks on screen are the selection, also after refresh and view toggle."""
+    _tick(topic_list, FIVE)
+
+    topic_list.set_topics(MOCK_TOPICS)
+    assert _ticked_rows(topic_list) == sorted(FIVE)
+
+    topic_list.group_btn.setChecked(True)
+    assert _ticked_rows(topic_list) == sorted(FIVE)
 
 
 def test_ticking_while_filtered_adds_to_the_selection(topic_list, qtbot):
