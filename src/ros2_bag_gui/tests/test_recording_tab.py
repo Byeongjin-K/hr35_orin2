@@ -5,6 +5,7 @@ from PySide6.QtCore import Qt
 from ros2_bag_gui.widgets.recording_tab import RecordingTab
 from ros2_bag_gui.widgets.recording_status import RecordingState
 from ros2_bag_gui.config.profiles import RecordingProfile
+from ros2_bag_gui.ros2.ros2_thread import ROS2Thread
 
 
 MOCK_TOPICS = [
@@ -19,9 +20,44 @@ MOCK_TOPICS = [
 ]
 
 
+class FakeRecorder:
+    """Stands in for Recorder: notes what the tab asks for, starts no process."""
+
+    def __init__(self):
+        self.recording = False
+        self.start_result = True
+        self.started_with = None
+        self.stop_calls = 0
+        self.topic_counts = {}
+        self.session_path = ""
+
+    @property
+    def is_recording(self):
+        return self.recording
+
+    def start_recording(self, config, node):
+        self.started_with = config
+        self.recording = self.start_result
+        return self.start_result
+
+    def stop_recording(self, node=None):
+        self.stop_calls += 1
+        self.recording = False
+        return "/tmp/fake_session"
+
+    def get_topic_hz(self):
+        return {}
+
+
 @pytest.fixture
-def recording_tab(qtbot, tmp_path):
+def recording_tab(qtbot, tmp_path, monkeypatch, fake_node):
+    # Widget tests run without rclpy and without a recorder process: the tab
+    # talks to stand-ins. The real recording path is covered in test_recorder.py.
+    monkeypatch.setattr(ROS2Thread, "start", lambda self: None)
+    monkeypatch.setattr(ROS2Thread, "node", property(lambda self: fake_node))
     widget = RecordingTab()
+    widget._recorder = FakeRecorder()
+    widget.settings_panel._settings_manager.update(output_path=str(tmp_path / "recordings"))
     profiles_dir = str(tmp_path / "profiles")
     widget.profile_manager = widget.profile_manager.__class__(profiles_dir)
     qtbot.addWidget(widget)
@@ -76,8 +112,9 @@ def test_start_button_emits_signal(recording_tab, qtbot):
     assert 'topics' in config
     assert len(config['topics']) > 0
     assert config['session_name'] == "test_session"
-    assert 'split_mode' in config
-    assert 'split_size_gb' in config
+    assert config['lidar_mode'] == "bag"
+    assert config['camera_mode'] == "bag"
+    assert recording_tab._recorder.started_with.topics[0]['name'] == config['topics'][0]
 
 
 def test_start_button_updates_ui_state(recording_tab, qtbot):
@@ -184,7 +221,6 @@ def test_load_profile(recording_tab, qtbot, monkeypatch):
         save_path="/tmp/test_load",
         session_name_template="loaded_session",
         max_bag_size_gb=5.0,
-        include_images_without_sdk=False
     )
     recording_tab.profile_manager.save_profile(profile)
     recording_tab._load_profile_list()
@@ -197,7 +233,6 @@ def test_load_profile(recording_tab, qtbot, monkeypatch):
     assert recording_tab.settings_panel.path_edit.text() == "/tmp/test_load"
     assert recording_tab.settings_panel.session_name_edit.text() == "loaded_session"
     assert recording_tab.settings_panel.split_size_spin.value() == 5.0
-    assert not recording_tab.settings_panel.include_images_cb.isChecked()
     
     selected_topics = recording_tab.topic_list.get_selected_topics()
     assert MOCK_TOPICS[0]['name'] in selected_topics
