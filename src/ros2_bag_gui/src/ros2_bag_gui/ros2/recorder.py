@@ -1,6 +1,7 @@
 """Recording orchestrator: ros2 bag record subprocess + LAZ/SVO2 writers."""
 import re
 import os
+import shutil
 import time
 import threading
 from datetime import datetime
@@ -83,6 +84,7 @@ class Recorder(QObject):
     warning_occurred = Signal(str)  # recording goes on, but not the way it was asked for
 
     SVO2_OPEN_TIMEOUT_S = 30.0
+    MIN_FREE_BYTES = 1024**3  # below this, Start is refused
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -123,6 +125,13 @@ class Recorder(QObject):
             session_folder = self._generate_session_path()
             rosbag_path = os.path.join(session_folder, 'rosbag')
             os.makedirs(session_folder, exist_ok=True)
+            free = shutil.disk_usage(session_folder).free
+            if free < self.MIN_FREE_BYTES:
+                os.rmdir(session_folder)  # just created, still empty
+                raise RuntimeError(
+                    f"only {free / 1024**3:.1f} GB free in {config.output_path}; "
+                    "a recording would fill the disk and end without a readable bag"
+                )
 
             names = [t['name'] for t in config.topics]
             cb_group = ReentrantCallbackGroup()
@@ -371,12 +380,17 @@ class Recorder(QObject):
         except Exception as e:
             logger.debug("LAZ enqueue error for %s: %s", topic_name, e)
 
-    def stop_recording(self, node=None) -> str:
+    def stop_recording(self, node=None, reason: Optional[str] = None) -> str:
+        """Stop and close the session.
+
+        reason: set when the stop was not the operator's (e.g. the disk is nearly
+        full); it is written to sync_info.json as a forced stop.
+        """
         if not self._recording.is_set():
             return ""
-        return self._finish_session(node if node is not None else self._node, None)
+        return self._finish_session(node if node is not None else self._node, None, reason)
 
-    def _finish_session(self, node, failure: Optional[str]) -> str:
+    def _finish_session(self, node, failure: Optional[str], forced_reason: Optional[str] = None) -> str:
         self._recording.clear()
         session_folder = ""
 
@@ -406,7 +420,7 @@ class Recorder(QObject):
 
             if self._config:
                 session_folder = self._generate_session_path()
-                self._write_sync_info(session_folder, failure)
+                self._write_sync_info(session_folder, failure or forced_reason)
 
             self.recording_stopped.emit()
 

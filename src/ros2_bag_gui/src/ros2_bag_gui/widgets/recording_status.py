@@ -23,7 +23,12 @@ class DiskSpaceState(Enum):
 class RecordingStatusPanel(QWidget):
     """Panel showing recording status and statistics."""
     
-    disk_critical = Signal()
+    disk_critical = Signal()  # free space fell below DISK_CRITICAL_GB (once per fall)
+    disk_full = Signal()      # free space fell below DISK_STOP_GB while recording (once)
+
+    DISK_LOW_GB = 20
+    DISK_CRITICAL_GB = 5
+    DISK_STOP_GB = 1
 
     # While recording, the numbers are what the GUI's own subscription received:
     # a hint that data flows, not what is in the bag.
@@ -37,6 +42,8 @@ class RecordingStatusPanel(QWidget):
         self._elapsed_seconds = 0
         self._topic_stats: Dict[str, Dict] = {}
         self._target_path = "/"
+        self._disk_critical_reported = False
+        self._disk_full_reported = False
         self._setup_ui()
         self._setup_timer()
     
@@ -215,11 +222,23 @@ class RecordingStatusPanel(QWidget):
             
             self.disk_bar.setValue(used_percent)
             
-            if free_gb < 5:
+            if free_gb < self.DISK_CRITICAL_GB:
                 self.disk_label.setText(f"🛑 Disk critical! ({free_gb:.1f} GB)")
                 self.disk_label.setStyleSheet("color: #e74c3c; font-weight: bold;")
-                self.disk_critical.emit()
-            elif free_gb < 20:
+                # This runs every second: report each state once, not once per tick.
+                if (free_gb < self.DISK_STOP_GB and self._state == RecordingState.RECORDING
+                        and not self._disk_full_reported):
+                    self._disk_full_reported = True
+                    self._disk_critical_reported = True
+                    self.disk_full.emit()
+                elif not self._disk_critical_reported:
+                    self._disk_critical_reported = True
+                    self.disk_critical.emit()
+                return
+
+            self._disk_critical_reported = False
+            self._disk_full_reported = False
+            if free_gb < self.DISK_LOW_GB:
                 self.disk_label.setText(f"⚠️ Disk space low ({free_gb:.1f} GB)")
                 self.disk_label.setStyleSheet("color: #f39c12; font-weight: bold;")
             else:

@@ -171,6 +171,30 @@ class TestRecorderProcessLifecycle:
         assert sync['gui_received_counts'] == {'/excavator/status': 1}
         assert recorder.last_bag_counts is None
 
+    def test_start_is_refused_when_the_disk_is_nearly_full(self, qtbot, tmp_path, fake_node, fake_ros2, monkeypatch):
+        from collections import namedtuple
+        usage = namedtuple('usage', 'total used free')
+        monkeypatch.setattr('shutil.disk_usage', lambda path: usage(400 * 1024**2, 0, 400 * 1024**2))
+        recorder, log = _recorder_with_log()
+
+        assert recorder.start_recording(_config(tmp_path), fake_node) is False
+
+        assert not recorder.is_recording
+        assert recorder._bag_proc is None
+        assert len(log['errors']) == 1
+        assert os.listdir(tmp_path / 'out') == []
+
+    def test_forced_stop_reason_is_written_to_sync_info(self, qtbot, tmp_path, fake_node, fake_ros2):
+        recorder, log = _recorder_with_log()
+        assert recorder.start_recording(_config(tmp_path), fake_node) is True
+
+        recorder.stop_recording(fake_node, "disk nearly full")
+
+        sync = _sync_info(recorder)
+        assert sync['forced_stop'] is True
+        assert sync['stop_reason'] == "disk nearly full"
+        assert log['errors'] == []
+
     def test_split_by_time_is_passed_to_the_recorder(self, qtbot, tmp_path, fake_node, fake_ros2, monkeypatch):
         args_file = tmp_path / 'bag_args.json'
         monkeypatch.setenv('FAKE_ROS2_ARGS', str(args_file))

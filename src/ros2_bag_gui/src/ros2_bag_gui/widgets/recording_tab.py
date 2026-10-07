@@ -1,5 +1,6 @@
 """Recording tab widget that composes all recording-related widgets."""
 import os
+import shutil
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QComboBox,
     QLabel, QInputDialog, QMessageBox, QSplitter, QGroupBox
@@ -151,6 +152,7 @@ class RecordingTab(QWidget):
     def _connect_signals(self):
         self.settings_panel.settings_changed.connect(self._on_settings_changed)
         self.status_panel.disk_critical.connect(self._on_disk_critical)
+        self.status_panel.disk_full.connect(self._on_disk_full)
     
     def _setup_ros2(self):
         self._ros2_thread = ROS2Thread(self)
@@ -306,12 +308,26 @@ class RecordingTab(QWidget):
         self.status_panel.set_target_path(settings.output_path)
     
     def _on_disk_critical(self):
-        """Handle critical disk space warning."""
+        """Handle critical disk space warning (raised once per fall below the limit)."""
         QMessageBox.warning(
             self,
             "Disk Space Critical",
-            "Disk space is critically low! Recording may fail or stop automatically."
+            f"Less than {self.status_panel.DISK_CRITICAL_GB} GB free on the output disk. "
+            f"A running recording is stopped automatically below "
+            f"{self.status_panel.DISK_STOP_GB} GB."
         )
+
+    def _on_disk_full(self):
+        """Stop while the recorder can still close its bag; a full disk leaves it unreadable."""
+        if not self._recorder.is_recording:
+            return
+        reason = (
+            "Recording was stopped automatically: less than "
+            f"{self.status_panel.DISK_STOP_GB} GB free on the output disk."
+        )
+        self._stop_recording(reason)
+        self.status_panel.add_notice(reason)
+        QMessageBox.critical(self, "Recording Stopped", reason)
     
     def _on_start_clicked(self):
         """Handle start recording button click."""
@@ -337,6 +353,34 @@ class RecordingTab(QWidget):
                 "Please select an output path in the settings panel."
             )
             return
+
+        try:
+            os.makedirs(settings.output_path, exist_ok=True)
+            free_gb = shutil.disk_usage(settings.output_path).free / 1024**3
+        except OSError as e:
+            QMessageBox.critical(
+                self, "Output Path Not Usable",
+                f"Cannot write to {settings.output_path}:\n{e}"
+            )
+            return
+        if not os.access(settings.output_path, os.W_OK):
+            QMessageBox.critical(
+                self, "Output Path Not Usable",
+                f"No write permission for {settings.output_path}."
+            )
+            return
+        if self.status_panel.DISK_STOP_GB <= free_gb < self.status_panel.DISK_CRITICAL_GB:
+            reply = QMessageBox.question(
+                self,
+                "Disk Space Critical",
+                f"Only {free_gb:.1f} GB free in {settings.output_path}. The recording "
+                f"will be stopped automatically below {self.status_panel.DISK_STOP_GB} GB."
+                "\n\nStart anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
 
         if missing_topic_names:
             reply = QMessageBox.question(
@@ -418,12 +462,15 @@ class RecordingTab(QWidget):
     
     def _on_stop_clicked(self):
         """Handle stop recording button click."""
+        self._stop_recording()
+
+    def _stop_recording(self, forced_reason: Optional[str] = None):
         if not self._recorder.is_recording:
             return
 
         # The recorder keeps the node it started with, so Stop works even if
         # the ROS2 thread has gone away in the meantime.
-        session_folder = self._recorder.stop_recording(self._ros2_thread.node)
+        session_folder = self._recorder.stop_recording(self._ros2_thread.node, forced_reason)
         if session_folder:
             logger.info("Recording saved to: %s", session_folder)
 

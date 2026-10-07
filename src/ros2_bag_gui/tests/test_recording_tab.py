@@ -29,6 +29,7 @@ class FakeRecorder:
         self.started_with = None
         self.start_calls = 0
         self.stop_calls = 0
+        self.stop_reason = None
         self.topic_counts = {}
         self.session_path = ""
         self.last_bag_counts = {}
@@ -44,8 +45,9 @@ class FakeRecorder:
         self.recording = self.start_result
         return self.start_result
 
-    def stop_recording(self, node=None):
+    def stop_recording(self, node=None, reason=None):
         self.stop_calls += 1
+        self.stop_reason = reason
         self.recording = False
         return "/tmp/fake_session"
 
@@ -376,8 +378,9 @@ def test_live_numbers_are_labelled_as_received_by_the_gui(recording_tab, qtbot):
 def _load_profile(recording_tab, monkeypatch, topics):
     from PySide6.QtWidgets import QMessageBox
     monkeypatch.setattr(QMessageBox, 'information', lambda *args, **kwargs: None)
+    save_path = recording_tab.settings_panel.get_settings().output_path
     recording_tab.profile_manager.save_profile(RecordingProfile(
-        name="early_profile", selected_topics=topics, save_path="/tmp/test_load",
+        name="early_profile", selected_topics=topics, save_path=save_path,
     ))
     recording_tab._load_profile_list()
     recording_tab.profile_combo.setCurrentIndex(recording_tab.profile_combo.findText("early_profile"))
@@ -408,7 +411,6 @@ def test_start_asks_about_selected_topics_that_are_not_available(
     present, absent = MOCK_TOPICS[0]['name'], MOCK_TOPICS[2]['name']
     recording_tab.set_topics(MOCK_TOPICS[:2])
     _load_profile(recording_tab, monkeypatch, [present, absent])
-    recording_tab.settings_panel._settings_manager.update(output_path="/tmp/test_out")
 
     recording_tab._on_start_clicked()
     recording_tab.status_panel._timer.stop()
@@ -461,6 +463,95 @@ def test_split_mode_reaches_the_recorder(
     config = recording_tab._recorder.started_with
     assert config.max_bagfile_size == expected_bytes
     assert getattr(config, 'max_bag_duration', None) == expected_seconds
+
+
+def _disk_with(monkeypatch, free_gb):
+    from collections import namedtuple
+    usage = namedtuple('usage', 'total used free')
+    monkeypatch.setattr(
+        'shutil.disk_usage',
+        lambda path: usage(100 * 1024**3, int((100 - free_gb) * 1024**3), int(free_gb * 1024**3)),
+    )
+
+
+def _start_with_one_topic(recording_tab):
+    recording_tab.topic_list.list_btn.setChecked(True)
+    recording_tab.topic_list.tree.topLevelItem(0).setCheckState(0, Qt.CheckState.Checked)
+    recording_tab._on_start_clicked()
+    recording_tab.status_panel._timer.stop()
+
+
+@pytest.mark.parametrize("answer_yes", [False, True])
+def test_start_asks_when_the_disk_is_nearly_full(recording_tab, qtbot, monkeypatch, answer_yes):
+    from PySide6.QtWidgets import QMessageBox
+    asked = []
+
+    def question(parent, title, text, *args, **kwargs):
+        asked.append(text)
+        return QMessageBox.StandardButton.Yes if answer_yes else QMessageBox.StandardButton.No
+
+    monkeypatch.setattr(QMessageBox, 'question', question)
+    monkeypatch.setattr(QMessageBox, 'warning', lambda *args, **kwargs: None)
+    _disk_with(monkeypatch, free_gb=3)
+
+    _start_with_one_topic(recording_tab)
+
+    assert len(asked) == 1
+    assert recording_tab._recorder.start_calls == (1 if answer_yes else 0)
+
+
+def test_start_is_refused_when_the_output_path_cannot_be_created(recording_tab, qtbot, monkeypatch, tmp_path):
+    from PySide6.QtWidgets import QMessageBox
+    shown = []
+    monkeypatch.setattr(QMessageBox, 'critical', lambda *args, **kwargs: shown.append(args[2]))
+    blocker = tmp_path / "a_file"
+    blocker.write_text("")
+    recording_tab.settings_panel._settings_manager.update(output_path=str(blocker / "recordings"))
+
+    _start_with_one_topic(recording_tab)
+
+    assert len(shown) == 1
+    assert recording_tab._recorder.start_calls == 0
+
+
+def test_recording_is_stopped_once_when_the_disk_runs_full(recording_tab, qtbot, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    shown = []
+    monkeypatch.setattr(QMessageBox, 'critical', lambda *args, **kwargs: shown.append(args[2]))
+    monkeypatch.setattr(QMessageBox, 'warning', lambda *args, **kwargs: shown.append(args[2]))
+    _start_with_one_topic(recording_tab)
+    recording_tab.status_panel.set_state(RecordingState.RECORDING)
+    recording_tab.status_panel._timer.stop()
+    _disk_with(monkeypatch, free_gb=0.5)
+
+    for _ in range(5):  # five one-second ticks with the disk nearly full
+        recording_tab.status_panel._on_timer_tick()
+
+    assert recording_tab._recorder.stop_calls == 1
+    assert recording_tab._recorder.stop_reason
+    assert len(shown) == 1
+    assert recording_tab.start_btn.isEnabled()
+
+
+def test_disk_critical_is_reported_once_not_every_second(recording_tab, qtbot, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    shown = []
+    monkeypatch.setattr(QMessageBox, 'warning', lambda *args, **kwargs: shown.append(args[2]))
+    _start_with_one_topic(recording_tab)
+    _disk_with(monkeypatch, free_gb=3)
+
+    for _ in range(5):
+        recording_tab.status_panel._on_timer_tick()
+
+    assert len(shown) == 1
+    assert recording_tab._recorder.stop_calls == 0
+
+    _disk_with(monkeypatch, free_gb=50)
+    recording_tab.status_panel._on_timer_tick()
+    _disk_with(monkeypatch, free_gb=3)
+    recording_tab.status_panel._on_timer_tick()
+
+    assert len(shown) == 2  # a new fall below the limit is a new warning
 
 
 def test_delete_profile(recording_tab, qtbot, monkeypatch):
