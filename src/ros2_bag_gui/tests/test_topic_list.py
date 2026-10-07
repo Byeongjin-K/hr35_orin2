@@ -54,3 +54,87 @@ def test_checkbox_selection(topic_list, qtbot):
     first_item.setCheckState(0, Qt.CheckState.Checked)
     selected = topic_list.get_selected_topics()
     assert len(selected) == 1
+
+
+FIVE = [
+    '/excavator/sensors/gnss_position', '/excavator/status', '/lidar_boom/points',
+    '/zedx_boom/left/image', '/tf',
+]
+
+
+def _tick(widget, names):
+    """Tick topics the way a user does: on the rows of the list view."""
+    widget.list_btn.setChecked(True)
+    for i in range(widget.tree.topLevelItemCount()):
+        item = widget.tree.topLevelItem(i)
+        if item.text(0) in names:
+            item.setCheckState(0, Qt.CheckState.Checked)
+
+
+def test_selection_survives_search_filter(topic_list, qtbot):
+    _tick(topic_list, FIVE)
+    assert sorted(topic_list.get_selected_topics()) == sorted(FIVE)
+
+    topic_list.search_input.setText("lidar")
+    assert sorted(topic_list.get_selected_topics()) == sorted(FIVE)
+
+    topic_list.search_input.setText("")
+    assert sorted(topic_list.get_selected_topics()) == sorted(FIVE)
+
+
+def test_ticking_while_filtered_adds_to_the_selection(topic_list, qtbot):
+    _tick(topic_list, ['/tf'])
+    topic_list.search_input.setText("imu")
+    _tick(topic_list, ['/lidar_boom/imu'])
+    topic_list.search_input.setText("")
+
+    assert sorted(topic_list.get_selected_topics()) == ['/lidar_boom/imu', '/tf']
+
+
+def test_selection_survives_a_topic_missing_for_one_refresh(topic_list, qtbot):
+    _tick(topic_list, FIVE)
+
+    topic_list.set_topics([t for t in MOCK_TOPICS if t['name'] != '/lidar_boom/points'])
+    topic_list.set_topics(MOCK_TOPICS)
+
+    assert sorted(topic_list.get_selected_topics()) == sorted(FIVE)
+
+
+def test_selection_survives_view_toggle(topic_list, qtbot):
+    _tick(topic_list, FIVE)
+
+    topic_list.group_btn.setChecked(True)
+
+    assert sorted(topic_list.get_selected_topics()) == sorted(FIVE)
+
+
+def test_ticking_a_group_selects_its_topics(topic_list, qtbot):
+    group = next(
+        topic_list.tree.topLevelItem(i) for i in range(topic_list.tree.topLevelItemCount())
+        if topic_list.tree.topLevelItem(i).text(0) == 'EXCAVATOR'
+    )
+
+    group.setCheckState(0, Qt.CheckState.Checked)
+
+    assert sorted(topic_list.get_selected_topics()) == [
+        '/excavator/sensors/gnss_position', '/excavator/status',
+    ]
+
+
+def test_missing_selected_topics_are_reported_not_dropped(topic_list, qtbot):
+    _tick(topic_list, FIVE)
+
+    topic_list.set_topics([t for t in MOCK_TOPICS if t['name'] != '/lidar_boom/points'])
+
+    assert '/lidar_boom/points' not in topic_list.get_selected_topics()
+    assert topic_list.get_missing_selected() == ['/lidar_boom/points']
+    assert '/lidar_boom/points' in topic_list.get_selected_topics(include_missing=True)
+
+
+def test_unticking_removes_from_the_selection(topic_list, qtbot):
+    _tick(topic_list, FIVE)
+    topic_list.tree.topLevelItem(0).setCheckState(0, Qt.CheckState.Unchecked)
+    topic_list.search_input.setText("x")
+    topic_list.search_input.setText("")
+
+    assert len(topic_list.get_selected_topics()) == len(FIVE) - 1

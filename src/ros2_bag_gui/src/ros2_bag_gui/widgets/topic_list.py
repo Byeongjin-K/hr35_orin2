@@ -38,6 +38,10 @@ class TopicListWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._topics: List[Dict] = []
+        # The selection lives here, not in the tree: the tree is rebuilt on every
+        # filter keystroke, view toggle and 5 s refresh, and only shows this set.
+        # A selected topic that is not in the current list stays selected.
+        self._selected: set = set()
         self._group_view = True
         self._setup_ui()
     
@@ -103,16 +107,14 @@ class TopicListWidget(QWidget):
     def set_topics(self, topics: List[Dict]):
         """
         Set the list of topics to display.
-        Preserves checkbox selections across refreshes.
+        Preserves checkbox selections across refreshes, also for a topic that
+        is missing from this list and comes back in a later one.
         
         Args:
             topics: List of dicts, each containing 'name', 'type', 'hz', 'category'
         """
-        previously_selected = set(self.get_selected_topics())
         self._topics = topics
         self._refresh_tree()
-        if previously_selected:
-            self._restore_selections(previously_selected)
     
     def _refresh_tree(self):
         """Rebuild the tree based on current view mode and filter text."""
@@ -169,7 +171,10 @@ class TopicListWidget(QWidget):
             hz_text,
         ])
         item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-        item.setCheckState(0, Qt.CheckState.Unchecked)
+        item.setCheckState(
+            0,
+            Qt.CheckState.Checked if topic['name'] in self._selected else Qt.CheckState.Unchecked,
+        )
         item.setData(0, Qt.ItemDataRole.UserRole, topic['name'])
 
         if isinstance(parent, QTreeWidget):
@@ -204,49 +209,52 @@ class TopicListWidget(QWidget):
     
     def _on_item_changed(self, item: QTreeWidgetItem, column: int):
         """Handle item check state change."""
+        topic_name = item.data(0, Qt.ItemDataRole.UserRole)
+        if topic_name:  # a topic row; group rows only pass the change on to their topics
+            if item.checkState(0) == Qt.CheckState.Checked:
+                self._selected.add(topic_name)
+            else:
+                self._selected.discard(topic_name)
         self._update_selection_count()
         self.selection_changed.emit(self.get_selected_topics())
     
     def _update_selection_count(self):
         """Update the selection label text."""
         count = len(self.get_selected_topics())
-        self.selection_label.setText(f"{count} topics selected")
-    
-    def _restore_selections(self, topic_names: set):
-        self.tree.blockSignals(True)
+        missing = self.get_missing_selected()
+        if missing:
+            self.selection_label.setText(
+                f"{count} topics selected + {len(missing)} selected but not available now: "
+                + ", ".join(missing)
+            )
+            self.selection_label.setStyleSheet("color: #c0392b; font-weight: bold;")
+        else:
+            self.selection_label.setText(f"{count} topics selected")
+            self.selection_label.setStyleSheet("color: #666; font-weight: bold;")
 
-        def restore_item(item):
-            if item.childCount() == 0:
-                name = item.data(0, Qt.ItemDataRole.UserRole)
-                if name and name in topic_names:
-                    item.setCheckState(0, Qt.CheckState.Checked)
-            else:
-                for i in range(item.childCount()):
-                    restore_item(item.child(i))
+    def set_selected_topics(self, topic_names):
+        """Replace the selection (e.g. from a profile).
 
-        for i in range(self.tree.topLevelItemCount()):
-            restore_item(self.tree.topLevelItem(i))
+        Names that are not in the current topic list are kept: they show up as
+        "selected but not available" and get ticked when the topic appears.
+        """
+        self._selected = set(topic_names)
+        self._refresh_tree()
+        self.selection_changed.emit(self.get_selected_topics())
 
-        self.tree.blockSignals(False)
-        self._update_selection_count()
+    def get_selected_topics(self, include_missing: bool = False) -> List[str]:
+        """Selected topic names that are in the current topic list.
 
-    def get_selected_topics(self) -> List[str]:
-        """Get list of selected topic names."""
-        selected = []
-        
-        def collect_checked(item):
-            # If it's a leaf node (topic), check its state
-            if item.childCount() == 0:
-                # Ensure it's actually a topic item (has UserRole data)
-                topic_name = item.data(0, Qt.ItemDataRole.UserRole)
-                if topic_name and item.checkState(0) == Qt.CheckState.Checked:
-                    selected.append(topic_name)
-            else:
-                # If it's a group, recurse
-                for i in range(item.childCount()):
-                    collect_checked(item.child(i))
-        
-        for i in range(self.tree.topLevelItemCount()):
-            collect_checked(self.tree.topLevelItem(i))
-        
+        The search filter does not matter: a selected topic that is filtered
+        out of view is still selected. With include_missing, selected topics
+        that are not in the current list are appended.
+        """
+        selected = [t['name'] for t in self._topics if t['name'] in self._selected]
+        if include_missing:
+            selected += self.get_missing_selected()
         return selected
+
+    def get_missing_selected(self) -> List[str]:
+        """Selected topic names that are not in the current topic list."""
+        available = {t['name'] for t in self._topics}
+        return sorted(self._selected - available)

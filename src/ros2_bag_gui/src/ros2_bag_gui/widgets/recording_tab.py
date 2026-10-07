@@ -319,8 +319,9 @@ class RecordingTab(QWidget):
 
         settings = self.settings_panel.get_settings()
         selected_topic_names = self.topic_list.get_selected_topics()
+        missing_topic_names = self.topic_list.get_missing_selected()
         
-        if not selected_topic_names:
+        if not selected_topic_names and not missing_topic_names:
             QMessageBox.warning(
                 self,
                 "No Topics Selected",
@@ -335,6 +336,21 @@ class RecordingTab(QWidget):
                 "Please select an output path in the settings panel."
             )
             return
+
+        if missing_topic_names:
+            reply = QMessageBox.question(
+                self,
+                "Selected Topics Not Available",
+                f"{len(missing_topic_names)} selected topic(s) are not available right now:\n\n"
+                + "\n".join(missing_topic_names)
+                + "\n\nStart anyway? They are recorded only from the moment they appear.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+            # The recorder subscribes to a named topic when it shows up later.
+            selected_topic_names = selected_topic_names + missing_topic_names
         
         topic_type_map = {t['name']: t['type'] for t in self._topics}
         topics_with_types = [
@@ -365,6 +381,11 @@ class RecordingTab(QWidget):
         
         self._set_controls(recording=True)
         self.status_panel.set_state(RecordingState.RECORDING)
+        if missing_topic_names:
+            self.status_panel.add_notice(
+                "Not available at Start (recorded only once they appear): "
+                + ", ".join(missing_topic_names)
+            )
         self.status_panel.set_target_path(settings.output_path)
         
         config = {
@@ -417,7 +438,7 @@ class RecordingTab(QWidget):
                 return
         
         settings = self.settings_panel.get_settings()
-        selected_topics = self.topic_list.get_selected_topics()
+        selected_topics = self.topic_list.get_selected_topics(include_missing=True)
         
         profile = RecordingProfile(
             name=name,
@@ -457,11 +478,9 @@ class RecordingTab(QWidget):
         try:
             profile = self.profile_manager.load_profile(profile_name)
             
-            for i in range(self.topic_list.tree.topLevelItemCount()):
-                item = self.topic_list.tree.topLevelItem(i)
-                self._uncheck_item_recursive(item)
-            
-            self._check_topics(profile.selected_topics)
+            # Topics of the profile that are not up yet stay selected.
+            self.topic_list.set_selected_topics(profile.selected_topics)
+            missing_topics = self.topic_list.get_missing_selected()
             
             self.settings_panel.path_edit.setText(profile.save_path)
             self.settings_panel.session_name_edit.setText(profile.session_name_template)
@@ -475,6 +494,12 @@ class RecordingTab(QWidget):
             self.settings_panel._on_settings_changed()
             
             message = f"Profile '{profile_name}' loaded successfully."
+            if missing_topics:
+                message += (
+                    f"\n\n{len(missing_topics)} topic(s) of the profile are not available right now:\n"
+                    + "\n".join(missing_topics)
+                    + "\n\nThey stay selected and are ticked as soon as they appear."
+                )
             if not camera_mode_ok:
                 message += (
                     f"\n\nThe profile asks for camera mode '{profile.camera_mode}', "
@@ -539,26 +564,6 @@ class RecordingTab(QWidget):
             index = self.profile_combo.findText(current_text)
             if index >= 0:
                 self.profile_combo.setCurrentIndex(index)
-    
-    def _uncheck_item_recursive(self, item):
-        """Recursively uncheck an item and its children."""
-        item.setCheckState(0, Qt.CheckState.Unchecked)
-        for i in range(item.childCount()):
-            self._uncheck_item_recursive(item.child(i))
-    
-    def _check_topics(self, topic_names: List[str]):
-        """Check topics by name in the topic list."""
-        def check_item_recursive(item):
-            if item.childCount() == 0:
-                topic_name = item.data(0, Qt.ItemDataRole.UserRole)
-                if topic_name in topic_names:
-                    item.setCheckState(0, Qt.CheckState.Checked)
-            else:
-                for i in range(item.childCount()):
-                    check_item_recursive(item.child(i))
-        
-        for i in range(self.topic_list.tree.topLevelItemCount()):
-            check_item_recursive(self.topic_list.tree.topLevelItem(i))
     
     def set_topics(self, topics: List[Dict]):
         """

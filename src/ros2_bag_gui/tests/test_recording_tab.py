@@ -372,6 +372,54 @@ def test_live_numbers_are_labelled_as_received_by_the_gui(recording_tab, qtbot):
     assert recording_tab.status_panel.LIVE_HEADERS != recording_tab.status_panel.FINAL_HEADERS
 
 
+def _load_profile(recording_tab, monkeypatch, topics):
+    from PySide6.QtWidgets import QMessageBox
+    monkeypatch.setattr(QMessageBox, 'information', lambda *args, **kwargs: None)
+    recording_tab.profile_manager.save_profile(RecordingProfile(
+        name="early_profile", selected_topics=topics, save_path="/tmp/test_load",
+    ))
+    recording_tab._load_profile_list()
+    recording_tab.profile_combo.setCurrentIndex(recording_tab.profile_combo.findText("early_profile"))
+    recording_tab._on_load_profile()
+
+
+def test_profile_loaded_before_all_topics_are_up_keeps_them_selected(recording_tab, qtbot, monkeypatch):
+    wanted = [MOCK_TOPICS[0]['name'], MOCK_TOPICS[2]['name'], MOCK_TOPICS[4]['name']]
+    recording_tab.set_topics(MOCK_TOPICS[:2])  # the sensors are not up yet
+
+    _load_profile(recording_tab, monkeypatch, wanted)
+    recording_tab.set_topics(MOCK_TOPICS)  # a later refresh finds them
+
+    assert sorted(recording_tab.topic_list.get_selected_topics()) == sorted(wanted)
+
+
+@pytest.mark.parametrize("answer_yes", [False, True])
+def test_start_asks_about_selected_topics_that_are_not_available(
+        recording_tab, qtbot, monkeypatch, answer_yes):
+    from PySide6.QtWidgets import QMessageBox
+    asked = []
+
+    def question(parent, title, text, *args, **kwargs):
+        asked.append(text)
+        return QMessageBox.StandardButton.Yes if answer_yes else QMessageBox.StandardButton.No
+
+    monkeypatch.setattr(QMessageBox, 'question', question)
+    present, absent = MOCK_TOPICS[0]['name'], MOCK_TOPICS[2]['name']
+    recording_tab.set_topics(MOCK_TOPICS[:2])
+    _load_profile(recording_tab, monkeypatch, [present, absent])
+    recording_tab.settings_panel._settings_manager.update(output_path="/tmp/test_out")
+
+    recording_tab._on_start_clicked()
+    recording_tab.status_panel._timer.stop()
+
+    assert len(asked) == 1 and absent in asked[0]
+    if answer_yes:
+        recorded = [t['name'] for t in recording_tab._recorder.started_with.topics]
+        assert recorded == [present, absent]
+    else:
+        assert recording_tab._recorder.start_calls == 0
+
+
 def test_delete_profile(recording_tab, qtbot, monkeypatch):
     """Test profile delete functionality."""
     profile = RecordingProfile(
