@@ -198,6 +198,14 @@ class RecordingTab(QWidget):
             self.refresh_btn.setEnabled(False)
             self._refresh_timer.stop()
             logger.warning("ROS2 disconnected")
+            if self._recorder.is_recording:
+                # The bag is written by its own process and goes on. What ran
+                # on this node does not: live counts and LAZ recording.
+                self._on_recorder_warning(
+                    "The GUI lost its ROS2 connection while recording. The bag goes on, "
+                    "but the live counts have stopped and LAZ point clouds are no longer "
+                    "written. Stop, restart the GUI and start a new recording."
+                )
     
     def _on_topics_discovered(self, topics: List[Dict]):
         self._topics = topics

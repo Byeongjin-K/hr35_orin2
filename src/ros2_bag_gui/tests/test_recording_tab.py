@@ -328,6 +328,22 @@ def test_load_profile_with_svo2_without_sdk_uses_bag(recording_tab, qtbot, monke
     assert recording_tab.settings_panel.get_settings().camera_mode == "bag"
 
 
+def test_losing_ros_while_recording_is_reported(recording_tab, qtbot, monkeypatch):
+    """LAZ recording runs on the GUI's node: when the node goes, lidar stops being written."""
+    from PySide6.QtWidgets import QMessageBox
+    shown = []
+    monkeypatch.setattr(QMessageBox, 'warning', lambda *args, **kwargs: shown.append(args[2]))
+
+    recording_tab._on_connection_changed(False)
+    assert shown == []  # idle: the label is enough
+
+    recording_tab._recorder.recording = True
+    recording_tab._on_connection_changed(False)
+
+    assert len(shown) == 1
+    assert not recording_tab.status_panel.notice_label.isHidden()
+
+
 def test_recorder_warning_stays_on_screen(recording_tab, qtbot, monkeypatch):
     from PySide6.QtWidgets import QMessageBox
     shown = []
