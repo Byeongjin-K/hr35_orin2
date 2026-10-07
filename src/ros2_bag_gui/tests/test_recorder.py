@@ -175,6 +175,19 @@ class TestRecorderProcessLifecycle:
         assert len(log['errors']) == 1
         assert _sync_info(recorder)['forced_stop'] is True
 
+    def test_second_start_is_refused_and_first_keeps_recording(self, qtbot, tmp_path, fake_node, fake_ros2):
+        recorder, log = _recorder_with_log()
+        assert recorder.start_recording(_config(tmp_path), fake_node) is True
+        first = recorder._bag_proc
+
+        assert recorder.start_recording(_config(tmp_path), fake_node) is False
+
+        assert recorder.is_recording
+        assert recorder._bag_proc is first and first.is_running
+        assert len(log['errors']) == 1
+        recorder.stop_recording(fake_node)
+        assert not first.is_running
+
     def test_stop_works_without_a_node(self, qtbot, tmp_path, fake_node, fake_ros2):
         recorder, log = _recorder_with_log()
         assert recorder.start_recording(_config(tmp_path), fake_node) is True

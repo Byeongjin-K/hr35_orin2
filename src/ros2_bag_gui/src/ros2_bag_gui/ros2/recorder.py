@@ -92,6 +92,12 @@ class Recorder(QObject):
         self._node = None
 
     def start_recording(self, config: RecordingConfig, node) -> bool:
+        if self._recording.is_set():
+            # A second Start would orphan the running recorder and break its bag.
+            self.error_occurred.emit(
+                "A recording is already running. Stop it before starting another."
+            )
+            return False
         try:
             self._node = node
             self._config = config

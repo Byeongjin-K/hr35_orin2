@@ -33,3 +33,16 @@ def test_menu_bar_exists(main_window):
     """Test menu bar has File and Help menus."""
     menu_bar = main_window.menuBar()
     assert menu_bar is not None
+
+def test_recording_menu_follows_recording_state(main_window):
+    """Start is not offered while recording, Stop is not offered while idle."""
+    assert main_window.start_recording_action.isEnabled()
+    assert not main_window.stop_recording_action.isEnabled()
+
+    main_window.recording_tab.recording_active_changed.emit(True)
+    assert not main_window.start_recording_action.isEnabled()
+    assert main_window.stop_recording_action.isEnabled()
+
+    main_window.recording_tab.recording_active_changed.emit(False)
+    assert main_window.start_recording_action.isEnabled()
+    assert not main_window.stop_recording_action.isEnabled()

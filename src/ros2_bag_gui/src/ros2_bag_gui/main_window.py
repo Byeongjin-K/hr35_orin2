@@ -81,6 +81,10 @@ class MainWindow(QMainWindow):
         self.stop_recording_action.setShortcut("Ctrl+S")
         self.stop_recording_action.triggered.connect(self.recording_tab._on_stop_clicked)
         recording_menu.addAction(self.stop_recording_action)
+
+        # The menu follows the buttons: no Start while recording, no Stop while idle.
+        self.stop_recording_action.setEnabled(False)
+        self.recording_tab.recording_active_changed.connect(self._on_recording_active_changed)
         
         help_menu = menu_bar.addMenu("&Help")
         about_action = QAction("&About", self)
@@ -101,6 +105,10 @@ class MainWindow(QMainWindow):
             quit_callback=self.close,
         )
     
+    def _on_recording_active_changed(self, recording: bool):
+        self.start_recording_action.setEnabled(not recording)
+        self.stop_recording_action.setEnabled(recording)
+
     def _on_start_recording(self):
         self.recording_started.emit()
         self.status_bar.showMessage("Recording started")

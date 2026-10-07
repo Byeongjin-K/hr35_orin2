@@ -31,6 +31,7 @@ class RecordingTab(QWidget):
     # Signals for MainWindow to connect
     recording_start_requested = Signal(object)  # Emits recording config dict
     recording_stop_requested = Signal()
+    recording_active_changed = Signal(bool)  # True while a recording is running
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -247,11 +248,16 @@ class RecordingTab(QWidget):
         if not self._recorder.is_recording:
             # Put the screen right before the dialog, so what is behind it is true.
             self._stats_timer.stop()
-            self.start_btn.setEnabled(True)
-            self.stop_btn.setEnabled(False)
+            self._set_controls(recording=False)
             self.status_panel.set_state(RecordingState.ERROR)
         QMessageBox.critical(self, "Recording Error", error_msg)
     
+    def _set_controls(self, recording: bool):
+        """Start/Stop buttons, and whoever mirrors them (the menu), follow one state."""
+        self.start_btn.setEnabled(not recording)
+        self.stop_btn.setEnabled(recording)
+        self.recording_active_changed.emit(recording)
+
     def cleanup(self):
         if self._recorder.is_recording:
             self._recorder.stop_recording(self._ros2_thread.node)
@@ -281,6 +287,9 @@ class RecordingTab(QWidget):
     
     def _on_start_clicked(self):
         """Handle start recording button click."""
+        if self._recorder.is_recording:
+            return
+
         settings = self.settings_panel.get_settings()
         selected_topic_names = self.topic_list.get_selected_topics()
         
@@ -326,8 +335,7 @@ class RecordingTab(QWidget):
         if not success:
             return
         
-        self.start_btn.setEnabled(False)
-        self.stop_btn.setEnabled(True)
+        self._set_controls(recording=True)
         self.status_panel.set_state(RecordingState.RECORDING)
         self.status_panel.set_target_path(settings.output_path)
         
@@ -351,8 +359,7 @@ class RecordingTab(QWidget):
         if session_folder:
             logger.info("Recording saved to: %s", session_folder)
 
-        self.start_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
+        self._set_controls(recording=False)
         if self.status_panel._state != RecordingState.ERROR:
             self.status_panel.set_state(RecordingState.STOPPED)
         
@@ -534,6 +541,5 @@ class RecordingTab(QWidget):
     
     def reset(self):
         """Reset the recording tab to initial state."""
-        self.start_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
+        self._set_controls(recording=False)
         self.status_panel.reset()

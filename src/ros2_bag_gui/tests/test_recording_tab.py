@@ -27,6 +27,7 @@ class FakeRecorder:
         self.recording = False
         self.start_result = True
         self.started_with = None
+        self.start_calls = 0
         self.stop_calls = 0
         self.topic_counts = {}
         self.session_path = ""
@@ -37,6 +38,7 @@ class FakeRecorder:
 
     def start_recording(self, config, node):
         self.started_with = config
+        self.start_calls += 1
         self.recording = self.start_result
         return self.start_result
 
@@ -236,6 +238,21 @@ def test_stop_still_stops_when_ros_node_is_gone(recording_tab, qtbot, monkeypatc
 
     assert recording_tab._recorder.stop_calls == 1
     assert not recording_tab._recorder.is_recording
+
+
+def test_start_while_recording_does_not_start_again(recording_tab, qtbot):
+    """Menu and shortcut reach the same slot as the button; a second Start must be a no-op."""
+    recording_tab.topic_list.list_btn.setChecked(True)
+    recording_tab.topic_list.tree.topLevelItem(0).setCheckState(0, Qt.CheckState.Checked)
+    active = []
+    recording_tab.recording_active_changed.connect(active.append)
+
+    recording_tab._on_start_clicked()
+    recording_tab.status_panel._timer.stop()
+    recording_tab._on_start_clicked()
+
+    assert recording_tab._recorder.start_calls == 1
+    assert active == [True]
 
 
 def test_save_profile(recording_tab, qtbot, monkeypatch):
