@@ -36,6 +36,7 @@ def create_sync_info(
     stop_reason: Optional[str] = None,
     notices: Optional[List[str]] = None,
     bag_message_counts: Optional[Dict[str, int]] = None,
+    recorder_warnings: Optional[List[str]] = None,
 ) -> str:
     """Create sync_info.json in session folder.
 
@@ -50,6 +51,7 @@ def create_sync_info(
         lidar_mode: "bag", "laz", or "both" (the mode really in effect).
         camera_mode: "bag", "svo2", or "both" (the mode really in effect).
         notices: What was done differently from what was asked (mode fallbacks).
+        recorder_warnings: Problem lines printed by ros2 bag record (first 50).
         laz_file_count: Number of LAZ files written (if lidar_mode != "bag").
         svo2_files: List of SVO2 file paths (if camera_mode != "bag").
         forced_stop: Whether recording was force-stopped.
@@ -112,6 +114,10 @@ def create_sync_info(
 
     if notices:
         sync_info["notices"] = list(notices)
+
+    if recorder_warnings:
+        sync_info["recorder_warnings"] = list(recorder_warnings[:50])
+        sync_info["recorder_warning_count"] = len(recorder_warnings)
 
     if forced_stop:
         sync_info["forced_stop"] = True

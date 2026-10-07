@@ -103,6 +103,7 @@ class Recorder(QObject):
         self._stuck_threads: List[object] = []
         self._bag_topics: List[str] = []
         self._bag_counts: Optional[Dict[str, int]] = None
+        self._bag_warnings: List[str] = []
 
     def start_recording(self, config: RecordingConfig, node) -> bool:
         if self._recording.is_set():
@@ -150,6 +151,8 @@ class Recorder(QObject):
             bag_proc.stopped.connect(
                 lambda _path, proc=bag_proc: self._on_bag_stopped(proc)
             )
+            self._bag_warnings = []
+            bag_proc.warning.connect(self._on_bag_warning)
             if not bag_proc.start(
                 rosbag_path, bag_topics, max_bag_size=config.max_bagfile_size
             ):
@@ -289,6 +292,19 @@ class Recorder(QObject):
                     pass
         self._hz_subscriptions.clear()
         self._laz_subscriptions.clear()
+
+    def _on_bag_warning(self, line: str):
+        """The recorder reported a problem (e.g. messages lost to a slow disk).
+
+        This also arrives while Stop waits for the recorder to close the bag.
+        """
+        self._bag_warnings.append(line)
+        if len(self._bag_warnings) == 1:  # one dialog; the rest goes to the log and sync_info
+            self.warning_occurred.emit(
+                f"ros2 bag record reported a problem: {line} "
+                "Data may be missing from the bag. "
+                "Further recorder messages are in the log and in sync_info.json."
+            )
 
     def _on_bag_stopped(self, proc: BagProcess):
         """The recorder process ended. During a recording that means data is being lost."""
@@ -436,6 +452,7 @@ class Recorder(QObject):
             camera_mode=self._effective_modes[1],
             notices=self._notices,
             bag_message_counts=self._bag_counts,
+            recorder_warnings=self._bag_warnings,
             laz_file_count=laz_file_count,
             svo2_files=svo2_files,
             forced_stop=failure is not None,

@@ -1,5 +1,6 @@
 """Tests for recorder."""
 import json
+import logging
 import os
 import signal
 import threading
@@ -167,6 +168,40 @@ class TestRecorderProcessLifecycle:
         assert sync['topic_message_counts'] is None
         assert sync['gui_received_counts'] == {'/excavator/status': 1}
         assert recorder.last_bag_counts is None
+
+    def test_recorder_problem_output_reaches_the_log(
+            self, qtbot, tmp_path, fake_node, fake_ros2, monkeypatch, caplog):
+        monkeypatch.setenv('FAKE_ROS2_MODE', 'warn')
+        # Under pytest in a ROS environment the package loggers do not propagate
+        # (test_logging_config.py works around the same thing).
+        monkeypatch.setattr(logging.getLogger('ros2_bag_gui.ros2.bag_process'), 'propagate', True)
+        caplog.set_level(logging.INFO)
+        recorder, log = _recorder_with_log()
+
+        assert recorder.start_recording(_config(tmp_path), fake_node) is True
+
+        # The session log file keeps INFO and above; the console shows WARNING and above.
+        qtbot.waitUntil(
+            lambda: any(r.levelno >= logging.WARNING and 'lost messages' in r.getMessage()
+                        for r in caplog.records),
+            timeout=10000,
+        )
+        recorder.stop_recording(fake_node)
+
+    def test_recorder_problem_output_is_shown_and_kept(
+            self, qtbot, tmp_path, fake_node, fake_ros2, monkeypatch):
+        monkeypatch.setenv('FAKE_ROS2_MODE', 'warn')
+        recorder, log = _recorder_with_log()
+        warnings = []
+        recorder.warning_occurred.connect(warnings.append)
+
+        with qtbot.waitSignal(recorder.warning_occurred, timeout=10000):
+            recorder.start_recording(_config(tmp_path), fake_node)
+        recorder.stop_recording(fake_node)
+
+        assert len(warnings) == 1
+        assert log['errors'] == []
+        assert len(_sync_info(recorder)['recorder_warnings']) == 1
 
     def test_recorder_exit_during_recording_is_reported(self, qtbot, tmp_path, fake_node, fake_ros2):
         recorder, log = _recorder_with_log()

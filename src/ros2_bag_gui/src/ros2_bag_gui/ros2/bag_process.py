@@ -1,4 +1,5 @@
 """Subprocess wrapper for ros2 bag record."""
+import re
 from collections import deque
 from typing import List, Optional
 
@@ -7,12 +8,17 @@ from ros2_bag_gui.logging_config import get_logger
 
 logger = get_logger(__name__)
 
+# Recorder output that means data may be missing: its own WARN/ERROR lines, and
+# the cache overrun report ("Cache buffers lost messages per topic").
+_PROBLEM_LINE = re.compile(r"\[(WARN|WARNING|ERROR|FATAL)\]|\blost\b|\bdropped\b", re.IGNORECASE)
+
 
 class BagProcess(QObject):
 
     started = Signal()
     stopped = Signal(str)
     error_occurred = Signal(str)
+    warning = Signal(str)  # a line of recorder output that reports a problem
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -124,4 +130,9 @@ class BagProcess(QObject):
         if data:
             for line in data.splitlines():
                 self._stderr_tail.append(line.strip()[:200])
-                logger.debug("[ros2 bag] %s", line)
+                # INFO, not DEBUG: the session log is the only place this output is kept.
+                if _PROBLEM_LINE.search(line):
+                    logger.warning("[ros2 bag] %s", line)
+                    self.warning.emit(line.strip())
+                else:
+                    logger.info("[ros2 bag] %s", line)
