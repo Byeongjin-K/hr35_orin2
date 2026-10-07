@@ -1,5 +1,4 @@
 """Pytest configuration and fixtures"""
-import json
 import os
 import stat
 import sys
