@@ -2,7 +2,10 @@
 import json
 import os
 import signal
+import threading
+from types import SimpleNamespace
 import pytest
+from PySide6.QtWidgets import QApplication
 from ros2_bag_gui.ros2.recorder import (
     should_include_in_rosbag, should_record_lidar_laz,
     RecordingConfig, Recorder, SYSTEM_EXCLUDE
@@ -197,3 +200,136 @@ class TestRecorderProcessLifecycle:
         assert not recorder.is_recording
         assert fake_node.live_subscriptions == []
         assert log['errors'] == []
+
+
+STATUS = {'name': '/excavator/status', 'type': 'std_msgs/msg/String'}
+BOOM_IMAGE = {'name': '/zedx_boom/zed_node/left/image_rect_color', 'type': 'sensor_msgs/msg/Image'}
+CABIN_IMAGE = {'name': '/zedx_cabin/zed_node/left/image_rect_color', 'type': 'sensor_msgs/msg/Image'}
+BOOM_CLOUD = {'name': '/lidar_boom/points', 'type': 'sensor_msgs/msg/PointCloud2'}
+
+
+def _fake_zed_sdk(monkeypatch, opens=True, fail_after_grabs=None):
+    """A stand-in for pyzed.sl: a camera that opens (or not) and delivers frames."""
+    sl = SimpleNamespace(grabs=0, frame_period=threading.Event())
+    sl.ERROR_CODE = SimpleNamespace(
+        SUCCESS='SUCCESS', END_OF_SVOFILE_REACHED='EOF', FAILURE='CAMERA NOT DETECTED')
+    sl.DEPTH_MODE = SimpleNamespace(NONE=0)
+    sl.RESOLUTION = SimpleNamespace(HD1200=1)
+    sl.SVO_COMPRESSION_MODE = SimpleNamespace(H265=1)
+    sl.InitParameters = SimpleNamespace
+    sl.RecordingParameters = SimpleNamespace
+    sl.RuntimeParameters = SimpleNamespace
+
+    class Camera:
+        def open(self, params):
+            return sl.ERROR_CODE.SUCCESS if opens else sl.ERROR_CODE.FAILURE
+
+        def enable_recording(self, params):
+            open(params.video_filename, 'wb').close()
+            return sl.ERROR_CODE.SUCCESS
+
+        def grab(self, runtime):
+            sl.frame_period.wait(0.005)  # the camera's frame period
+            sl.grabs += 1
+            if fail_after_grabs is not None and sl.grabs > fail_after_grabs:
+                raise RuntimeError("camera disconnected")
+            return sl.ERROR_CODE.SUCCESS
+
+        def disable_recording(self):
+            pass
+
+        def close(self):
+            pass
+
+    sl.Camera = Camera
+    monkeypatch.setattr('ros2_bag_gui.zed.svo_writer.get_sl_module', lambda: sl)
+    monkeypatch.setattr('ros2_bag_gui.ros2.recorder.is_zed_sdk_available', lambda: True)
+    return sl
+
+
+class TestSideRecorders:
+    """A topic leaves the bag only when the recorder that takes it instead is running."""
+
+    @pytest.fixture
+    def session(self, qtbot, tmp_path, fake_node, fake_ros2, monkeypatch):
+        args_file = tmp_path / 'bag_args.json'
+        monkeypatch.setenv('FAKE_ROS2_ARGS', str(args_file))
+        recorder, log = _recorder_with_log()
+        log['warnings'] = []
+        recorder.warning_occurred.connect(log['warnings'].append)
+
+        def start(topics, **modes):
+            config = RecordingConfig(
+                topics=topics, output_path=str(tmp_path / 'out'), session_name='t', **modes)
+            assert recorder.start_recording(config, fake_node) is True
+            ready = os.path.join(recorder.session_path, 'rosbag', 'ready')
+            qtbot.waitUntil(lambda: os.path.exists(ready), timeout=10000)
+            return json.loads(args_file.read_text())
+
+        yield SimpleNamespace(recorder=recorder, log=log, start=start)
+        recorder.stop_recording(fake_node)
+
+    def test_svo2_without_sdk_keeps_images_in_bag(self, session, monkeypatch):
+        monkeypatch.setattr('ros2_bag_gui.ros2.recorder.is_zed_sdk_available', lambda: False)
+
+        bag_args = session.start([STATUS, BOOM_IMAGE], camera_mode='svo2')
+
+        assert BOOM_IMAGE['name'] in bag_args
+        assert len(session.log['warnings']) == 1
+        session.recorder.stop_recording()
+        sync = _sync_info(session.recorder)
+        assert sync['recording_modes']['camera'] == 'bag'
+        assert len(sync['notices']) == 1
+
+    def test_svo2_camera_that_does_not_open_keeps_images_in_bag(self, session, monkeypatch):
+        _fake_zed_sdk(monkeypatch, opens=False)
+
+        bag_args = session.start([STATUS, BOOM_IMAGE], camera_mode='svo2')
+        QApplication.processEvents()  # deliver the writer's queued error, if any
+
+        assert BOOM_IMAGE['name'] in bag_args
+        assert len(session.log['warnings']) == 1
+        assert session.log['errors'] == []  # reported once, as the warning
+
+    def test_svo2_recording_takes_images_out_of_the_bag(self, session, monkeypatch):
+        _fake_zed_sdk(monkeypatch)
+
+        bag_args = session.start([STATUS, BOOM_IMAGE], camera_mode='svo2')
+
+        assert BOOM_IMAGE['name'] not in bag_args
+        assert STATUS['name'] in bag_args
+        assert session.log['warnings'] == []
+        session.recorder.stop_recording()
+        assert os.path.exists(os.path.join(session.recorder.session_path, 'camera_0.svo2'))
+        assert _sync_info(session.recorder)['recording_modes']['camera'] == 'svo2'
+
+    def test_svo2_with_two_cameras_keeps_images_in_bag(self, session, monkeypatch):
+        _fake_zed_sdk(monkeypatch)
+
+        bag_args = session.start([BOOM_IMAGE, CABIN_IMAGE], camera_mode='svo2')
+
+        assert BOOM_IMAGE['name'] in bag_args and CABIN_IMAGE['name'] in bag_args
+        assert len(session.log['warnings']) == 1
+
+    def test_svo2_failure_while_recording_is_reported(self, session, qtbot, monkeypatch):
+        _fake_zed_sdk(monkeypatch, fail_after_grabs=3)
+
+        with qtbot.waitSignal(session.recorder.error_occurred, timeout=10000):
+            session.start([STATUS, BOOM_IMAGE], camera_mode='svo2')
+
+        assert len(session.log['errors']) == 1
+        assert session.recorder.is_recording  # the bag goes on
+
+    def test_lidar_that_laz_cannot_subscribe_to_stays_in_bag(self, session):
+        cloud = {'name': BOOM_CLOUD['name'], 'type': 'no_such_pkg/msg/Nope'}
+
+        bag_args = session.start([STATUS, cloud], lidar_mode='laz')
+
+        assert cloud['name'] in bag_args
+        assert len(session.log['warnings']) == 1
+
+    def test_laz_recording_takes_lidar_out_of_the_bag(self, session):
+        bag_args = session.start([STATUS, BOOM_CLOUD], lidar_mode='laz')
+
+        assert BOOM_CLOUD['name'] not in bag_args
+        assert session.log['warnings'] == []

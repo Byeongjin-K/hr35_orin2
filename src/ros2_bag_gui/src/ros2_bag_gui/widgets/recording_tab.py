@@ -165,6 +165,10 @@ class RecordingTab(QWidget):
         self._recorder.recording_stopped.connect(self._on_recorder_stopped)
         self._recorder.message_recorded.connect(self._on_message_recorded)
         self._recorder.error_occurred.connect(self._on_recorder_error)
+        # Queued: raised from inside Start, shown once the screen says Recording.
+        self._recorder.warning_occurred.connect(
+            self._on_recorder_warning, Qt.ConnectionType.QueuedConnection
+        )
         
         self._ros2_thread.start()
     
@@ -252,6 +256,12 @@ class RecordingTab(QWidget):
             self.status_panel.set_state(RecordingState.ERROR)
         QMessageBox.critical(self, "Recording Error", error_msg)
     
+    def _on_recorder_warning(self, message: str):
+        """Recording goes on, but not the way it was asked for."""
+        logger.warning("Recording warning: %s", message)
+        self.status_panel.add_notice(message)
+        QMessageBox.warning(self, "Recording Warning", message)
+
     def _set_controls(self, recording: bool):
         """Start/Stop buttons, and whoever mirrors them (the menu), follow one state."""
         self.start_btn.setEnabled(not recording)
@@ -331,6 +341,7 @@ class RecordingTab(QWidget):
             QMessageBox.warning(self, "ROS2 Not Ready", "ROS2 node is not connected yet.")
             return
         
+        self.status_panel.clear_notices()
         success = self._recorder.start_recording(recording_config, node)
         if not success:
             return
@@ -442,16 +453,18 @@ class RecordingTab(QWidget):
             lidar_mode_map = {"bag": 0, "laz": 1, "both": 2}
             self.settings_panel.lidar_mode_combo.setCurrentIndex(lidar_mode_map.get(profile.lidar_mode, 0))
             # Load Camera mode
-            camera_mode_map = {"bag": 0, "svo2": 1, "both": 2}
-            self.settings_panel.camera_mode_combo.setCurrentIndex(camera_mode_map.get(profile.camera_mode, 0))
+            camera_mode_ok = self.settings_panel.set_camera_mode(profile.camera_mode)
             
             self.settings_panel._on_settings_changed()
             
-            QMessageBox.information(
-                self,
-                "Profile Loaded",
-                f"Profile '{profile_name}' loaded successfully."
-            )
+            message = f"Profile '{profile_name}' loaded successfully."
+            if not camera_mode_ok:
+                message += (
+                    f"\n\nThe profile asks for camera mode '{profile.camera_mode}', "
+                    "but the ZED SDK is not installed here. "
+                    "Camera images will be recorded into the bag."
+                )
+            QMessageBox.information(self, "Profile Loaded", message)
             
         except FileNotFoundError:
             QMessageBox.warning(

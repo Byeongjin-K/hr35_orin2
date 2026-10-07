@@ -7,7 +7,7 @@ from datetime import datetime
 from collections import deque
 from typing import List, Dict, Optional
 from dataclasses import dataclass
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Signal, Slot
 
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
@@ -62,6 +62,10 @@ def should_include_in_rosbag(
     return True
 
 
+def _is_camera_image_topic(topic_name: str) -> bool:
+    return any(re.match(p, topic_name) for p in CAMERA_IMAGE_TOPICS)
+
+
 def should_record_lidar_laz(topic_name: str, lidar_mode: str) -> bool:
     for p in LIDAR_TOPICS:
         if re.match(p, topic_name):
@@ -75,6 +79,9 @@ class Recorder(QObject):
     recording_stopped = Signal()
     message_recorded = Signal(str, int)
     error_occurred = Signal(str)
+    warning_occurred = Signal(str)  # recording goes on, but not the way it was asked for
+
+    SVO2_OPEN_TIMEOUT_S = 30.0
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -90,6 +97,10 @@ class Recorder(QObject):
         self._session_start_time: Optional[datetime] = None
         self._recording = threading.Event()
         self._node = None
+        self._effective_modes = ("bag", "bag")  # (lidar, camera) really in effect
+        self._notices: List[str] = []
+        self._laz_error_reported = False
+        self._stuck_threads: List[object] = []
 
     def start_recording(self, config: RecordingConfig, node) -> bool:
         if self._recording.is_set():
@@ -109,9 +120,22 @@ class Recorder(QObject):
             rosbag_path = os.path.join(session_folder, 'rosbag')
             os.makedirs(session_folder, exist_ok=True)
 
+            names = [t['name'] for t in config.topics]
+            cb_group = ReentrantCallbackGroup()
+            notices: List[str] = []
+            self._laz_error_reported = False
+
+            # Side recorders come up first: a topic is left out of the bag only
+            # once the recorder that takes it instead is known to be running.
+            camera_mode = self._start_camera_recording(config, session_folder, names, notices)
+            keep_in_bag = self._start_lidar_recording(config, session_folder, node, cb_group, notices)
+            self._effective_modes = (config.lidar_mode, camera_mode)
+            self._notices = notices
+
             bag_topics = [
-                t['name'] for t in config.topics
-                if should_include_in_rosbag(t['name'], config.lidar_mode, config.camera_mode)
+                name for name in names
+                if name in keep_in_bag
+                or should_include_in_rosbag(name, config.lidar_mode, camera_mode)
             ]
 
             bag_proc = BagProcess(self)
@@ -127,39 +151,15 @@ class Recorder(QObject):
             ):
                 raise RuntimeError(bag_proc.last_error)
 
-            if config.lidar_mode in ("laz", "both"):
-                pointcloud_dir = os.path.join(session_folder, 'pointcloud')
-                self._laz_writer = LAZWriterThread(pointcloud_dir, parent=None)
-                self._laz_writer.error_occurred.connect(
-                    lambda msg: logger.error("LAZ writer error: %s", msg)
-                )
-                self._laz_writer.start()
-                logger.info("LAZ writer started: %s", pointcloud_dir)
-
-            if config.camera_mode in ("svo2", "both") and is_zed_sdk_available():
-                svo2_path = os.path.join(session_folder, 'camera_0.svo2')
-                svo2_config = SVO2Config(output_path=svo2_path, camera_index=0)
-                writer = SVO2WriterThread(svo2_config, parent=None)
-                writer.error_occurred.connect(
-                    lambda msg: logger.error("SVO2 writer error: %s", msg)
-                )
-                writer.start()
-                self._svo2_writers.append(writer)
-                logger.info("SVO2 writer started: %s", svo2_path)
-
             self._recording.set()
-
-            cb_group = ReentrantCallbackGroup()
-
-            if config.lidar_mode in ("laz", "both"):
-                for topic in config.topics:
-                    if should_record_lidar_laz(topic['name'], config.lidar_mode):
-                        self._create_laz_subscription(node, topic['name'], topic['type'], cb_group)
 
             for topic in config.topics:
                 self._create_hz_subscription(node, topic['name'], topic['type'], cb_group)
 
             self.recording_started.emit()
+            for notice in notices:
+                logger.warning(notice)
+                self.warning_occurred.emit(notice)
             return True
 
         except Exception as e:
@@ -175,11 +175,106 @@ class Recorder(QObject):
             self._bag_proc.stop()
             self._bag_proc = None
         if self._laz_writer is not None:
-            self._laz_writer.stop()
+            self._retire_thread(self._laz_writer)
             self._laz_writer = None
         for writer in self._svo2_writers:
-            writer.stop()
+            self._retire_thread(writer)
         self._svo2_writers.clear()
+
+    def _retire_thread(self, thread) -> None:
+        """Stop a writer thread; keep it referenced if it will not stop.
+
+        Dropping a QThread that is still running aborts the whole program.
+        """
+        if not thread.stop():
+            logger.warning("%s did not stop in time; left running", type(thread).__name__)
+            self._stuck_threads.append(thread)
+
+    def _start_camera_recording(self, config, session_folder, names, notices) -> str:
+        """Start SVO2 recording if asked for; return the camera mode really in effect."""
+        mode = config.camera_mode
+        if mode not in ("svo2", "both"):
+            return mode
+        reason = self._start_svo2_writer(session_folder)
+        if reason:
+            notices.append(
+                f"SVO2 recording is NOT running: {reason}. "
+                "Camera images are recorded into the bag instead."
+            )
+            return "bag"
+        cameras = sorted({n.split('/')[1] for n in names if _is_camera_image_topic(n)})
+        if mode == "svo2" and len(cameras) > 1:
+            notices.append(
+                "SVO2 records one camera only (camera index 0), but image topics of "
+                f"{len(cameras)} cameras are selected ({', '.join(cameras)}). "
+                "All camera images are also kept in the bag."
+            )
+            return "both"
+        return mode
+
+    def _start_svo2_writer(self, session_folder: str) -> Optional[str]:
+        """Returns None once SVO2 is recording, else the reason it is not."""
+        if not is_zed_sdk_available():
+            return "the ZED SDK (pyzed) is not installed"
+        svo2_path = os.path.join(session_folder, 'camera_0.svo2')
+        svo2_config = SVO2Config(output_path=svo2_path, camera_index=0)
+        writer = SVO2WriterThread(svo2_config, parent=None)
+        writer.error_occurred.connect(self._on_svo2_error)
+        writer.start()
+        if not writer.wait_until_recording(self.SVO2_OPEN_TIMEOUT_S):
+            self._retire_thread(writer)
+            return writer.last_error or "the camera could not be opened"
+        self._svo2_writers.append(writer)
+        logger.info("SVO2 writer started: %s", svo2_path)
+        return None
+
+    def _start_lidar_recording(self, config, session_folder, node, cb_group, notices) -> set:
+        """Start LAZ recording if asked for; return the lidar topics that must stay in the bag."""
+        if config.lidar_mode not in ("laz", "both"):
+            return set()
+        pointcloud_dir = os.path.join(session_folder, 'pointcloud')
+        os.makedirs(pointcloud_dir, exist_ok=True)
+        self._laz_writer = LAZWriterThread(pointcloud_dir, parent=None)
+        self._laz_writer.error_occurred.connect(self._on_laz_error)
+        self._laz_writer.start()
+        logger.info("LAZ writer started: %s", pointcloud_dir)
+
+        failed = set()
+        for topic in config.topics:
+            if should_record_lidar_laz(topic['name'], config.lidar_mode):
+                if not self._create_laz_subscription(node, topic['name'], topic['type'], cb_group):
+                    failed.add(topic['name'])
+        if failed:
+            notices.append(
+                f"LAZ recording could not subscribe to {', '.join(sorted(failed))}. "
+                "These topics are recorded into the bag."
+            )
+        return failed
+
+    @Slot(str)
+    def _on_svo2_error(self, msg: str):
+        logger.error("SVO2 writer error: %s", msg)
+        # A failure while opening is handled by Start itself (the writer is not listed yet).
+        if self.sender() in self._svo2_writers and self._recording.is_set():
+            if self._effective_modes[1] == "both":
+                consequence = "Camera images are still recorded into the bag."
+            else:
+                consequence = (
+                    "Camera images are NOT being recorded any more. "
+                    "Stop and start a new recording."
+                )
+            self.error_occurred.emit(f"SVO2 recording failed: {msg}. {consequence}")
+
+    @Slot(str)
+    def _on_laz_error(self, msg: str):
+        logger.error("LAZ writer error: %s", msg)
+        if self._recording.is_set() and not self._laz_error_reported:
+            self._laz_error_reported = True  # one dialog per session, the rest is in the log
+            if self._effective_modes[0] == "both":
+                consequence = "The point clouds are still recorded into the bag."
+            else:
+                consequence = "Point cloud frames are being lost."
+            self.error_occurred.emit(f"LAZ writing failed: {msg}. {consequence}")
 
     def _destroy_subscriptions(self, node):
         if node is not None:
@@ -217,7 +312,7 @@ class Recorder(QObject):
         except Exception as e:
             logger.warning("Hz subscription failed for %s: %s", topic_name, e)
 
-    def _create_laz_subscription(self, node, topic_name: str, topic_type: str, cb_group):
+    def _create_laz_subscription(self, node, topic_name: str, topic_type: str, cb_group) -> bool:
         try:
             msg_class = get_message(topic_type)
 
@@ -229,8 +324,10 @@ class Recorder(QObject):
                 callback_group=cb_group, raw=True,
             )
             self._laz_subscriptions.append(sub)
+            return True
         except Exception as e:
             logger.error("LAZ subscription failed for %s: %s", topic_name, e)
+            return False
 
     def _on_raw_tick(self, topic_name: str):
         if not self._recording.is_set():
@@ -265,7 +362,7 @@ class Recorder(QObject):
             self._destroy_subscriptions(node)
 
             if self._laz_writer is not None:
-                self._laz_writer.stop()
+                self._retire_thread(self._laz_writer)
                 logger.info("LAZ writer stopped: %d files", self._laz_writer.file_count)
                 self._laz_writer = None
 
@@ -280,7 +377,7 @@ class Recorder(QObject):
                 self._bag_proc = None
 
             for writer in self._svo2_writers:
-                writer.stop()
+                self._retire_thread(writer)
                 logger.info("SVO2 writer stopped: %d frames at %s",
                             writer.frame_count, writer.output_path)
             self._svo2_writers.clear()
@@ -330,8 +427,9 @@ class Recorder(QObject):
             self._session_start_time,
             datetime.now(),
             self._topic_counts,
-            lidar_mode=self._config.lidar_mode,
-            camera_mode=self._config.camera_mode,
+            lidar_mode=self._effective_modes[0],
+            camera_mode=self._effective_modes[1],
+            notices=self._notices,
             laz_file_count=laz_file_count,
             svo2_files=svo2_files,
             forced_stop=failure is not None,

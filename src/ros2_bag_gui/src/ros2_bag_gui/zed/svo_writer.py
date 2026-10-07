@@ -60,15 +60,24 @@ class SVO2WriterThread(QThread):
     error_occurred = Signal(str)
     recording_stopped = Signal(str)
 
+    FAILED_GRABS_BEFORE_ERROR = 75  # about 5 s at 15 fps
+
     def __init__(self, config: SVO2Config, parent=None):
         super().__init__(parent)
         self._config = config
         self._running = False
+        self._stop_requested = False
         self._frame_count = 0
 
         # Thread-safe ROS timestamp (set from ROS callback thread)
         self._ts_lock = threading.Lock()
         self._latest_ros_ts: Optional[int] = None
+
+        # Start-up outcome, so the caller can wait for "really recording" before
+        # it decides to leave the camera topics out of the bag.
+        self._settled = threading.Event()
+        self._opened = False
+        self._last_error = ""
 
     # ------------------------------------------------------------------
     # Public API
@@ -85,10 +94,34 @@ class SVO2WriterThread(QThread):
         with self._ts_lock:
             self._latest_ros_ts = timestamp_ns
 
-    def stop(self) -> None:
-        """Request the recording loop to stop and wait for the thread."""
+    def wait_until_recording(self, timeout_s: float) -> bool:
+        """Block until the camera is open and recording, or has failed to.
+
+        Returns True only if SVO2 recording is running. On False, see last_error.
+        """
+        if not self._settled.wait(timeout_s):
+            self._last_error = f"the camera did not open within {timeout_s:.0f} s"
+            return False
+        return self._opened
+
+    @property
+    def last_error(self) -> str:
+        return self._last_error
+
+    def _fail(self, message: str) -> None:
+        self._last_error = message
+        self._settled.set()
+        self.error_occurred.emit(message)
+
+    def stop(self) -> bool:
+        """Request the recording loop to stop and wait for the thread.
+
+        Returns False if the thread is still running after the wait; the caller
+        must then keep a reference to it (destroying a running QThread aborts).
+        """
         self._running = False
-        self.wait(10_000)  # Wait up to 10 s for graceful shutdown
+        self._stop_requested = True
+        return self.wait(10_000)  # Wait up to 10 s for graceful shutdown
 
     @property
     def frame_count(self) -> int:
@@ -111,7 +144,7 @@ class SVO2WriterThread(QThread):
         """Open camera, enable SVO2 recording, and grab frames until stopped."""
         sl = get_sl_module()
         if sl is None:
-            self.error_occurred.emit(
+            self._fail(
                 "ZED SDK (pyzed) is not installed. Cannot record SVO2."
             )
             return
@@ -147,7 +180,7 @@ class SVO2WriterThread(QThread):
                 camera = sl.Camera()
 
             if status != sl.ERROR_CODE.SUCCESS:
-                self.error_occurred.emit(
+                self._fail(
                     f"Failed to open ZED camera: {status} "
                     f"(serial={self._config.camera_serial!r}, "
                     f"index={self._config.camera_index})"
@@ -168,7 +201,7 @@ class SVO2WriterThread(QThread):
 
             status = camera.enable_recording(rec_params)
             if status != sl.ERROR_CODE.SUCCESS:
-                self.error_occurred.emit(
+                self._fail(
                     f"Failed to enable SVO2 recording: {status}"
                 )
                 camera.close()
@@ -184,13 +217,17 @@ class SVO2WriterThread(QThread):
             )
 
             # ---- Grab loop ----
-            self._running = True
+            self._running = not self._stop_requested
             self._frame_count = 0
             runtime = sl.RuntimeParameters()
+            self._opened = True
+            self._settled.set()
+            failed_grabs = 0
 
             while self._running:
                 err = camera.grab(runtime)
                 if err == sl.ERROR_CODE.SUCCESS:
+                    failed_grabs = 0
                     self._frame_count += 1
                     self._embed_ros_timestamp(sl, camera)
                     self.frame_recorded.emit(self._frame_count)
@@ -200,9 +237,16 @@ class SVO2WriterThread(QThread):
                 else:
                     # Transient grab errors (e.g. frame drop) — log & retry.
                     logger.debug("ZED grab returned %s, retrying", err)
+                    failed_grabs += 1
+                    if failed_grabs == self.FAILED_GRABS_BEFORE_ERROR:
+                        # No longer transient: say so once, keep trying.
+                        self.error_occurred.emit(
+                            f"ZED camera has delivered no frame for {failed_grabs} "
+                            f"grabs in a row (last: {err})"
+                        )
 
         except Exception as exc:
-            self.error_occurred.emit(f"SVO2 recording error: {exc}")
+            self._fail(f"SVO2 recording error: {exc}")
             logger.exception("SVO2 recording error")
 
         finally:
@@ -217,6 +261,7 @@ class SVO2WriterThread(QThread):
                 pass
 
             self._running = False
+            self._settled.set()
             logger.info(
                 "SVO2 recording stopped: %s (%d frames)",
                 self._config.output_path,

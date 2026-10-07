@@ -211,10 +211,11 @@ class LAZWriterThread(QThread):
             self.dropped.emit(self._drop_count)
             return False
 
-    def stop(self):
+    def stop(self) -> bool:
+        """Returns False if the thread is still running after the wait."""
         self._running = False
         self._queue.put(None)
-        self.wait(10000)
+        return self.wait(10000)
     
     @property
     def file_count(self) -> int:

@@ -302,6 +302,35 @@ def test_load_profile(recording_tab, qtbot, monkeypatch):
     assert MOCK_TOPICS[1]['name'] in selected_topics
 
 
+def test_load_profile_with_svo2_without_sdk_uses_bag(recording_tab, qtbot, monkeypatch):
+    """A profile cannot switch on a camera mode that this machine cannot record."""
+    from PySide6.QtWidgets import QMessageBox
+    monkeypatch.setattr(QMessageBox, 'information', lambda *args, **kwargs: None)
+    monkeypatch.setattr(recording_tab.settings_panel, '_zed_available', False)
+    recording_tab.profile_manager.save_profile(RecordingProfile(
+        name="svo2_profile", selected_topics=[], save_path="/tmp/test_load", camera_mode="svo2",
+    ))
+    recording_tab._load_profile_list()
+    recording_tab.profile_combo.setCurrentIndex(recording_tab.profile_combo.findText("svo2_profile"))
+
+    recording_tab._on_load_profile()
+
+    assert recording_tab.settings_panel.camera_mode_combo.currentIndex() == 0
+    assert recording_tab.settings_panel.get_settings().camera_mode == "bag"
+
+
+def test_recorder_warning_stays_on_screen(recording_tab, qtbot, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    shown = []
+    monkeypatch.setattr(QMessageBox, 'warning', lambda *args, **kwargs: shown.append(args[2]))
+
+    recording_tab._on_recorder_warning("images go to the bag")
+
+    assert shown == ["images go to the bag"]
+    assert "images go to the bag" in recording_tab.status_panel.notice_label.text()
+    assert not recording_tab.status_panel.notice_label.isHidden()
+
+
 def test_delete_profile(recording_tab, qtbot, monkeypatch):
     """Test profile delete functionality."""
     profile = RecordingProfile(

@@ -187,18 +187,35 @@ class SettingsPanel(QWidget):
 
         camera_mode_map = {"bag": 0, "svo2": 1, "both": 2}
         idx = camera_mode_map.get(s.camera_mode, 0)
-        if not self._zed_available and idx > 0:
+        camera_mode_unavailable = not self._zed_available and idx > 0
+        if camera_mode_unavailable:
             idx = 0
         self.camera_mode_combo.setCurrentIndex(idx)
 
         for w in widgets:
             w.blockSignals(False)
 
+        if camera_mode_unavailable:
+            # The combo cannot show a mode the stored settings do not have:
+            # recording uses the stored value, so store what is shown.
+            self._settings_manager.update(camera_mode="bag")
+
         # Enable/disable split controls without triggering save
         split_idx = self.split_combo.currentIndex()
         self.split_size_spin.setEnabled(split_idx == 0)
         self.split_time_spin.setEnabled(split_idx == 1)
     
+    def set_camera_mode(self, mode: str) -> bool:
+        """Select a camera mode (e.g. from a profile).
+
+        Returns False if the mode needs the ZED SDK and it is not there; the
+        panel then shows, and stores, "bag".
+        """
+        idx = {"bag": 0, "svo2": 1, "both": 2}.get(mode, 0)
+        available = self._zed_available or idx == 0
+        self.camera_mode_combo.setCurrentIndex(idx if available else 0)
+        return available
+
     def _save_settings(self):
         """Save UI state to settings."""
         mode_map = {0: "size", 1: "time", 2: "none"}

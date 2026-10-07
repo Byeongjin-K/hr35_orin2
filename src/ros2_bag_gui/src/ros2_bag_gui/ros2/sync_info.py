@@ -15,7 +15,8 @@ def create_sync_info(
     laz_file_count: int = 0,
     svo2_files: Optional[List[str]] = None,
     forced_stop: bool = False,
-    stop_reason: Optional[str] = None
+    stop_reason: Optional[str] = None,
+    notices: Optional[List[str]] = None,
 ) -> str:
     """Create sync_info.json in session folder.
 
@@ -24,8 +25,9 @@ def create_sync_info(
         start_time: Recording start time.
         end_time: Recording end time.
         topic_counts: Dict of topic_name → message count.
-        lidar_mode: "bag", "laz", or "both".
-        camera_mode: "bag", "svo2", or "both".
+        lidar_mode: "bag", "laz", or "both" (the mode really in effect).
+        camera_mode: "bag", "svo2", or "both" (the mode really in effect).
+        notices: What was done differently from what was asked (mode fallbacks).
         laz_file_count: Number of LAZ files written (if lidar_mode != "bag").
         svo2_files: List of SVO2 file paths (if camera_mode != "bag").
         forced_stop: Whether recording was force-stopped.
@@ -76,6 +78,9 @@ def create_sync_info(
         "data_sources": data_sources,
         "topic_message_counts": topic_counts
     }
+
+    if notices:
+        sync_info["notices"] = list(notices)
 
     if forced_stop:
         sync_info["forced_stop"] = True

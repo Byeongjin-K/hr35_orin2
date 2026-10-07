@@ -50,6 +50,16 @@ class RecordingStatusPanel(QWidget):
         state_layout.addStretch()
         
         layout.addWidget(state_group)
+
+        # Stays on screen for the whole session: what is being recorded
+        # differently from what was asked for.
+        self.notice_label = QLabel("")
+        self.notice_label.setWordWrap(True)
+        self.notice_label.setStyleSheet(
+            "color: #000; background-color: #f9e79f; padding: 4px; font-weight: bold;"
+        )
+        self.notice_label.setVisible(False)
+        layout.addWidget(self.notice_label)
         
         storage_group = QGroupBox("Storage")
         storage_layout = QVBoxLayout(storage_group)
@@ -141,6 +151,15 @@ class RecordingStatusPanel(QWidget):
             self._timer.stop()
             self._update_disk_space(self._target_path)
     
+    def add_notice(self, text: str):
+        current = self.notice_label.text()
+        self.notice_label.setText(f"{current}\n⚠️ {text}" if current else f"⚠️ {text}")
+        self.notice_label.setVisible(True)
+
+    def clear_notices(self):
+        self.notice_label.setText("")
+        self.notice_label.setVisible(False)
+
     def update_topic_stats(self, stats: Dict[str, Dict]):
         self._topic_stats = stats
         self.stats_table.setRowCount(len(stats))
@@ -194,6 +213,7 @@ class RecordingStatusPanel(QWidget):
     
     def reset(self):
         self.set_state(RecordingState.READY)
+        self.clear_notices()
         self._topic_stats.clear()
         self.stats_table.setRowCount(0)
         self.update_storage_sizes(0, 0, 0)
