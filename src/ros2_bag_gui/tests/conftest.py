@@ -54,7 +54,12 @@ def fake_node():
 # A stand-in for the `ros2` executable, so the real QProcess path of BagProcess
 # runs without ROS. It behaves like `ros2 bag record`: creates the bag folder,
 # runs until SIGINT/SIGTERM, then writes metadata.yaml and exits 0.
-# FAKE_ROS2_MODE: run (default) | fail (exit 3 at once) | warn (print a recorder warning).
+# FAKE_ROS2_MODE:
+#   run (default)  | fail (exit 3 at once)       | warn (print a recorder warning at start)
+#   info_lost      (an INFO line about a topic named /gps/lost)
+#   warn_on_close  (report lost messages while closing, as rosbag2 does)
+#   slowclose      (keep writing to the bag for a second before closing)
+#   hang           (ignore the request to stop)
 # FAKE_ROS2_COUNTS: JSON {topic: count} written into metadata.yaml on a clean stop.
 # FAKE_ROS2_ARGS: file that receives the argument list as JSON.
 _FAKE_ROS2 = r'''#!%(python)s
@@ -72,6 +77,16 @@ os.makedirs(out)
 open(os.path.join(out, 'rosbag_0.db3'), 'wb').close()
 
 def close_bag(*_):
+    if mode == 'slowclose':
+        with open(os.path.join(out, 'rosbag_0.db3'), 'ab') as f:
+            for _ in range(20):
+                f.write(b'x' * 4096)
+                f.flush()
+                time.sleep(0.05)
+    if mode == 'warn_on_close':
+        sys.stderr.write('[WARN] [rosbag2_cpp]: Cache buffers lost messages per topic:\n')
+        sys.stderr.write('\t/excavator/status: 12\nTotal lost: 12\n')
+        sys.stderr.flush()
     counts = json.loads(os.environ.get('FAKE_ROS2_COUNTS', '{}'))
     with open(os.path.join(out, 'metadata.yaml'), 'w') as f:
         f.write('rosbag2_bagfile_information:\n  storage_identifier: sqlite3\n')
@@ -80,10 +95,14 @@ def close_bag(*_):
             f.write('    - topic_metadata:\n        name: %%s\n      message_count: %%d\n' %% (name, n))
     sys.exit(0)
 
-signal.signal(signal.SIGTERM, close_bag)
-signal.signal(signal.SIGINT, close_bag)
+stop_handler = signal.SIG_IGN if mode == 'hang' else close_bag
+signal.signal(signal.SIGTERM, stop_handler)
+signal.signal(signal.SIGINT, stop_handler)
 if mode == 'warn':
     sys.stderr.write('[WARN] [rosbag2_cpp]: Cache buffers lost messages per topic:\n')
+    sys.stderr.flush()
+if mode == 'info_lost':
+    sys.stderr.write("[INFO] [rosbag2_recorder]: Subscribed to topic '/gps/lost'\n")
     sys.stderr.flush()
 open(os.path.join(out, 'ready'), 'w').close()
 while True:
@@ -100,6 +119,10 @@ def fake_ros2(tmp_path, monkeypatch):
     script.write_text(_FAKE_ROS2 % {'python': sys.executable})
     script.chmod(script.stat().st_mode | stat.S_IXUSR)
     monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ.get("PATH", ""))
+    # The stand-in is up in milliseconds; tests of a recorder that gives up at
+    # start set the real grace period themselves.
+    from ros2_bag_gui.ros2.bag_process import BagProcess
+    monkeypatch.setattr(BagProcess, "STARTUP_GRACE_MS", 100, raising=False)
     monkeypatch.delenv("FAKE_ROS2_MODE", raising=False)
     monkeypatch.delenv("FAKE_ROS2_COUNTS", raising=False)
     monkeypatch.delenv("FAKE_ROS2_ARGS", raising=False)

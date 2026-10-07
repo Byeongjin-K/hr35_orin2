@@ -258,17 +258,109 @@ class TestRecorderProcessLifecycle:
         assert fake_node.live_subscriptions == []
         assert _sync_info(recorder)['forced_stop'] is True
 
-    def test_recorder_that_exits_right_after_start_is_reported(
+    def test_recorder_that_exits_right_after_start_is_a_failed_start(
             self, qtbot, tmp_path, fake_node, fake_ros2, monkeypatch):
+        from ros2_bag_gui.ros2.bag_process import BagProcess
+        monkeypatch.setattr(BagProcess, 'STARTUP_GRACE_MS', 5000, raising=False)
         monkeypatch.setenv('FAKE_ROS2_MODE', 'fail')
         recorder, log = _recorder_with_log()
+        warnings = []
+        recorder.warning_occurred.connect(warnings.append)
 
-        with qtbot.waitSignal(recorder.error_occurred, timeout=10000):
-            recorder.start_recording(_config(tmp_path), fake_node)
+        started = recorder.start_recording(_config(tmp_path), fake_node)
+        QApplication.processEvents()
 
+        assert started is False
         assert not recorder.is_recording
-        assert len(log['errors']) == 1
+        assert len(log['errors']) == 1 and warnings == []  # one event, one dialog
         assert 'exit code 3' in log['errors'][0]
+        assert fake_node.live_subscriptions == []
+        assert os.listdir(tmp_path / 'out') == []
+
+    def test_stop_that_has_to_kill_the_recorder_is_reported(
+            self, qtbot, tmp_path, fake_node, fake_ros2, monkeypatch):
+        from ros2_bag_gui.ros2.bag_process import BagProcess
+        monkeypatch.setattr(BagProcess, 'STOP_GRACE_MS', 300, raising=False)
+        monkeypatch.setattr(BagProcess, 'STOP_POLL_MS', 100, raising=False)
+        monkeypatch.setenv('FAKE_ROS2_MODE', 'hang')
+        recorder, log = _recorder_with_log()
+        assert recorder.start_recording(_config(tmp_path), fake_node) is True
+        ready = os.path.join(recorder.session_path, 'rosbag', 'ready')
+        qtbot.waitUntil(lambda: os.path.exists(ready), timeout=10000)
+
+        recorder.stop_recording(fake_node)
+
+        assert len(log['errors']) == 1
+        sync = _sync_info(recorder)
+        assert sync['forced_stop'] is True
+        assert sync['topic_message_counts'] is None
+
+    def test_stop_waits_for_a_recorder_that_is_still_writing(
+            self, qtbot, tmp_path, fake_node, fake_ros2, monkeypatch):
+        from ros2_bag_gui.ros2.bag_process import BagProcess
+        monkeypatch.setattr(BagProcess, 'STOP_GRACE_MS', 200)  # shorter than the slow close
+        monkeypatch.setattr(BagProcess, 'STOP_POLL_MS', 100)
+        monkeypatch.setenv('FAKE_ROS2_MODE', 'slowclose')
+        recorder, log = _recorder_with_log()
+        assert recorder.start_recording(_config(tmp_path), fake_node) is True
+        rosbag = os.path.join(recorder.session_path, 'rosbag')
+        qtbot.waitUntil(lambda: os.path.exists(os.path.join(rosbag, 'ready')), timeout=10000)
+
+        recorder.stop_recording(fake_node)
+
+        assert log['errors'] == []
+        assert os.path.exists(os.path.join(rosbag, 'metadata.yaml'))
+
+    def test_what_the_recorder_says_while_closing_is_shown(
+            self, qtbot, tmp_path, fake_node, fake_ros2, monkeypatch):
+        monkeypatch.setenv('FAKE_ROS2_MODE', 'warn_on_close')
+        recorder, log = _recorder_with_log()
+        warnings = []
+        recorder.warning_occurred.connect(warnings.append)
+        assert recorder.start_recording(_config(tmp_path), fake_node) is True
+        ready = os.path.join(recorder.session_path, 'rosbag', 'ready')
+        qtbot.waitUntil(lambda: os.path.exists(ready), timeout=10000)
+
+        recorder.stop_recording(fake_node)
+
+        assert len(warnings) == 1 and 'Total lost: 12' in warnings[0]
+        assert 'Total lost: 12' in _sync_info(recorder)['recorder_warnings']
+
+    def test_info_line_that_mentions_lost_is_not_a_problem(
+            self, qtbot, tmp_path, fake_node, fake_ros2, monkeypatch):
+        monkeypatch.setenv('FAKE_ROS2_MODE', 'info_lost')
+        recorder, log = _recorder_with_log()
+        warnings = []
+        recorder.warning_occurred.connect(warnings.append)
+        assert recorder.start_recording(_config(tmp_path), fake_node) is True
+        ready = os.path.join(recorder.session_path, 'rosbag', 'ready')
+        qtbot.waitUntil(lambda: os.path.exists(ready), timeout=10000)
+        QApplication.processEvents()
+
+        recorder.stop_recording(fake_node)
+
+        assert warnings == []
+        assert 'recorder_warnings' not in _sync_info(recorder)
+
+    def test_suspended_recorder_is_reported_and_can_still_be_stopped(
+            self, qtbot, tmp_path, fake_node, fake_ros2):
+        recorder, log = _recorder_with_log()
+        warnings = []
+        recorder.warning_occurred.connect(warnings.append)
+        assert recorder.start_recording(_config(tmp_path), fake_node) is True
+        rosbag = os.path.join(recorder.session_path, 'rosbag')
+        qtbot.waitUntil(lambda: os.path.exists(os.path.join(rosbag, 'ready')), timeout=10000)
+        pid = recorder._bag_proc.pid
+        os.kill(pid, signal.SIGSTOP)
+        os.waitid(os.P_PID, pid, os.WSTOPPED | os.WNOWAIT)
+
+        recorder.check_health()
+        recorder.check_health()
+
+        assert len(warnings) == 1  # once, not once a second
+        recorder.stop_recording(fake_node)
+        assert log['errors'] == []
+        assert os.path.exists(os.path.join(rosbag, 'metadata.yaml'))
 
     def test_stop_reports_recorder_that_had_already_died(self, qtbot, tmp_path, fake_node, fake_ros2):
         recorder, log = _recorder_with_log()

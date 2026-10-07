@@ -107,6 +107,8 @@ class Recorder(QObject):
         self._bag_topics: List[str] = []
         self._bag_counts: Optional[Dict[str, int]] = None
         self._bag_warnings: List[str] = []
+        self._bag_warning_reported = False
+        self._suspension_reported = False
         self._laz_drop_reported = False
         self._laz_summary: Optional[Dict] = None
 
@@ -166,6 +168,8 @@ class Recorder(QObject):
                 lambda _path, proc=bag_proc: self._on_bag_stopped(proc)
             )
             self._bag_warnings = []
+            self._bag_warning_reported = False
+            self._suspension_reported = False
             bag_proc.warning.connect(self._on_bag_warning)
             if not bag_proc.start(
                 rosbag_path, bag_topics, max_bag_size=config.max_bagfile_size,
@@ -174,6 +178,8 @@ class Recorder(QObject):
                 raise RuntimeError(bag_proc.last_error)
 
             self._recording.set()
+            if self._bag_warnings:  # said while starting up
+                self._report_bag_warnings(self._bag_warnings)
 
             for topic in config.topics:
                 self._create_hz_subscription(node, topic['name'], topic['type'], cb_group)
@@ -202,6 +208,32 @@ class Recorder(QObject):
         for writer in self._svo2_writers:
             self._retire_thread(writer)
         self._svo2_writers.clear()
+        # Leave no empty session folder behind a Start that did not happen.
+        session_folder = self._generate_session_path()
+        if session_folder:
+            for folder in (os.path.join(session_folder, 'pointcloud'), session_folder):
+                try:
+                    os.rmdir(folder)
+                except OSError:
+                    pass  # not there, or it holds data
+
+    def check_health(self) -> None:
+        """Call about once a second while recording.
+
+        Catches a recorder that has not exited but cannot record: a process
+        suspended by a signal keeps its pid, and nothing else notices.
+        """
+        if not self._recording.is_set() or self._bag_proc is None:
+            return
+        if not self._bag_proc.is_suspended:
+            self._suspension_reported = False
+        elif not self._suspension_reported:
+            self._suspension_reported = True
+            self.warning_occurred.emit(
+                "ros2 bag record is suspended (stopped by a signal): nothing is being "
+                f"recorded. Resume it with: kill -CONT {self._bag_proc.pid} "
+                "or press Stop and start a new recording."
+            )
 
     def _retire_thread(self, thread) -> None:
         """Stop a writer thread; keep it referenced if it will not stop.
@@ -337,12 +369,18 @@ class Recorder(QObject):
         This also arrives while Stop waits for the recorder to close the bag.
         """
         self._bag_warnings.append(line)
-        if len(self._bag_warnings) == 1:  # one dialog; the rest goes to the log and sync_info
-            self.warning_occurred.emit(
-                f"ros2 bag record reported a problem: {line} "
-                "Data may be missing from the bag. "
-                "Further recorder messages are in the log and in sync_info.json."
-            )
+        # Outside a recording (starting up, closing the bag) the lines are
+        # collected and reported together by whoever is waiting for the recorder.
+        if self._recording.is_set() and not self._bag_warning_reported:
+            self._report_bag_warnings([line])
+
+    def _report_bag_warnings(self, lines: List[str]):
+        self._bag_warning_reported = True  # one dialog per phase; all lines go to the log and sync_info
+        self.warning_occurred.emit(
+            "ros2 bag record reported a problem: " + " ".join(lines[:6]) + " "
+            "Data may be missing from the bag. "
+            "All recorder messages are in the log and in sync_info.json."
+        )
 
     def _on_bag_stopped(self, proc: BagProcess):
         """The recorder process ended. During a recording that means data is being lost."""
@@ -451,12 +489,24 @@ class Recorder(QObject):
                 self._laz_writer = None
 
             if self._bag_proc is not None:
-                if not self._bag_proc.stop() and failure is None:
+                said_before = len(self._bag_warnings)
+                was_alive = self._bag_proc.stop()
+                if failure is None and not was_alive:
                     failure = (
                         "ros2 bag record had already ended before Stop. "
                         "The end of this session is missing from the bag."
                         f"\n\nDetails: {self._bag_proc.exit_description}"
                     )
+                elif failure is None and self._bag_proc.killed_on_stop:
+                    failure = (
+                        "ros2 bag record did not close the bag in time and was killed. "
+                        "The bag has no metadata.yaml and its last seconds may be missing. "
+                        "Recover it with: ros2 bag reindex -s sqlite3 <session>/rosbag"
+                    )
+                said_while_closing = self._bag_warnings[said_before:]
+                if said_while_closing:
+                    # e.g. "Cache buffers lost messages per topic: ... Total lost: N"
+                    self._report_bag_warnings(said_while_closing)
                 logger.info("ros2 bag record stopped")
                 self._bag_proc = None
 

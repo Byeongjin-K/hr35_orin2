@@ -2,6 +2,7 @@
 import os
 import re
 import shutil
+import signal
 import sys
 from collections import deque
 from typing import List, Optional
@@ -12,8 +13,11 @@ from ros2_bag_gui.logging_config import get_logger
 logger = get_logger(__name__)
 
 # Recorder output that means data may be missing: its own WARN/ERROR lines, and
-# the cache overrun report ("Cache buffers lost messages per topic").
-_PROBLEM_LINE = re.compile(r"\[(WARN|WARNING|ERROR|FATAL)\]|\blost\b|\bdropped\b", re.IGNORECASE)
+# the lines without a level that continue them ("Total lost: N" after "[WARN]
+# ... Cache buffers lost messages per topic:"). The level decides, not the
+# words: an INFO line about a topic called /gps/lost is not a problem.
+_LOG_LEVEL = re.compile(r"\[(DEBUG|INFO|WARN|WARNING|ERROR|FATAL)\]")
+_PROBLEM_LEVELS = ("WARN", "WARNING", "ERROR", "FATAL")
 
 # Runs in the child just before it becomes `ros2`. It asks the kernel to send
 # the recorder SIGINT when the GUI process dies (crash, kill -9, OOM), so it
@@ -56,6 +60,11 @@ class BagProcess(QObject):
     error_occurred = Signal(str)
     warning = Signal(str)  # a line of recorder output that reports a problem
 
+    STARTUP_GRACE_MS = 1000       # a recorder that ends within this is a failed Start
+    STOP_GRACE_MS = 10_000        # a recorder that is not writing gets this long to exit
+    STOP_FLUSH_LIMIT_MS = 60_000  # one still writing its cache to the bag gets this long
+    STOP_POLL_MS = 500
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._proc = QProcess(self)
@@ -67,6 +76,8 @@ class BagProcess(QObject):
         self._crashed = False
         self._last_error = ""
         self._stderr_tail: deque = deque(maxlen=5)
+        self._in_problem_block = False
+        self._killed_on_stop = False
 
     def start(
         self,
@@ -101,32 +112,82 @@ class BagProcess(QObject):
         self._proc.setArguments(["-c", _EXEC_TIED_TO_PARENT, str(os.getpid()), "ros2"] + args)
         self._proc.start()
 
-        if self._proc.waitForStarted(5000):
-            self.started.emit()
-            return True
-        self._last_error = f"Failed to start ros2 bag record: {self._proc.errorString()}"
-        return False
+        if not self._proc.waitForStarted(5000):
+            self._last_error = f"Failed to start ros2 bag record: {self._proc.errorString()}"
+            return False
+        # A recorder that gives up at once (output folder exists, bad argument)
+        # is a failed Start, not a recording that then dies.
+        self._proc.waitForFinished(self.STARTUP_GRACE_MS)
+        if self._proc.state() == QProcess.ProcessState.NotRunning:
+            self._last_error = (
+                f"ros2 bag record ended right after it started ({self.exit_description})"
+            )
+            return False
+        self.started.emit()
+        return True
 
     def stop(self) -> bool:
-        """Stop the recorder. Returns False if it was already dead when asked to stop."""
+        """Stop the recorder. Returns False if it was already dead when asked to stop.
+
+        See killed_on_stop for a recorder that had to be killed.
+        """
         if self._proc.state() == QProcess.ProcessState.NotRunning:
             return False
         was_alive = self._pid_alive()
+        try:
+            # A suspended process would not see the request to stop.
+            os.kill(self.pid, signal.SIGCONT)
+        except OSError:
+            pass
         self._proc.terminate()
-        if not self._proc.waitForFinished(10_000):
-            logger.warning("ros2 bag record did not exit gracefully, killing")
-            self._proc.kill()
-            self._proc.waitForFinished(3000)
+
+        waited = 0
+        last_size = self._bag_bytes()
+        while not self._proc.waitForFinished(self.STOP_POLL_MS):
+            if self._proc.state() == QProcess.ProcessState.NotRunning:
+                break
+            waited += self.STOP_POLL_MS
+            size = self._bag_bytes()
+            writing = size != last_size
+            last_size = size
+            # Killing a recorder that is still flushing its cache to a slow disk
+            # throws that data away and leaves a bag without metadata.
+            if waited >= self.STOP_GRACE_MS and (not writing or waited >= self.STOP_FLUSH_LIMIT_MS):
+                logger.warning("ros2 bag record did not exit after %d ms, killing", waited)
+                self._killed_on_stop = True
+                self._proc.kill()
+                self._proc.waitForFinished(3000)
+                break
         return was_alive
+
+    def _bag_bytes(self) -> int:
+        try:
+            return sum(e.stat().st_size for e in os.scandir(self._output_path) if e.is_file())
+        except OSError:
+            return 0
+
+    def _proc_state(self) -> str:
+        """The kernel's state letter for the recorder process ('' if unknown)."""
+        try:
+            with open(f"/proc/{self._proc.processId()}/stat") as f:
+                return f.read().rsplit(")", 1)[1].split()[0]
+        except (OSError, IndexError):
+            return ""
+
+    @property
+    def killed_on_stop(self) -> bool:
+        """True if stop() had to kill the recorder: the bag was not closed."""
+        return self._killed_on_stop
+
+    @property
+    def is_suspended(self) -> bool:
+        """True if the recorder process exists but is stopped by a signal (SIGSTOP, Ctrl+Z)."""
+        return self.is_running and self._proc_state() in ("T", "t")
 
     def _pid_alive(self) -> bool:
         # QProcess only learns about the child's death from the event loop, so ask the OS.
         # An unreaped dead child is a zombie; no /proc entry means we cannot tell.
-        try:
-            with open(f"/proc/{self._proc.processId()}/stat") as f:
-                return f.read().rsplit(")", 1)[1].split()[0] != "Z"
-        except (OSError, IndexError):
-            return True
+        return self._proc_state() != "Z"
 
     @property
     def last_error(self) -> str:
@@ -176,8 +237,11 @@ class BagProcess(QObject):
         if data:
             for line in data.splitlines():
                 self._stderr_tail.append(line.strip()[:200])
+                level = _LOG_LEVEL.search(line)
+                if level:
+                    self._in_problem_block = level.group(1) in _PROBLEM_LEVELS
                 # INFO, not DEBUG: the session log is the only place this output is kept.
-                if _PROBLEM_LINE.search(line):
+                if self._in_problem_block:
                     logger.warning("[ros2 bag] %s", line)
                     self.warning.emit(line.strip())
                 else:
