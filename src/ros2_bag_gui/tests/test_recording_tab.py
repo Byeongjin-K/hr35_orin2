@@ -443,6 +443,26 @@ def test_start_asks_when_another_recorder_is_running(recording_tab, qtbot, monke
     assert recording_tab._recorder.start_calls == (1 if answer_yes else 0)
 
 
+@pytest.mark.parametrize("split_mode, expected_bytes, expected_seconds", [
+    ("size", 2 * 1024**3, 0),
+    ("time", 0, 45 * 60),
+    ("none", 0, 0),
+])
+def test_split_mode_reaches_the_recorder(
+        recording_tab, qtbot, split_mode, expected_bytes, expected_seconds):
+    recording_tab.settings_panel._settings_manager.update(
+        split_mode=split_mode, split_size_gb=2.0, split_time_minutes=45)
+    recording_tab.topic_list.list_btn.setChecked(True)
+    recording_tab.topic_list.tree.topLevelItem(0).setCheckState(0, Qt.CheckState.Checked)
+
+    recording_tab._on_start_clicked()
+    recording_tab.status_panel._timer.stop()
+
+    config = recording_tab._recorder.started_with
+    assert config.max_bagfile_size == expected_bytes
+    assert getattr(config, 'max_bag_duration', None) == expected_seconds
+
+
 def test_delete_profile(recording_tab, qtbot, monkeypatch):
     """Test profile delete functionality."""
     profile = RecordingProfile(

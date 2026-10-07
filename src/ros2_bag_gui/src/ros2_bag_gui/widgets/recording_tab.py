@@ -360,12 +360,14 @@ class RecordingTab(QWidget):
         ]
         
         split_bytes = int(settings.split_size_gb * 1024**3) if settings.split_mode == "size" else 0
+        split_seconds = settings.split_time_minutes * 60 if settings.split_mode == "time" else 0
         
         recording_config = RecordingConfig(
             topics=topics_with_types,
             output_path=settings.output_path,
             session_name=settings.session_name,
             max_bagfile_size=split_bytes,
+            max_bag_duration=split_seconds,
             lidar_mode=settings.lidar_mode,
             camera_mode=settings.camera_mode,
         )

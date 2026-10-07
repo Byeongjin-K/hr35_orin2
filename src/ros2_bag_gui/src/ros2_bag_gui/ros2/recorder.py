@@ -41,6 +41,7 @@ class RecordingConfig:
     output_path: str
     session_name: str
     max_bagfile_size: int = 3 * 1024**3
+    max_bag_duration: int = 0  # seconds per bag file; 0 = do not split by time
     lidar_mode: str = "bag"
     camera_mode: str = "bag"
 
@@ -154,7 +155,8 @@ class Recorder(QObject):
             self._bag_warnings = []
             bag_proc.warning.connect(self._on_bag_warning)
             if not bag_proc.start(
-                rosbag_path, bag_topics, max_bag_size=config.max_bagfile_size
+                rosbag_path, bag_topics, max_bag_size=config.max_bagfile_size,
+                max_bag_duration=config.max_bag_duration,
             ):
                 raise RuntimeError(bag_proc.last_error)
 

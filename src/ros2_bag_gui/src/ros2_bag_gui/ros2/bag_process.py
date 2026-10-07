@@ -74,6 +74,7 @@ class BagProcess(QObject):
         topics: List[str],
         max_bag_size: int = 0,
         storage_id: str = "sqlite3",
+        max_bag_duration: int = 0,
     ) -> bool:
         """Start the recorder. Returns False (see last_error) if it did not start."""
         if self._proc.state() != QProcess.ProcessState.NotRunning:
@@ -88,6 +89,8 @@ class BagProcess(QObject):
         ]
         if max_bag_size > 0:
             args.extend(["--max-bag-size", str(max_bag_size)])
+        if max_bag_duration > 0:
+            args.extend(["--max-bag-duration", str(max_bag_duration)])
         args.extend(topics)
 
         logger.info("Starting ros2 bag record: ros2 %s", " ".join(args[:8]) + " ...")

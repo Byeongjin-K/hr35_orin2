@@ -171,6 +171,21 @@ class TestRecorderProcessLifecycle:
         assert sync['gui_received_counts'] == {'/excavator/status': 1}
         assert recorder.last_bag_counts is None
 
+    def test_split_by_time_is_passed_to_the_recorder(self, qtbot, tmp_path, fake_node, fake_ros2, monkeypatch):
+        args_file = tmp_path / 'bag_args.json'
+        monkeypatch.setenv('FAKE_ROS2_ARGS', str(args_file))
+        recorder, log = _recorder_with_log()
+
+        assert recorder.start_recording(
+            _config(tmp_path, max_bagfile_size=0, max_bag_duration=1800), fake_node) is True
+        ready = os.path.join(recorder.session_path, 'rosbag', 'ready')
+        qtbot.waitUntil(lambda: os.path.exists(ready), timeout=10000)
+        recorder.stop_recording(fake_node)
+
+        bag_args = json.loads(args_file.read_text())
+        assert bag_args[bag_args.index('--max-bag-duration') + 1] == '1800'
+        assert '--max-bag-size' not in bag_args
+
     def test_recorder_problem_output_reaches_the_log(
             self, qtbot, tmp_path, fake_node, fake_ros2, monkeypatch, caplog):
         monkeypatch.setenv('FAKE_ROS2_MODE', 'warn')
