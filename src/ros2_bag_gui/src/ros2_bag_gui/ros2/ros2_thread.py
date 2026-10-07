@@ -4,7 +4,10 @@ import threading
 
 from PySide6.QtCore import QThread, Signal
 import rclpy
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import (
+    MultiThreadedExecutor, ShutdownException, ExternalShutdownException,
+)
+from rclpy.impl.implementation_singleton import rclpy_implementation as _rclpy
 from rclpy.node import Node
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
@@ -55,7 +58,16 @@ class ROS2Thread(QThread):
             self._running = True
             self.connection_status_changed.emit(True)
 
-            self._executor.spin()
+            while self._running and rclpy.ok():
+                try:
+                    self._executor.spin_once(timeout_sec=0.1)
+                except _rclpy.InvalidHandle:
+                    # A subscription was destroyed (Stop, topic refresh) while the
+                    # executor was waiting on it. That spoils this pass, not the node:
+                    # ending the thread here would leave the GUI disconnected for good.
+                    continue
+                except (ShutdownException, ExternalShutdownException):
+                    break
 
         except Exception as e:
             self.error_occurred.emit(f"ROS2 error: {e}")
