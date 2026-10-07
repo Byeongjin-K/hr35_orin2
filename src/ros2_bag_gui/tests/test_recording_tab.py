@@ -59,6 +59,7 @@ def recording_tab(qtbot, tmp_path, monkeypatch, fake_node):
     # talks to stand-ins. The real recording path is covered in test_recorder.py.
     monkeypatch.setattr(ROS2Thread, "start", lambda self: None)
     monkeypatch.setattr(ROS2Thread, "node", property(lambda self: fake_node))
+    monkeypatch.setattr("ros2_bag_gui.widgets.recording_tab.find_other_recorders", lambda: [], raising=False)
     widget = RecordingTab()
     widget._recorder = FakeRecorder()
     widget.settings_panel._settings_manager.update(output_path=str(tmp_path / "recordings"))
@@ -418,6 +419,28 @@ def test_start_asks_about_selected_topics_that_are_not_available(
         assert recorded == [present, absent]
     else:
         assert recording_tab._recorder.start_calls == 0
+
+
+@pytest.mark.parametrize("answer_yes", [False, True])
+def test_start_asks_when_another_recorder_is_running(recording_tab, qtbot, monkeypatch, answer_yes):
+    from PySide6.QtWidgets import QMessageBox
+    asked = []
+
+    def question(parent, title, text, *args, **kwargs):
+        asked.append(text)
+        return QMessageBox.StandardButton.Yes if answer_yes else QMessageBox.StandardButton.No
+
+    monkeypatch.setattr(QMessageBox, 'question', question)
+    monkeypatch.setattr(
+        "ros2_bag_gui.widgets.recording_tab.find_other_recorders", lambda: [4242], raising=False)
+    recording_tab.topic_list.list_btn.setChecked(True)
+    recording_tab.topic_list.tree.topLevelItem(0).setCheckState(0, Qt.CheckState.Checked)
+
+    recording_tab._on_start_clicked()
+    recording_tab.status_panel._timer.stop()
+
+    assert len(asked) == 1 and "4242" in asked[0]
+    assert recording_tab._recorder.start_calls == (1 if answer_yes else 0)
 
 
 def test_delete_profile(recording_tab, qtbot, monkeypatch):

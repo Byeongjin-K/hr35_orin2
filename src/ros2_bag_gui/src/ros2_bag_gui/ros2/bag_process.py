@@ -1,5 +1,8 @@
 """Subprocess wrapper for ros2 bag record."""
+import os
 import re
+import shutil
+import sys
 from collections import deque
 from typing import List, Optional
 
@@ -11,6 +14,39 @@ logger = get_logger(__name__)
 # Recorder output that means data may be missing: its own WARN/ERROR lines, and
 # the cache overrun report ("Cache buffers lost messages per topic").
 _PROBLEM_LINE = re.compile(r"\[(WARN|WARNING|ERROR|FATAL)\]|\blost\b|\bdropped\b", re.IGNORECASE)
+
+# Runs in the child just before it becomes `ros2`. It asks the kernel to send
+# the recorder SIGINT when the GUI process dies (crash, kill -9, OOM), so it
+# closes its bag instead of recording on alone until the disk is full.
+# argv: <gui pid> ros2 bag record ...   (PR_SET_PDEATHSIG = 1; kept across exec)
+_EXEC_TIED_TO_PARENT = """\
+import ctypes, os, signal, sys
+try:
+    ctypes.CDLL(None).prctl(1, int(signal.SIGINT))
+except Exception:
+    pass
+if os.getppid() != int(sys.argv[1]):
+    sys.exit("the GUI went away before the recorder started")
+os.execvp(sys.argv[2], sys.argv[2:])
+"""
+
+
+def find_other_recorders(exclude_pids=()) -> List[int]:
+    """PIDs of `ros2 bag record` processes on this machine (e.g. left over by a GUI that died)."""
+    found = []
+    for entry in os.listdir("/proc") if os.path.isdir("/proc") else []:
+        if not entry.isdigit() or int(entry) in exclude_pids or int(entry) == os.getpid():
+            continue
+        try:
+            with open(f"/proc/{entry}/cmdline", "rb") as f:
+                argv = [a.decode(errors="replace") for a in f.read().split(b"\0")]
+        except OSError:
+            continue
+        for i in range(len(argv) - 2):
+            if os.path.basename(argv[i]) == "ros2" and argv[i + 1:i + 3] == ["bag", "record"]:
+                found.append(int(entry))
+                break
+    return sorted(found)
 
 
 class BagProcess(QObject):
@@ -55,8 +91,11 @@ class BagProcess(QObject):
         args.extend(topics)
 
         logger.info("Starting ros2 bag record: ros2 %s", " ".join(args[:8]) + " ...")
-        self._proc.setProgram("ros2")
-        self._proc.setArguments(args)
+        if shutil.which("ros2") is None:
+            self._last_error = "Failed to start ros2 bag record: `ros2` is not on PATH"
+            return False
+        self._proc.setProgram(sys.executable)
+        self._proc.setArguments(["-c", _EXEC_TIED_TO_PARENT, str(os.getpid()), "ros2"] + args)
         self._proc.start()
 
         if self._proc.waitForStarted(5000):
@@ -101,6 +140,10 @@ class BagProcess(QObject):
         if self._stderr_tail:
             what += "; last output: " + " | ".join(self._stderr_tail)
         return what
+
+    @property
+    def pid(self) -> int:
+        return int(self._proc.processId())
 
     @property
     def is_running(self) -> bool:

@@ -14,6 +14,7 @@ from ros2_bag_gui.config.profiles import ProfileManager, RecordingProfile
 from ros2_bag_gui.ros2.ros2_thread import ROS2Thread
 from ros2_bag_gui.ros2.topic_discovery import TopicDiscoveryManager
 from ros2_bag_gui.ros2.recorder import Recorder, RecordingConfig
+from ros2_bag_gui.ros2.bag_process import find_other_recorders
 from ros2_bag_gui.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -373,6 +374,22 @@ class RecordingTab(QWidget):
         if node is None:
             QMessageBox.warning(self, "ROS2 Not Ready", "ROS2 node is not connected yet.")
             return
+
+        stray = find_other_recorders()
+        if stray:
+            reply = QMessageBox.question(
+                self,
+                "Another Recorder Is Running",
+                "ros2 bag record is already running on this machine (pid "
+                + ", ".join(str(pid) for pid in stray)
+                + "). It may be left over from a GUI that was killed and is still "
+                "writing to disk.\n\nTo stop it: pkill -INT -f \"ros2 bag record\""
+                "\n\nStart a second recording anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
         
         self.status_panel.clear_notices()
         success = self._recorder.start_recording(recording_config, node)

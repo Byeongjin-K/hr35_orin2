@@ -3,6 +3,8 @@ import json
 import logging
 import os
 import signal
+import subprocess
+import sys
 import threading
 from types import SimpleNamespace
 import pytest
@@ -265,6 +267,54 @@ class TestRecorderProcessLifecycle:
         assert not recorder.is_recording
         assert fake_node.live_subscriptions == []
         assert log['errors'] == []
+
+
+# A minimal "GUI": starts the recorder through BagProcess, prints its pid, then idles.
+_GUI_PROCESS = """
+import sys
+from PySide6.QtCore import QCoreApplication
+from ros2_bag_gui.ros2.bag_process import BagProcess
+app = QCoreApplication([])
+bag = BagProcess()
+bag.start(sys.argv[1], ['/excavator/status'])
+print(bag._proc.processId(), flush=True)
+app.exec()
+"""
+
+
+class TestOrphanedRecorder:
+
+    def test_recorder_closes_the_bag_when_the_gui_is_killed(self, qtbot, tmp_path, fake_ros2):
+        rosbag = tmp_path / 'rosbag'
+        gui = subprocess.Popen(
+            [sys.executable, '-c', _GUI_PROCESS, str(rosbag)], stdout=subprocess.PIPE, text=True)
+        recorder_pid = int(gui.stdout.readline())
+        try:
+            qtbot.waitUntil(lambda: (rosbag / 'ready').exists(), timeout=10000)
+
+            gui.kill()
+            gui.wait()
+
+            # The stand-in recorder writes metadata.yaml only when it is told to stop.
+            qtbot.waitUntil(lambda: (rosbag / 'metadata.yaml').exists(), timeout=10000)
+        finally:
+            try:
+                os.kill(recorder_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+    def test_a_recorder_left_running_is_found(self, qtbot, tmp_path, fake_ros2):
+        from ros2_bag_gui.ros2.bag_process import find_other_recorders
+        rosbag = tmp_path / 'rosbag'
+        stray = subprocess.Popen([fake_ros2, 'bag', 'record', '-o', str(rosbag), '/excavator/status'])
+        try:
+            qtbot.waitUntil(lambda: (rosbag / 'ready').exists(), timeout=10000)
+
+            assert stray.pid in find_other_recorders()
+            assert stray.pid not in find_other_recorders(exclude_pids=[stray.pid])
+        finally:
+            stray.kill()
+            stray.wait()
 
 
 STATUS = {'name': '/excavator/status', 'type': 'std_msgs/msg/String'}
