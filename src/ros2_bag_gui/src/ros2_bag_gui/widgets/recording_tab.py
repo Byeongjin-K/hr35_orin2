@@ -244,16 +244,17 @@ class RecordingTab(QWidget):
     
     def _on_recorder_error(self, error_msg: str):
         logger.error("Recording error: %s", error_msg)
+        if not self._recorder.is_recording:
+            # Put the screen right before the dialog, so what is behind it is true.
+            self._stats_timer.stop()
+            self.start_btn.setEnabled(True)
+            self.stop_btn.setEnabled(False)
+            self.status_panel.set_state(RecordingState.ERROR)
         QMessageBox.critical(self, "Recording Error", error_msg)
-        self.start_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
-        self.status_panel.set_state(RecordingState.STOPPED)
     
     def cleanup(self):
         if self._recorder.is_recording:
-            node = self._ros2_thread.node
-            if node is not None:
-                self._recorder.stop_recording(node)
+            self._recorder.stop_recording(self._ros2_thread.node)
         self._stats_timer.stop()
         self._refresh_timer.stop()
         self._ros2_thread.stop()
@@ -341,15 +342,19 @@ class RecordingTab(QWidget):
     
     def _on_stop_clicked(self):
         """Handle stop recording button click."""
-        node = self._ros2_thread.node
-        if node is not None:
-            session_folder = self._recorder.stop_recording(node)
-            if session_folder:
-                logger.info("Recording saved to: %s", session_folder)
-        
+        if not self._recorder.is_recording:
+            return
+
+        # The recorder keeps the node it started with, so Stop works even if
+        # the ROS2 thread has gone away in the meantime.
+        session_folder = self._recorder.stop_recording(self._ros2_thread.node)
+        if session_folder:
+            logger.info("Recording saved to: %s", session_folder)
+
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
-        self.status_panel.set_state(RecordingState.STOPPED)
+        if self.status_panel._state != RecordingState.ERROR:
+            self.status_panel.set_state(RecordingState.STOPPED)
         
         self.recording_stop_requested.emit()
     

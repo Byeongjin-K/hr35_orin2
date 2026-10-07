@@ -89,9 +89,11 @@ class Recorder(QObject):
         self._svo2_writers: List[SVO2WriterThread] = []
         self._session_start_time: Optional[datetime] = None
         self._recording = threading.Event()
+        self._node = None
 
     def start_recording(self, config: RecordingConfig, node) -> bool:
         try:
+            self._node = node
             self._config = config
             self._topic_counts = {}
             self._topic_timestamps = {}
@@ -106,13 +108,18 @@ class Recorder(QObject):
                 if should_include_in_rosbag(t['name'], config.lidar_mode, config.camera_mode)
             ]
 
-            self._bag_proc = BagProcess(self)
-            self._bag_proc.error_occurred.connect(
+            bag_proc = BagProcess(self)
+            self._bag_proc = bag_proc
+            bag_proc.error_occurred.connect(
                 lambda msg: self.error_occurred.emit(msg)
             )
-            self._bag_proc.start(
-                rosbag_path, bag_topics, max_bag_size=config.max_bagfile_size
+            bag_proc.stopped.connect(
+                lambda _path, proc=bag_proc: self._on_bag_stopped(proc)
             )
+            if not bag_proc.start(
+                rosbag_path, bag_topics, max_bag_size=config.max_bagfile_size
+            ):
+                raise RuntimeError(bag_proc.last_error)
 
             if config.lidar_mode in ("laz", "both"):
                 pointcloud_dir = os.path.join(session_folder, 'pointcloud')
@@ -150,8 +157,44 @@ class Recorder(QObject):
             return True
 
         except Exception as e:
+            self._abort_start()
             self.error_occurred.emit(f"Failed to start recording: {e}")
             return False
+
+    def _abort_start(self):
+        """Undo a partly started session so nothing keeps running behind a failed Start."""
+        self._recording.clear()
+        self._destroy_subscriptions(self._node)
+        if self._bag_proc is not None:
+            self._bag_proc.stop()
+            self._bag_proc = None
+        if self._laz_writer is not None:
+            self._laz_writer.stop()
+            self._laz_writer = None
+        for writer in self._svo2_writers:
+            writer.stop()
+        self._svo2_writers.clear()
+
+    def _destroy_subscriptions(self, node):
+        if node is not None:
+            for sub in self._hz_subscriptions + self._laz_subscriptions:
+                try:
+                    node.destroy_subscription(sub)
+                except Exception:
+                    pass
+        self._hz_subscriptions.clear()
+        self._laz_subscriptions.clear()
+
+    def _on_bag_stopped(self, proc: BagProcess):
+        """The recorder process ended. During a recording that means data is being lost."""
+        if proc is not self._bag_proc or not self._recording.is_set():
+            return
+        self._finish_session(
+            self._node,
+            "ros2 bag record ended while recording "
+            f"({proc.exit_description}). Nothing has been recorded since then. "
+            "Check the session folder, then start a new recording.",
+        )
 
     def _create_hz_subscription(self, node, topic_name: str, topic_type: str, cb_group):
         try:
@@ -203,21 +246,17 @@ class Recorder(QObject):
         except Exception as e:
             logger.debug("LAZ enqueue error for %s: %s", topic_name, e)
 
-    def stop_recording(self, node) -> str:
+    def stop_recording(self, node=None) -> str:
         if not self._recording.is_set():
             return ""
+        return self._finish_session(node if node is not None else self._node, None)
 
+    def _finish_session(self, node, failure: Optional[str]) -> str:
         self._recording.clear()
         session_folder = ""
 
         try:
-            for sub in self._hz_subscriptions + self._laz_subscriptions:
-                try:
-                    node.destroy_subscription(sub)
-                except Exception:
-                    pass
-            self._hz_subscriptions.clear()
-            self._laz_subscriptions.clear()
+            self._destroy_subscriptions(node)
 
             if self._laz_writer is not None:
                 self._laz_writer.stop()
@@ -225,7 +264,12 @@ class Recorder(QObject):
                 self._laz_writer = None
 
             if self._bag_proc is not None:
-                self._bag_proc.stop()
+                if not self._bag_proc.stop() and failure is None:
+                    failure = (
+                        "ros2 bag record had already ended before Stop "
+                        f"({self._bag_proc.exit_description}). "
+                        "The end of this session is missing from the bag."
+                    )
                 logger.info("ros2 bag record stopped")
                 self._bag_proc = None
 
@@ -237,12 +281,15 @@ class Recorder(QObject):
 
             if self._config:
                 session_folder = self._generate_session_path()
-                self._write_sync_info(session_folder)
+                self._write_sync_info(session_folder, failure)
 
             self.recording_stopped.emit()
 
         except Exception as e:
             self.error_occurred.emit(f"Error stopping recording: {e}")
+
+        if failure is not None:
+            self.error_occurred.emit(failure)
 
         return session_folder
 
@@ -255,7 +302,7 @@ class Recorder(QObject):
         folder_name = f"recording_{timestamp}_{sanitized}"
         return os.path.join(self._config.output_path, folder_name)
 
-    def _write_sync_info(self, session_folder: str):
+    def _write_sync_info(self, session_folder: str, failure: Optional[str] = None):
         if self._session_start_time is None or self._config is None:
             return
 
@@ -281,6 +328,8 @@ class Recorder(QObject):
             camera_mode=self._config.camera_mode,
             laz_file_count=laz_file_count,
             svo2_files=svo2_files,
+            forced_stop=failure is not None,
+            stop_reason=failure,
         )
 
     @property

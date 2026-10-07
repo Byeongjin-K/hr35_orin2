@@ -13,6 +13,7 @@ class RecordingState(Enum):
     READY = "Ready"
     RECORDING = "Recording"
     STOPPED = "Stopped"
+    ERROR = "ERROR - NOT RECORDING"
 
 class DiskSpaceState(Enum):
     NORMAL = "normal"
@@ -123,6 +124,12 @@ class RecordingStatusPanel(QWidget):
         elif state == RecordingState.STOPPED:
             self.state_label.setStyleSheet(
                 "font-size: 13px; font-weight: bold; color: #3498db;"
+            )
+            self._timer.stop()
+        elif state == RecordingState.ERROR:
+            self.state_label.setStyleSheet(
+                "font-size: 13px; font-weight: bold; color: white;"
+                " background-color: #c0392b; padding: 2px 6px;"
             )
             self._timer.stop()
         else:  # READY

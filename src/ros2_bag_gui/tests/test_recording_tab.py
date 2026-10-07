@@ -192,6 +192,52 @@ def test_stop_button_updates_ui_state(recording_tab, qtbot):
     assert recording_tab.status_panel._state == RecordingState.STOPPED
 
 
+def test_recorder_error_leaves_recording_state(recording_tab, qtbot, monkeypatch):
+    """When the recorder reports that it is no longer recording, the screen says so."""
+    from PySide6.QtWidgets import QMessageBox
+    shown = []
+    monkeypatch.setattr(QMessageBox, 'critical', lambda *args, **kwargs: shown.append(args[2]))
+    recording_tab.topic_list.list_btn.setChecked(True)
+    recording_tab.topic_list.tree.topLevelItem(0).setCheckState(0, Qt.CheckState.Checked)
+    recording_tab._on_start_clicked()
+    recording_tab.status_panel._timer.stop()
+
+    recording_tab._recorder.recording = False
+    recording_tab._on_recorder_error("recorder ended")
+
+    assert shown == ["recorder ended"]
+    assert recording_tab.status_panel._state == RecordingState.ERROR
+    assert recording_tab.start_btn.isEnabled()
+    assert not recording_tab.stop_btn.isEnabled()
+
+
+def test_failed_start_does_not_show_recording(recording_tab, qtbot):
+    recording_tab.topic_list.list_btn.setChecked(True)
+    recording_tab.topic_list.tree.topLevelItem(0).setCheckState(0, Qt.CheckState.Checked)
+    recording_tab._recorder.start_result = False
+    received = []
+    recording_tab.recording_start_requested.connect(received.append)
+
+    recording_tab._on_start_clicked()
+
+    assert received == []
+    assert recording_tab.start_btn.isEnabled()
+    assert recording_tab.status_panel._state != RecordingState.RECORDING
+
+
+def test_stop_still_stops_when_ros_node_is_gone(recording_tab, qtbot, monkeypatch):
+    recording_tab.topic_list.list_btn.setChecked(True)
+    recording_tab.topic_list.tree.topLevelItem(0).setCheckState(0, Qt.CheckState.Checked)
+    recording_tab._on_start_clicked()
+    recording_tab.status_panel._timer.stop()
+    monkeypatch.setattr(ROS2Thread, "node", property(lambda self: None))
+
+    recording_tab._on_stop_clicked()
+
+    assert recording_tab._recorder.stop_calls == 1
+    assert not recording_tab._recorder.is_recording
+
+
 def test_save_profile(recording_tab, qtbot, monkeypatch):
     """Test profile save functionality."""
     recording_tab.topic_list.list_btn.setChecked(True)
