@@ -350,9 +350,10 @@ class Recorder(QObject):
             return
         self._finish_session(
             self._node,
-            "ros2 bag record ended while recording "
-            f"({proc.exit_description}). Nothing has been recorded since then. "
-            "Check the session folder, then start a new recording.",
+            "ros2 bag record ended while recording. "
+            "Nothing has been recorded since then. "
+            "Check the session folder, then start a new recording."
+            f"\n\nDetails: {proc.exit_description}",
         )
 
     def _create_hz_subscription(self, node, topic_name: str, topic_type: str, cb_group):
@@ -452,9 +453,9 @@ class Recorder(QObject):
             if self._bag_proc is not None:
                 if not self._bag_proc.stop() and failure is None:
                     failure = (
-                        "ros2 bag record had already ended before Stop "
-                        f"({self._bag_proc.exit_description}). "
+                        "ros2 bag record had already ended before Stop. "
                         "The end of this session is missing from the bag."
+                        f"\n\nDetails: {self._bag_proc.exit_description}"
                     )
                 logger.info("ros2 bag record stopped")
                 self._bag_proc = None
