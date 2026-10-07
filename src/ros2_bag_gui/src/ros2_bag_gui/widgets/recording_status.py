@@ -24,6 +24,12 @@ class RecordingStatusPanel(QWidget):
     """Panel showing recording status and statistics."""
     
     disk_critical = Signal()
+
+    # While recording, the numbers are what the GUI's own subscription received:
+    # a hint that data flows, not what is in the bag.
+    LIVE_HEADERS = ["Topic", "Received (GUI)", "Hz"]
+    # After Stop, the bag itself is read.
+    FINAL_HEADERS = ["Topic", "In bag", "Received (GUI)"]
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -90,7 +96,7 @@ class RecordingStatusPanel(QWidget):
         
         self.stats_table = QTableWidget()
         self.stats_table.setColumnCount(3)
-        self.stats_table.setHorizontalHeaderLabels(["Topic", "Messages", "Hz"])
+        self.stats_table.setHorizontalHeaderLabels(self.LIVE_HEADERS)
         self.stats_table.setMinimumHeight(200)
         self.stats_table.verticalHeader().setDefaultSectionSize(22)
         self.stats_table.verticalHeader().setVisible(False)
@@ -99,8 +105,8 @@ class RecordingStatusPanel(QWidget):
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
-        header.resizeSection(1, 70)
-        header.resizeSection(2, 45)
+        header.resizeSection(1, 110)
+        header.resizeSection(2, 110)
         
         stats_layout.addWidget(self.stats_table)
         
@@ -162,6 +168,7 @@ class RecordingStatusPanel(QWidget):
 
     def update_topic_stats(self, stats: Dict[str, Dict]):
         self._topic_stats = stats
+        self.stats_table.setHorizontalHeaderLabels(self.LIVE_HEADERS)
         self.stats_table.setRowCount(len(stats))
         
         sorted_topics = sorted(stats.keys())
@@ -172,6 +179,21 @@ class RecordingStatusPanel(QWidget):
             self.stats_table.setItem(row, 1, QTableWidgetItem(str(data.get('count', 0))))
             self.stats_table.setItem(row, 2, QTableWidgetItem(f"{data.get('hz', 0):.1f}"))
     
+    def show_bag_counts(self, bag_counts: Optional[Dict[str, int]], gui_counts: Dict[str, int]):
+        """After Stop: per-topic counts read from the bag, next to what the GUI saw.
+
+        bag_counts is None when the bag has no metadata (it was not closed properly).
+        """
+        topics = sorted(set(gui_counts) | set(bag_counts or {}))
+        self.stats_table.setHorizontalHeaderLabels(self.FINAL_HEADERS)
+        self.stats_table.setRowCount(len(topics))
+        for row, topic in enumerate(topics):
+            in_bag = "unknown" if bag_counts is None else str(bag_counts.get(topic, 0))
+            received = str(gui_counts[topic]) if topic in gui_counts else ""
+            self.stats_table.setItem(row, 0, QTableWidgetItem(topic))
+            self.stats_table.setItem(row, 1, QTableWidgetItem(in_bag))
+            self.stats_table.setItem(row, 2, QTableWidgetItem(received))
+
     def update_storage_sizes(self, rosbag_bytes: int, pointcloud_bytes: int, images_bytes: int):
         self.rosbag_size.setText(f"Rosbag: {self._format_size(rosbag_bytes)}")
         self.pointcloud_size.setText(f"PointCloud: {self._format_size(pointcloud_bytes)}")

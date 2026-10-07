@@ -31,6 +31,8 @@ class FakeRecorder:
         self.stop_calls = 0
         self.topic_counts = {}
         self.session_path = ""
+        self.last_bag_counts = {}
+        self.last_bag_topics = []
 
     @property
     def is_recording(self):
@@ -329,6 +331,45 @@ def test_recorder_warning_stays_on_screen(recording_tab, qtbot, monkeypatch):
     assert shown == ["images go to the bag"]
     assert "images go to the bag" in recording_tab.status_panel.notice_label.text()
     assert not recording_tab.status_panel.notice_label.isHidden()
+
+
+def _table(panel):
+    table = panel.stats_table
+    headers = [table.horizontalHeaderItem(c).text() for c in range(table.columnCount())]
+    rows = [[table.item(r, c).text() for c in range(table.columnCount())] for r in range(table.rowCount())]
+    return headers, rows
+
+
+def test_after_stop_the_table_shows_what_is_in_the_bag(recording_tab, qtbot):
+    recorder = recording_tab._recorder
+    recorder.topic_counts = {'/excavator/joints': 2600, '/zedx_boom/left/image': 70}
+    recorder.last_bag_counts = {'/excavator/joints': 1360}
+    recorder.last_bag_topics = ['/excavator/joints', '/zedx_boom/left/image']
+
+    recording_tab._on_recorder_stopped()
+
+    headers, rows = _table(recording_tab.status_panel)
+    assert headers == recording_tab.status_panel.FINAL_HEADERS
+    assert rows == [['/excavator/joints', '1360', '2600'], ['/zedx_boom/left/image', '0', '70']]
+    assert '/zedx_boom/left/image' in recording_tab.status_panel.notice_label.text()
+
+
+def test_after_stop_unreadable_bag_counts_are_shown_as_unknown(recording_tab, qtbot):
+    recorder = recording_tab._recorder
+    recorder.topic_counts = {'/excavator/joints': 2600}
+    recorder.last_bag_counts = None
+
+    recording_tab._on_recorder_stopped()
+
+    assert _table(recording_tab.status_panel)[1] == [['/excavator/joints', 'unknown', '2600']]
+    assert not recording_tab.status_panel.notice_label.isHidden()
+
+
+def test_live_numbers_are_labelled_as_received_by_the_gui(recording_tab, qtbot):
+    recording_tab.status_panel.update_topic_stats({'/excavator/joints': {'count': 5, 'hz': 1.0}})
+
+    assert _table(recording_tab.status_panel)[0] == recording_tab.status_panel.LIVE_HEADERS
+    assert recording_tab.status_panel.LIVE_HEADERS != recording_tab.status_panel.FINAL_HEADERS
 
 
 def test_delete_profile(recording_tab, qtbot, monkeypatch):

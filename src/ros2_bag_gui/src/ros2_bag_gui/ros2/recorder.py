@@ -101,6 +101,8 @@ class Recorder(QObject):
         self._notices: List[str] = []
         self._laz_error_reported = False
         self._stuck_threads: List[object] = []
+        self._bag_topics: List[str] = []
+        self._bag_counts: Optional[Dict[str, int]] = None
 
     def start_recording(self, config: RecordingConfig, node) -> bool:
         if self._recording.is_set():
@@ -137,6 +139,8 @@ class Recorder(QObject):
                 if name in keep_in_bag
                 or should_include_in_rosbag(name, config.lidar_mode, camera_mode)
             ]
+            self._bag_topics = bag_topics
+            self._bag_counts = None
 
             bag_proc = BagProcess(self)
             self._bag_proc = bag_proc
@@ -421,7 +425,8 @@ class Recorder(QObject):
                 if f.endswith('.svo2')
             ]
 
-        from ros2_bag_gui.ros2.sync_info import create_sync_info
+        from ros2_bag_gui.ros2.sync_info import create_sync_info, read_bag_message_counts
+        self._bag_counts = read_bag_message_counts(os.path.join(session_folder, 'rosbag'))
         create_sync_info(
             session_folder,
             self._session_start_time,
@@ -430,6 +435,7 @@ class Recorder(QObject):
             lidar_mode=self._effective_modes[0],
             camera_mode=self._effective_modes[1],
             notices=self._notices,
+            bag_message_counts=self._bag_counts,
             laz_file_count=laz_file_count,
             svo2_files=svo2_files,
             forced_stop=failure is not None,
@@ -443,6 +449,16 @@ class Recorder(QObject):
     @property
     def session_path(self) -> str:
         return self._generate_session_path()
+
+    @property
+    def last_bag_counts(self) -> Optional[Dict[str, int]]:
+        """Per-topic counts read from the last finished bag; None if unreadable."""
+        return None if self._bag_counts is None else dict(self._bag_counts)
+
+    @property
+    def last_bag_topics(self) -> List[str]:
+        """The topics the last recording asked the bag to hold."""
+        return list(self._bag_topics)
 
     @property
     def topic_counts(self) -> Dict[str, int]:

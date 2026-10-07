@@ -5,6 +5,24 @@ from datetime import datetime
 from typing import Dict, List, Optional
 
 
+def read_bag_message_counts(rosbag_dir: str) -> Optional[Dict[str, int]]:
+    """Per-topic message counts of a closed bag, from its metadata.yaml.
+
+    Returns None when the bag has no readable metadata (it was not closed
+    properly); the counts are then unknown, not zero.
+    """
+    try:
+        import yaml
+        with open(os.path.join(rosbag_dir, 'metadata.yaml')) as f:
+            info = yaml.safe_load(f)['rosbag2_bagfile_information']
+        return {
+            t['topic_metadata']['name']: int(t['message_count'])
+            for t in info.get('topics_with_message_count') or []
+        }
+    except Exception:
+        return None
+
+
 def create_sync_info(
     session_folder: str,
     start_time: datetime,
@@ -17,6 +35,7 @@ def create_sync_info(
     forced_stop: bool = False,
     stop_reason: Optional[str] = None,
     notices: Optional[List[str]] = None,
+    bag_message_counts: Optional[Dict[str, int]] = None,
 ) -> str:
     """Create sync_info.json in session folder.
 
@@ -24,7 +43,10 @@ def create_sync_info(
         session_folder: Path to session folder.
         start_time: Recording start time.
         end_time: Recording end time.
-        topic_counts: Dict of topic_name → message count.
+        topic_counts: Dict of topic_name → messages the GUI's own monitoring
+            subscription received. Not what is in the bag.
+        bag_message_counts: Dict of topic_name → messages in the bag (from its
+            metadata), or None when the bag could not be read.
         lidar_mode: "bag", "laz", or "both" (the mode really in effect).
         camera_mode: "bag", "svo2", or "both" (the mode really in effect).
         notices: What was done differently from what was asked (mode fallbacks).
@@ -44,8 +66,14 @@ def create_sync_info(
     data_sources: Dict = {
         "rosbag": {
             "path": "rosbag/",
-            "topic_count": len(topic_counts),
-            "time_source": "message_header_stamp"
+            "topic_count": len(
+                topic_counts if bag_message_counts is None else bag_message_counts
+            ),
+            # rosbag2 stamps each message with the time the recorder received it
+            "time_source": "receive_time",
+            "message_counts_source": (
+                "unavailable" if bag_message_counts is None else "rosbag_metadata"
+            ),
         }
     }
 
@@ -62,8 +90,8 @@ def create_sync_info(
         data_sources["svo2"] = {
             "path": [os.path.basename(p) for p in svo2_files],
             "file_count": len(svo2_files),
-            "time_source": "embedded_ros_ts",
-            "timestamp_key": "ROS_TS"
+            # No ROS timestamps are embedded: frames carry the camera's own time
+            "time_source": "camera_image_timestamp"
         }
 
     sync_info: Dict = {
@@ -76,7 +104,10 @@ def create_sync_info(
             "camera": camera_mode
         },
         "data_sources": data_sources,
-        "topic_message_counts": topic_counts
+        # What is in the bag; null when the bag has no metadata to read it from
+        "topic_message_counts": bag_message_counts,
+        # What the GUI saw on its own best-effort subscription while recording
+        "gui_received_counts": topic_counts
     }
 
     if notices:

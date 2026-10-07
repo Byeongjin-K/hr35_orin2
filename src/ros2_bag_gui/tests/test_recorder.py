@@ -138,6 +138,36 @@ class TestRecorderProcessLifecycle:
         assert os.path.exists(os.path.join(rosbag, 'metadata.yaml'))
         assert 'forced_stop' not in _sync_info(recorder)
 
+    def test_sync_info_holds_the_counts_of_the_bag(self, qtbot, tmp_path, fake_node, fake_ros2, monkeypatch):
+        monkeypatch.setenv('FAKE_ROS2_COUNTS', json.dumps({'/excavator/status': 42}))
+        recorder, log = _recorder_with_log()
+        assert recorder.start_recording(_config(tmp_path), fake_node) is True
+        ready = os.path.join(recorder.session_path, 'rosbag', 'ready')
+        qtbot.waitUntil(lambda: os.path.exists(ready), timeout=10000)
+        # The GUI's own subscription sees a different number than the recorder writes.
+        for _ in range(7):
+            fake_node.subscriptions[0]['callback'](b'')
+
+        recorder.stop_recording(fake_node)
+
+        sync = _sync_info(recorder)
+        assert sync['topic_message_counts'] == {'/excavator/status': 42}
+        assert sync['gui_received_counts'] == {'/excavator/status': 7}
+        assert recorder.last_bag_counts == {'/excavator/status': 42}
+
+    def test_sync_info_of_a_killed_recorder_has_no_made_up_counts(self, qtbot, tmp_path, fake_node, fake_ros2):
+        recorder, log = _recorder_with_log()
+        assert recorder.start_recording(_config(tmp_path), fake_node) is True
+        fake_node.subscriptions[0]['callback'](b'')
+
+        with qtbot.waitSignal(recorder.error_occurred, timeout=10000):
+            os.kill(recorder._bag_proc._proc.processId(), signal.SIGKILL)
+
+        sync = _sync_info(recorder)
+        assert sync['topic_message_counts'] is None
+        assert sync['gui_received_counts'] == {'/excavator/status': 1}
+        assert recorder.last_bag_counts is None
+
     def test_recorder_exit_during_recording_is_reported(self, qtbot, tmp_path, fake_node, fake_ros2):
         recorder, log = _recorder_with_log()
         assert recorder.start_recording(_config(tmp_path), fake_node) is True

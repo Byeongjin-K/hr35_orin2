@@ -214,6 +214,23 @@ class RecordingTab(QWidget):
         logger.info("Recorder stopped")
         self._stats_timer.stop()
         self._ros2_thread.set_hz_active(True)
+        self._show_bag_counts()
+
+    def _show_bag_counts(self):
+        """Replace the live (GUI-side) numbers with what the finished bag really holds."""
+        bag_counts = self._recorder.last_bag_counts
+        self.status_panel.show_bag_counts(bag_counts, self._recorder.topic_counts)
+        if bag_counts is None:
+            self.status_panel.add_notice(
+                "The bag has no metadata.yaml, so its message counts are unknown. "
+                "Run: ros2 bag reindex -s sqlite3 <session>/rosbag"
+            )
+            return
+        empty = [t for t in self._recorder.last_bag_topics if not bag_counts.get(t)]
+        if empty:
+            self.status_panel.add_notice(
+                "No messages in the bag for: " + ", ".join(sorted(empty))
+            )
     
     def _on_message_recorded(self, topic_name: str, count: int):
         pass
