@@ -69,6 +69,11 @@ class ROS2Thread(QThread):
                 except (ShutdownException, ExternalShutdownException):
                     break
 
+            if self._running:
+                # Not our stop(): the ROS context was shut down from outside
+                # (rclpy does that on SIGTERM). Say so instead of "Connected".
+                self.connection_status_changed.emit(False)
+
         except Exception as e:
             self.error_occurred.emit(f"ROS2 error: {e}")
             self.connection_status_changed.emit(False)

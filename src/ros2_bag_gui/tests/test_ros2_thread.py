@@ -36,3 +36,21 @@ def test_thread_survives_a_subscription_destroyed_under_the_executor(qtbot, monk
 
     assert thread.isFinished()
     assert connection == [True]
+
+
+def test_thread_says_disconnected_when_ros_is_shut_down_from_outside(qtbot):
+    """rclpy shuts its context down on SIGTERM; the label must not stay on Connected."""
+    import rclpy
+    thread = ROS2Thread()
+    connection = []
+    thread.connection_status_changed.connect(connection.append)
+    with qtbot.waitSignal(thread.connection_status_changed, timeout=10000):
+        thread.start()
+
+    try:
+        with qtbot.waitSignal(thread.connection_status_changed, timeout=10000):
+            rclpy.shutdown()
+    finally:
+        thread.stop()
+
+    assert connection == [True, False]
