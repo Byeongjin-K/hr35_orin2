@@ -571,11 +571,14 @@ def test_recording_is_stopped_while_the_low_space_warning_is_still_open(recordin
         stopped_while_open.append(True)
 
     monkeypatch.setattr(QMessageBox, 'warning', warning_left_open)
-    _disk_with(monkeypatch, free_gb=3)
+    _disk_with(monkeypatch, free_gb=50)
     recording_tab.topic_list.list_btn.setChecked(True)
     recording_tab.topic_list.tree.topLevelItem(0).setCheckState(0, Qt.CheckState.Checked)
     recording_tab._on_start_clicked()
     recording_tab.status_panel._timer.setInterval(20)
+    # The fall below the warning level is noticed by a timer tick, so the
+    # warning comes out of the timer's own slot.
+    _disk_with(monkeypatch, free_gb=3)
 
     qtbot.waitUntil(lambda: stopped_while_open == [True], timeout=10000)
 
