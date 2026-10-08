@@ -16,7 +16,8 @@ class AppSettings:
     split_mode: str = "size"  # "size", "time", "none"
     split_size_gb: float = 3.0
     split_time_minutes: int = 30
-    lidar_mode: str = "bag"        # "bag", "laz", "both"
+    lidar_boom_mode: str = "bag"   # "bag", "laz", "both"
+    lidar_cabin_mode: str = "bag"  # "bag", "laz", "both"
     camera_mode: str = "bag"       # "bag", "svo2", "both"
     last_selected_topics: list = field(default_factory=list)
 
@@ -39,6 +40,10 @@ class SettingsManager:
                     # Filter out unknown keys to avoid TypeError
                     valid_keys = self._settings.__annotations__.keys()
                     filtered_data = {k: v for k, v in data.items() if k in valid_keys}
+                    # Settings written before the lidars were told apart held one
+                    # mode, and only the boom was ever recorded to LAZ.
+                    if 'lidar_boom_mode' not in data and 'lidar_mode' in data:
+                        filtered_data['lidar_boom_mode'] = data['lidar_mode']
                     self._settings = AppSettings(**filtered_data)
         except Exception as e:
             _logger.error("Failed to load settings: %s", e)

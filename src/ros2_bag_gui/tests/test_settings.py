@@ -10,10 +10,21 @@ class TestAppSettings:
         settings = AppSettings()
         assert settings.split_mode == "size"
         assert settings.split_size_gb == 3.0
-        assert settings.lidar_mode == "bag"
+        assert settings.lidar_boom_mode == "bag"
+        assert settings.lidar_cabin_mode == "bag"
         assert settings.camera_mode == "bag"
 
 class TestSettingsManager:
+    def test_a_config_from_before_the_lidars_were_told_apart(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(SettingsManager, 'CONFIG_DIR', tmp_path)
+        monkeypatch.setattr(SettingsManager, 'CONFIG_FILE', tmp_path / 'config.json')
+        (tmp_path / 'config.json').write_text('{"lidar_mode": "laz"}')
+
+        settings = SettingsManager().settings
+
+        assert settings.lidar_boom_mode == "laz"
+        assert settings.lidar_cabin_mode == "bag"
+
     def test_save_and_load(self, tmp_path, monkeypatch):
         # Override config path
         monkeypatch.setattr(SettingsManager, 'CONFIG_DIR', tmp_path)

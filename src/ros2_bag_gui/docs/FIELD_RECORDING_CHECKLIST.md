@@ -34,7 +34,7 @@ GUI 프로세스가 죽으면(`kill -9`, OOM, 세션 끊김) recorder는 SIGINT�
 
 1. `echo $ROS_DOMAIN_ID`가 차량 값인지 확인하고 로거를 띄운다. 도메인이 다르면 토픽이 보이지 않는다.
 2. `df -h <출력경로>`: 예상 세션 용량의 2배 이상, 최소 20 GB.
-3. 설정: LiDAR = "Bag에 포함", Camera = "Bag에 포함"이 기본이다. "둘 다"와 "SVO2/LAZ 분리 저장"은 4장의 실차 확인을 통과한 뒤에 쓴다. Split은 "By Size" 3 GB 이하 또는 "By Time".
+3. 설정: 붐 LiDAR와 캐빈 LiDAR는 각자 모드를 가지며 기본은 둘 다 "Bag에 포함"이다. Camera도 "Bag에 포함"이 기본이다. "둘 다"와 "SVO2/LAZ 분리 저장"은 4장의 실차 확인을 통과한 뒤에 쓴다. Split은 "By Size" 3 GB 이하 또는 "By Time".
 4. 센서가 다 뜬 뒤에 토픽을 체크하거나 프로필을 불러온다. 먼저 불러와도 선택은 유지되지만, 목록 아래에 "selected but not available now"가 남아 있으면 그 센서가 아직 안 뜬 것이다.
 5. Start를 누른다. 확인 창(없는 토픽, 남아 있는 recorder, 디스크 부족)이 뜨면 내용을 읽고 답한다.
 
@@ -76,11 +76,12 @@ pgrep -af "ros2 bag record"                # 비어 있어야 한다
 
 ### 4.2 Ouster 라이다 / LAZ 경로
 
-1. `ros2 topic hz /lidar_boom/points`로 주기를 재고 LiDAR = "둘 다"로 60초 녹화한다.
+1. `ros2 topic hz /lidar_boom/points`로 주기를 재고 붐 LiDAR = "둘 다"로 60초 녹화한다.
 2. 합격: "In bag"의 라이다 개수가 Hz x 60의 99% 이상이고, `sync_info.json`의 `dropped_frames`가 0이며, LAZ 파일 수가 bag 개수와 같다.
 3. bag 개수 자체가 낮으면 전송 유실이다(best-effort 대용량 토픽). 해당 토픽의 QoS와 수신 버퍼(`net.core.rmem_max`)를 본다.
-4. LAZ는 x, y, z, intensity만 남긴다. ring, 점별 시간, reflectivity가 필요하면 bag에 남겨야 한다. 캐빈 라이다는 LAZ 대상이 아니며 항상 bag에 기록된다.
-5. 라이다 2대를 LAZ로 기록하면 `pointcloud/<토픽이름>/` 폴더로 나뉜다. 1대면 `pointcloud/`에 바로 쌓인다.
+4. LAZ는 x, y, z, intensity만 남긴다. ring, 점별 시간, reflectivity가 필요하면 bag에 남겨야 한다.
+5. 붐(`/lidar_boom/points`, 단일 센서 bringup의 `/ouster/points`)과 캐빈(`/lidar_cabin/points`)은 각자 모드를 따른다. 한쪽만 LAZ면 `pointcloud/`에 바로 쌓이고, 둘 다 LAZ면 `pointcloud/<토픽이름>/` 폴더로 나뉜다. 파일 이름이 타임스탬프뿐이라 두 라이다를 한 폴더에 두면 같은 시각의 프레임이 서로 덮어쓴다.
+6. LAZ를 요청한 라이다의 구독이 하나도 올라오지 않으면 그 라이다는 bag으로 기록되고, `sync_info.json`의 `recording_modes.lidar`에 `bag`으로 적힌다. 이 항목은 라이다별 객체(`{"boom": ..., "cabin": ...}`)다.
 
 ### 4.3 실제 디스크 속도
 

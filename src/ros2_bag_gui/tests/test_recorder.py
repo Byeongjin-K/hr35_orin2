@@ -10,52 +10,86 @@ from types import SimpleNamespace
 import pytest
 from PySide6.QtWidgets import QApplication
 from ros2_bag_gui.ros2.recorder import (
-    should_include_in_rosbag, should_record_lidar_laz,
+    should_include_in_rosbag, should_record_lidar_laz, lidar_group_of,
     RecordingConfig, Recorder, SYSTEM_EXCLUDE
 )
 
+ALL_BAG = {'boom': 'bag', 'cabin': 'bag'}
+
 class TestTopicExclusion:
     def test_lidar_points_excluded_in_laz_mode(self):
-        assert not should_include_in_rosbag('/lidar_boom/points', lidar_mode='laz', camera_mode='bag')
+        assert not should_include_in_rosbag(
+            '/lidar_boom/points', {'boom': 'laz'}, camera_mode='bag')
 
     def test_lidar_points_included_in_bag_mode(self):
-        assert should_include_in_rosbag('/lidar_boom/points', lidar_mode='bag', camera_mode='bag')
+        assert should_include_in_rosbag('/lidar_boom/points', ALL_BAG, camera_mode='bag')
 
     def test_lidar_points_included_in_both_mode(self):
-        assert should_include_in_rosbag('/lidar_boom/points', lidar_mode='both', camera_mode='bag')
+        assert should_include_in_rosbag(
+            '/lidar_boom/points', {'boom': 'both'}, camera_mode='bag')
 
     def test_rosout_excluded(self):
-        assert not should_include_in_rosbag('/rosout', lidar_mode='bag', camera_mode='bag')
+        assert not should_include_in_rosbag('/rosout', ALL_BAG, camera_mode='bag')
 
     def test_camera_image_excluded_in_svo2_mode(self):
         assert not should_include_in_rosbag(
             '/zedx_boom/zedx_node/left/image_rect_color',
-            lidar_mode='bag', camera_mode='svo2',
+            ALL_BAG, camera_mode='svo2',
         )
 
     def test_camera_image_included_in_bag_mode(self):
         assert should_include_in_rosbag(
             '/zedx_boom/zedx_node/left/image_rect_color',
-            lidar_mode='bag', camera_mode='bag',
+            ALL_BAG, camera_mode='bag',
         )
 
     def test_normal_topic_included(self):
-        assert should_include_in_rosbag('/excavator/status', lidar_mode='bag', camera_mode='bag')
-        assert should_include_in_rosbag('/tf', lidar_mode='bag', camera_mode='bag')
+        assert should_include_in_rosbag('/excavator/status', ALL_BAG, camera_mode='bag')
+        assert should_include_in_rosbag('/tf', ALL_BAG, camera_mode='bag')
 
     def test_gps_topic_included(self):
-        assert should_include_in_rosbag('/gps_interface/position', lidar_mode='bag', camera_mode='bag')
+        assert should_include_in_rosbag('/gps_interface/position', ALL_BAG, camera_mode='bag')
+
+    def test_one_lidar_leaves_the_bag_while_the_other_stays(self):
+        modes = {'boom': 'laz', 'cabin': 'bag'}
+        assert not should_include_in_rosbag('/lidar_boom/points', modes, camera_mode='bag')
+        assert should_include_in_rosbag('/lidar_cabin/points', modes, camera_mode='bag')
+
+    def test_the_cabin_can_be_the_one_that_leaves_the_bag(self):
+        modes = {'boom': 'bag', 'cabin': 'laz'}
+        assert should_include_in_rosbag('/lidar_boom/points', modes, camera_mode='bag')
+        assert not should_include_in_rosbag('/lidar_cabin/points', modes, camera_mode='bag')
+
+
+class TestLidarGroups:
+    def test_ouster_points_is_the_boom_lidar(self):
+        assert lidar_group_of('/ouster/points') == 'boom'
+        assert lidar_group_of('/lidar_boom/points') == 'boom'
+
+    def test_cabin_points_is_the_cabin_lidar(self):
+        assert lidar_group_of('/lidar_cabin/points') == 'cabin'
+
+    def test_other_topics_belong_to_no_lidar(self):
+        assert lidar_group_of('/tf') is None
 
 
 class TestLidarLaz:
     def test_lidar_recorded_to_laz(self):
-        assert should_record_lidar_laz('/lidar_boom/points', lidar_mode='laz')
+        assert should_record_lidar_laz('/lidar_boom/points', {'boom': 'laz'})
 
     def test_lidar_not_recorded_in_bag_only(self):
-        assert not should_record_lidar_laz('/lidar_boom/points', lidar_mode='bag')
+        assert not should_record_lidar_laz('/lidar_boom/points', ALL_BAG)
 
     def test_non_lidar_not_recorded(self):
-        assert not should_record_lidar_laz('/tf', lidar_mode='laz')
+        assert not should_record_lidar_laz('/tf', {'boom': 'laz'})
+
+    def test_each_lidar_follows_its_own_mode(self):
+        modes = {'boom': 'laz', 'cabin': 'bag'}
+        assert should_record_lidar_laz('/lidar_boom/points', modes)
+        assert not should_record_lidar_laz('/lidar_cabin/points', modes)
+
+    def test_cabin_is_recorded_to_laz_when_asked_for(self):
+        assert should_record_lidar_laz('/lidar_cabin/points', {'cabin': 'both'})
 
 
 class TestRecordingConfig:
@@ -470,6 +504,7 @@ BOOM_IMAGE = {'name': '/zedx_boom/zed_node/left/image_rect_color', 'type': 'sens
 CABIN_IMAGE = {'name': '/zedx_cabin/zed_node/left/image_rect_color', 'type': 'sensor_msgs/msg/Image'}
 BOOM_CLOUD = {'name': '/lidar_boom/points', 'type': 'sensor_msgs/msg/PointCloud2'}
 OUSTER_CLOUD = {'name': '/ouster/points', 'type': 'sensor_msgs/msg/PointCloud2'}
+CABIN_CLOUD = {'name': '/lidar_cabin/points', 'type': 'sensor_msgs/msg/PointCloud2'}
 
 
 def _cloud_bytes(stamp_sec):
@@ -612,7 +647,7 @@ class TestSideRecorders:
     def test_lidar_that_laz_cannot_subscribe_to_stays_in_bag(self, session):
         cloud = {'name': BOOM_CLOUD['name'], 'type': 'no_such_pkg/msg/Nope'}
 
-        bag_args = session.start([STATUS, cloud], lidar_mode='laz')
+        bag_args = session.start([STATUS, cloud], lidar_modes={'boom': 'laz'})
 
         assert cloud['name'] in bag_args
         assert len(session.log['warnings']) == 1
@@ -620,19 +655,19 @@ class TestSideRecorders:
     def test_lidar_mode_says_bag_when_no_laz_subscription_starts(self, session):
         cloud = {'name': BOOM_CLOUD['name'], 'type': 'no_such_pkg/msg/Nope'}
 
-        session.start([STATUS, cloud], lidar_mode='laz')
+        session.start([STATUS, cloud], lidar_modes={'boom': 'laz'})
         session.recorder.stop_recording()
 
-        assert _sync_info(session.recorder)['recording_modes']['lidar'] == 'bag'
+        assert _sync_info(session.recorder)['recording_modes']['lidar'] == {'boom': 'bag'}
 
     def test_laz_recording_takes_lidar_out_of_the_bag(self, session):
-        bag_args = session.start([STATUS, BOOM_CLOUD], lidar_mode='laz')
+        bag_args = session.start([STATUS, BOOM_CLOUD], lidar_modes={'boom': 'laz'})
 
         assert BOOM_CLOUD['name'] not in bag_args
         assert session.log['warnings'] == []
 
     def test_two_lidars_do_not_overwrite_each_others_laz_files(self, session):
-        session.start([BOOM_CLOUD, OUSTER_CLOUD], lidar_mode='laz')
+        session.start([STATUS, BOOM_CLOUD, OUSTER_CLOUD], lidar_modes={'boom': 'laz'})
         same_instant = _cloud_bytes(1_700_000_000)
 
         _laz_callback(session.node, BOOM_CLOUD['name'])(same_instant)
@@ -649,13 +684,71 @@ class TestSideRecorders:
         }
 
     def test_one_lidar_keeps_the_flat_pointcloud_folder(self, session):
-        session.start([BOOM_CLOUD], lidar_mode='laz')
+        session.start([STATUS, BOOM_CLOUD], lidar_modes={'boom': 'laz'})
 
         _laz_callback(session.node, BOOM_CLOUD['name'])(_cloud_bytes(1_700_000_000))
         session.recorder.stop_recording()
 
         pointcloud_dir = os.path.join(session.recorder.session_path, 'pointcloud')
         assert os.listdir(pointcloud_dir) == ['1700000000000000000.laz']
+
+    def test_only_the_lidar_asked_for_laz_leaves_the_bag(self, session):
+        bag_args = session.start(
+            [BOOM_CLOUD, CABIN_CLOUD], lidar_modes={'boom': 'laz', 'cabin': 'bag'})
+
+        assert BOOM_CLOUD['name'] not in bag_args
+        assert CABIN_CLOUD['name'] in bag_args
+        session.recorder.stop_recording()
+        assert _sync_info(session.recorder)['recording_modes']['lidar'] == {
+            'boom': 'laz', 'cabin': 'bag'}
+
+    def test_the_cabin_alone_can_be_recorded_to_laz(self, session):
+        bag_args = session.start(
+            [BOOM_CLOUD, CABIN_CLOUD], lidar_modes={'boom': 'bag', 'cabin': 'laz'})
+
+        assert BOOM_CLOUD['name'] in bag_args
+        assert CABIN_CLOUD['name'] not in bag_args
+        _laz_callback(session.node, CABIN_CLOUD['name'])(_cloud_bytes(1_700_000_001))
+        session.recorder.stop_recording()
+
+        assert len(_laz_files(session.recorder)) == 1
+        pointcloud = _sync_info(session.recorder)['data_sources']['pointcloud']
+        assert list(pointcloud['topics']) == [CABIN_CLOUD['name']]
+
+    def test_start_is_refused_when_no_topic_would_go_into_the_bag(
+            self, qtbot, tmp_path, fake_node, fake_ros2):
+        recorder, log = _recorder_with_log()
+        config = RecordingConfig(
+            topics=[BOOM_CLOUD, CABIN_CLOUD],
+            output_path=str(tmp_path / 'out'),
+            session_name='t',
+            lidar_modes={'boom': 'laz', 'cabin': 'laz'},
+        )
+
+        assert recorder.start_recording(config, fake_node) is False
+
+        assert not recorder.is_recording
+        assert recorder._bag_proc is None
+        assert 'into the bag' in log['errors'][0]
+        assert os.listdir(tmp_path / 'out') == []
+
+    def test_both_lidars_in_laz_get_a_folder_each(self, session):
+        session.start(
+            [STATUS, BOOM_CLOUD, CABIN_CLOUD],
+            lidar_modes={'boom': 'laz', 'cabin': 'laz'})
+        same_instant = _cloud_bytes(1_700_000_000)
+
+        _laz_callback(session.node, BOOM_CLOUD['name'])(same_instant)
+        _laz_callback(session.node, CABIN_CLOUD['name'])(same_instant)
+        session.recorder.stop_recording()
+
+        files = _laz_files(session.recorder)
+        assert len(files) == 2
+        assert len({os.path.dirname(f) for f in files}) == 2
+        pointcloud = _sync_info(session.recorder)['data_sources']['pointcloud']
+        assert {t: v['file_count'] for t, v in pointcloud['topics'].items()} == {
+            BOOM_CLOUD['name']: 1, CABIN_CLOUD['name']: 1,
+        }
 
     def test_dropped_laz_frames_are_counted_and_reported(self, session, monkeypatch):
         from ros2_bag_gui.ros2.laz_writer import LAZWriterThread
@@ -668,7 +761,7 @@ class TestSideRecorders:
 
         monkeypatch.setattr(LAZWriterThread, '_handle_item', slow_disk)
         monkeypatch.setattr(LAZWriterThread, 'QUEUE_MAXSIZE', 1)
-        session.start([BOOM_CLOUD], lidar_mode='laz')
+        session.start([STATUS, BOOM_CLOUD], lidar_modes={'boom': 'laz'})
 
         for i in range(5):
             _laz_callback(session.node, BOOM_CLOUD['name'])(_cloud_bytes(1_700_000_000 + i))

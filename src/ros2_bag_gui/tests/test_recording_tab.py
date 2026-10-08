@@ -123,7 +123,7 @@ def test_start_button_emits_signal(recording_tab, qtbot):
     assert 'topics' in config
     assert len(config['topics']) > 0
     assert config['session_name'] == "test_session"
-    assert config['lidar_mode'] == "bag"
+    assert config['lidar_modes'] == {'boom': 'bag', 'cabin': 'bag'}
     assert config['camera_mode'] == "bag"
     assert recording_tab._recorder.started_with.topics[0]['name'] == config['topics'][0]
 

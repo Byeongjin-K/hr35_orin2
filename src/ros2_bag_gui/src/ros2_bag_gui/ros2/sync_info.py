@@ -28,7 +28,7 @@ def create_sync_info(
     start_time: datetime,
     end_time: datetime,
     topic_counts: Dict[str, int],
-    lidar_mode: str = "bag",
+    lidar_modes: Optional[Dict[str, str]] = None,
     camera_mode: str = "bag",
     laz_file_count: int = 0,
     svo2_files: Optional[List[str]] = None,
@@ -49,13 +49,14 @@ def create_sync_info(
             subscription received. Not what is in the bag.
         bag_message_counts: Dict of topic_name → messages in the bag (from its
             metadata), or None when the bag could not be read.
-        lidar_mode: "bag", "laz", or "both" (the mode really in effect).
+        lidar_modes: Per lidar ("boom", "cabin"), the "bag", "laz" or "both"
+            really in effect.
         camera_mode: "bag", "svo2", or "both" (the mode really in effect).
         notices: What was done differently from what was asked (mode fallbacks).
         recorder_warnings: Problem lines printed by ros2 bag record (first 50).
         laz_summary: LAZ writer totals: dropped_frames, write_errors and, per
             topic, the folder and file count.
-        laz_file_count: Number of LAZ files written (if lidar_mode != "bag").
+        laz_file_count: Number of LAZ files written (if any lidar is on LAZ).
         svo2_files: List of SVO2 file paths (if camera_mode != "bag").
         forced_stop: Whether recording was force-stopped.
         stop_reason: Reason for force stop.
@@ -68,6 +69,8 @@ def create_sync_info(
     end_ns = int(end_time.timestamp() * 10**9)
 
     # --- data_sources ---
+    modes = dict(lidar_modes or {})
+
     data_sources: Dict = {
         "rosbag": {
             "path": "rosbag/",
@@ -83,7 +86,7 @@ def create_sync_info(
     }
 
     # Pointcloud (LAZ) source — present when lidar writes LAZ files
-    if lidar_mode in ("laz", "both"):
+    if any(mode in ("laz", "both") for mode in modes.values()):
         data_sources["pointcloud"] = {
             "path": "pointcloud/",
             "file_count": laz_file_count,
@@ -107,7 +110,7 @@ def create_sync_info(
         "end_time_ns": end_ns,
         "time_reference": "ros_epoch_ns",
         "recording_modes": {
-            "lidar": lidar_mode,
+            "lidar": modes,
             "camera": camera_mode
         },
         "data_sources": data_sources,

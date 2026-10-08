@@ -427,7 +427,7 @@ class RecordingTab(QWidget):
             session_name=settings.session_name,
             max_bagfile_size=split_bytes,
             max_bag_duration=split_seconds,
-            lidar_mode=settings.lidar_mode,
+            lidar_modes=self.settings_panel.lidar_modes(),
             camera_mode=settings.camera_mode,
         )
         
@@ -470,7 +470,7 @@ class RecordingTab(QWidget):
             'topics': selected_topic_names,
             'output_path': settings.output_path,
             'session_name': settings.session_name,
-            'lidar_mode': settings.lidar_mode,
+            'lidar_modes': self.settings_panel.lidar_modes(),
             'camera_mode': settings.camera_mode,
         }
         self.recording_start_requested.emit(config)
@@ -527,7 +527,8 @@ class RecordingTab(QWidget):
             save_path=settings.output_path,
             session_name_template=settings.session_name,
             max_bag_size_gb=settings.split_size_gb,
-            lidar_mode=settings.lidar_mode,
+            lidar_boom_mode=settings.lidar_boom_mode,
+            lidar_cabin_mode=settings.lidar_cabin_mode,
             camera_mode=settings.camera_mode,
         )
         
@@ -566,9 +567,8 @@ class RecordingTab(QWidget):
             self.settings_panel.path_edit.setText(profile.save_path)
             self.settings_panel.session_name_edit.setText(profile.session_name_template)
             self.settings_panel.split_size_spin.setValue(profile.max_bag_size_gb)
-            # Load LiDAR mode
-            lidar_mode_map = {"bag": 0, "laz": 1, "both": 2}
-            self.settings_panel.lidar_mode_combo.setCurrentIndex(lidar_mode_map.get(profile.lidar_mode, 0))
+            self.settings_panel.set_lidar_modes(
+                profile.lidar_boom_mode, profile.lidar_cabin_mode)
             # Load Camera mode
             camera_mode_ok = self.settings_panel.set_camera_mode(profile.camera_mode)
             

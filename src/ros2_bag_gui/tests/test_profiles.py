@@ -16,7 +16,8 @@ class TestRecordingProfile:
         assert profile.save_path == ""
         assert profile.session_name_template == ""
         assert profile.max_bag_size_gb == 3.0
-        assert profile.lidar_mode == "bag"
+        assert profile.lidar_boom_mode == "bag"
+        assert profile.lidar_cabin_mode == "bag"
         assert profile.camera_mode == "bag"
         assert profile.created_at == ""
         assert profile.updated_at == ""
@@ -28,7 +29,8 @@ class TestRecordingProfile:
             save_path="/home/user/data",
             session_name_template="session_{timestamp}",
             max_bag_size_gb=5.0,
-            lidar_mode="laz",
+            lidar_boom_mode="laz",
+            lidar_cabin_mode="both",
             camera_mode="svo2",
         )
         assert profile.name == "custom"
@@ -36,7 +38,8 @@ class TestRecordingProfile:
         assert profile.save_path == "/home/user/data"
         assert profile.session_name_template == "session_{timestamp}"
         assert profile.max_bag_size_gb == 5.0
-        assert profile.lidar_mode == "laz"
+        assert profile.lidar_boom_mode == "laz"
+        assert profile.lidar_cabin_mode == "both"
         assert profile.camera_mode == "svo2"
 
 
@@ -279,7 +282,7 @@ class TestProfileManager:
                 save_path="/path",
                 session_name_template="session",
                 max_bag_size_gb=5.0,
-                lidar_mode="laz",
+                lidar_boom_mode="laz",
                 camera_mode="svo2",
             )
             filepath = manager.save_profile(profile)
@@ -292,11 +295,21 @@ class TestProfileManager:
             assert 'save_path' in data
             assert 'session_name_template' in data
             assert 'max_bag_size_gb' in data
-            assert 'lidar_mode' in data
+            assert 'lidar_boom_mode' in data
+            assert 'lidar_cabin_mode' in data
             assert 'camera_mode' in data
             assert 'created_at' in data
             assert 'updated_at' in data
     
+    def test_a_profile_from_before_the_lidars_were_told_apart(self, tmp_path):
+        manager = ProfileManager(str(tmp_path))
+        (tmp_path / 'old.json').write_text('{"name": "old", "lidar_mode": "both"}')
+
+        profile = manager.load_profile('old')
+
+        assert profile.lidar_boom_mode == "both"
+        assert profile.lidar_cabin_mode == "bag"
+
     def test_custom_profiles_directory(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             custom_dir = os.path.join(tmpdir, "custom", "profiles")

@@ -87,15 +87,12 @@ class SettingsPanel(QWidget):
         lidar_group = QGroupBox("LiDAR Recording Mode")
         lidar_layout = QVBoxLayout(lidar_group)
         
-        lidar_mode_layout = QHBoxLayout()
-        lidar_mode_layout.addWidget(QLabel("Mode:"))
-        self.lidar_mode_combo = QComboBox()
-        self.lidar_mode_combo.addItems(["Bag에 포함", "LAZ 분리 저장", "둘 다"])
-        self.lidar_mode_combo.currentIndexChanged.connect(self._on_settings_changed)
-        lidar_mode_layout.addWidget(self.lidar_mode_combo)
-        lidar_layout.addLayout(lidar_mode_layout)
+        self.lidar_boom_mode_combo = self._add_lidar_mode_row(lidar_layout, "붐 LiDAR:")
+        self.lidar_cabin_mode_combo = self._add_lidar_mode_row(lidar_layout, "캐빈 LiDAR:")
         
-        self.lidar_info_label = QLabel("ℹ️ LAZ 모드: LiDAR PointCloud2 → pointcloud/ 폴더에 프레임별 저장")
+        self.lidar_info_label = QLabel(
+            "ℹ️ LAZ 모드: LiDAR PointCloud2 → pointcloud/ 폴더에 프레임별 저장. "
+            "두 라이다를 모두 LAZ로 두면 토픽별 하위 폴더로 나뉩니다.")
         self.lidar_info_label.setStyleSheet("color: gray; font-size: 11px;")
         self.lidar_info_label.setWordWrap(True)
         lidar_layout.addWidget(self.lidar_info_label)
@@ -133,6 +130,16 @@ class SettingsPanel(QWidget):
         layout.addWidget(camera_group)
         layout.addStretch()
     
+    def _add_lidar_mode_row(self, layout, label: str) -> QComboBox:
+        row = QHBoxLayout()
+        row.addWidget(QLabel(label))
+        combo = QComboBox()
+        combo.addItems(["Bag에 포함", "LAZ 분리 저장", "둘 다"])
+        combo.currentIndexChanged.connect(self._on_settings_changed)
+        row.addWidget(combo)
+        layout.addLayout(row)
+        return combo
+
     def _on_browse(self):
         """Open folder selection dialog."""
         path = QFileDialog.getExistingDirectory(
@@ -160,7 +167,7 @@ class SettingsPanel(QWidget):
         """Load settings into UI.
 
         Signals are blocked during bulk loading to prevent premature saves
-        that could overwrite persisted values (e.g. output_path, lidar_mode)
+        that could overwrite persisted values (e.g. output_path, lidar modes)
         before all widgets are updated.
         """
         s = self._settings_manager.settings
@@ -168,7 +175,8 @@ class SettingsPanel(QWidget):
         widgets = [
             self.session_name_edit, self.split_combo,
             self.split_size_spin, self.split_time_spin,
-            self.lidar_mode_combo, self.camera_mode_combo,
+            self.lidar_boom_mode_combo, self.lidar_cabin_mode_combo,
+            self.camera_mode_combo,
         ]
         for w in widgets:
             w.blockSignals(True)
@@ -183,7 +191,8 @@ class SettingsPanel(QWidget):
         self.split_time_spin.setValue(s.split_time_minutes)
 
         lidar_mode_map = {"bag": 0, "laz": 1, "both": 2}
-        self.lidar_mode_combo.setCurrentIndex(lidar_mode_map.get(s.lidar_mode, 0))
+        self.lidar_boom_mode_combo.setCurrentIndex(lidar_mode_map.get(s.lidar_boom_mode, 0))
+        self.lidar_cabin_mode_combo.setCurrentIndex(lidar_mode_map.get(s.lidar_cabin_mode, 0))
 
         camera_mode_map = {"bag": 0, "svo2": 1, "both": 2}
         idx = camera_mode_map.get(s.camera_mode, 0)
@@ -205,6 +214,17 @@ class SettingsPanel(QWidget):
         self.split_size_spin.setEnabled(split_idx == 0)
         self.split_time_spin.setEnabled(split_idx == 1)
     
+    def lidar_modes(self) -> dict[str, str]:
+        """The chosen mode per lidar, keyed the way the recorder expects."""
+        s = self.get_settings()
+        return {'boom': s.lidar_boom_mode, 'cabin': s.lidar_cabin_mode}
+
+    def set_lidar_modes(self, boom: str, cabin: str) -> None:
+        """Select both lidar modes (e.g. from a profile)."""
+        index = {"bag": 0, "laz": 1, "both": 2}
+        self.lidar_boom_mode_combo.setCurrentIndex(index.get(boom, 0))
+        self.lidar_cabin_mode_combo.setCurrentIndex(index.get(cabin, 0))
+
     def set_camera_mode(self, mode: str) -> bool:
         """Select a camera mode (e.g. from a profile).
 
@@ -228,7 +248,8 @@ class SettingsPanel(QWidget):
             split_mode=mode_map[self.split_combo.currentIndex()],
             split_size_gb=self.split_size_spin.value(),
             split_time_minutes=self.split_time_spin.value(),
-            lidar_mode=lidar_mode_map[self.lidar_mode_combo.currentIndex()],
+            lidar_boom_mode=lidar_mode_map[self.lidar_boom_mode_combo.currentIndex()],
+            lidar_cabin_mode=lidar_mode_map[self.lidar_cabin_mode_combo.currentIndex()],
             camera_mode=camera_mode_map[self.camera_mode_combo.currentIndex()]
         )
     

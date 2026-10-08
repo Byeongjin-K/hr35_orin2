@@ -15,10 +15,25 @@ class RecordingProfile:
     save_path: str = ""                    # Default save path
     session_name_template: str = ""        # Session name template
     max_bag_size_gb: float = 3.0           # Max bag file size
-    lidar_mode: str = "bag"                # "bag", "laz", "both"
+    lidar_boom_mode: str = "bag"           # "bag", "laz", "both"
+    lidar_cabin_mode: str = "bag"          # "bag", "laz", "both"
     camera_mode: str = "bag"               # "bag", "svo2", "both"
     created_at: str = ""                   # ISO timestamp
     updated_at: str = ""                   # ISO timestamp
+
+
+def _from_stored(data: dict) -> dict:
+    """Keyword arguments for RecordingProfile from a stored profile.
+
+    A profile written before the lidars were told apart held one mode, and only
+    the boom was ever recorded to LAZ. Keys this version does not know are
+    dropped so an older or newer profile loads instead of raising.
+    """
+    data = dict(data)
+    legacy = data.pop('lidar_mode', None)
+    if legacy is not None and 'lidar_boom_mode' not in data:
+        data['lidar_boom_mode'] = legacy
+    return {k: v for k, v in data.items() if k in RecordingProfile.__annotations__}
 
 
 class ProfileManager:
@@ -64,7 +79,7 @@ class ProfileManager:
         with open(filepath, 'r', encoding='utf-8') as f:
             data = json.load(f)
         
-        return RecordingProfile(**data)
+        return RecordingProfile(**_from_stored(data))
     
     def list_profiles(self) -> list:
         """List all saved profile names (sorted alphabetically)."""
@@ -115,7 +130,8 @@ class ProfileManager:
             save_path=profile.save_path,
             session_name_template=profile.session_name_template,
             max_bag_size_gb=profile.max_bag_size_gb,
-            lidar_mode=profile.lidar_mode,
+            lidar_boom_mode=profile.lidar_boom_mode,
+            lidar_cabin_mode=profile.lidar_cabin_mode,
             camera_mode=profile.camera_mode,
             created_at=profile.created_at,
             updated_at=profile.updated_at

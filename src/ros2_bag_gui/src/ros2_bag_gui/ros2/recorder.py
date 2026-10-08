@@ -7,7 +7,7 @@ import threading
 from datetime import datetime
 from collections import deque
 from typing import List, Dict, Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from PySide6.QtCore import QObject, Signal, Slot
 
 from rclpy.callback_groups import ReentrantCallbackGroup
@@ -22,7 +22,13 @@ from ros2_bag_gui.logging_config import get_logger
 
 logger = get_logger(__name__)
 
-LIDAR_TOPICS = [r'^/lidar_boom/points$', r'^/ouster/points$']
+# Each lidar is recorded on its own terms, so its point cloud topics are named
+# per lidar. /ouster/points is the boom lidar under a single-sensor bringup.
+LIDAR_GROUPS = {
+    'boom': [r'^/lidar_boom/points$', r'^/ouster/points$'],
+    'cabin': [r'^/lidar_cabin/points$'],
+}
+DEFAULT_LIDAR_MODES = {group: "bag" for group in LIDAR_GROUPS}
 CAMERA_IMAGE_TOPICS = [
     r'^/zedx_[^/]+/[^/]+/.*image.*$',
     r'^/zedx_[^/]+/[^/]+/.*depth.*$',
@@ -43,21 +49,29 @@ class RecordingConfig:
     session_name: str
     max_bagfile_size: int = 3 * 1024**3
     max_bag_duration: int = 0  # seconds per bag file; 0 = do not split by time
-    lidar_mode: str = "bag"
+    lidar_modes: Dict[str, str] = field(
+        default_factory=lambda: dict(DEFAULT_LIDAR_MODES))
     camera_mode: str = "bag"
+
+
+def lidar_group_of(topic_name: str) -> Optional[str]:
+    for group, patterns in LIDAR_GROUPS.items():
+        if any(re.match(p, topic_name) for p in patterns):
+            return group
+    return None
 
 
 def should_include_in_rosbag(
     topic_name: str,
-    lidar_mode: str,
+    lidar_modes: Dict[str, str],
     camera_mode: str,
 ) -> bool:
     for p in SYSTEM_EXCLUDE:
         if re.match(p, topic_name):
             return False
-    for p in LIDAR_TOPICS:
-        if re.match(p, topic_name):
-            return lidar_mode in ("bag", "both")
+    group = lidar_group_of(topic_name)
+    if group is not None:
+        return lidar_modes.get(group, "bag") in ("bag", "both")
     for p in CAMERA_IMAGE_TOPICS:
         if re.match(p, topic_name):
             return camera_mode in ("bag", "both")
@@ -68,11 +82,11 @@ def _is_camera_image_topic(topic_name: str) -> bool:
     return any(re.match(p, topic_name) for p in CAMERA_IMAGE_TOPICS)
 
 
-def should_record_lidar_laz(topic_name: str, lidar_mode: str) -> bool:
-    for p in LIDAR_TOPICS:
-        if re.match(p, topic_name):
-            return lidar_mode in ("laz", "both")
-    return False
+def should_record_lidar_laz(topic_name: str, lidar_modes: Dict[str, str]) -> bool:
+    group = lidar_group_of(topic_name)
+    if group is None:
+        return False
+    return lidar_modes.get(group, "bag") in ("laz", "both")
 
 
 class Recorder(QObject):
@@ -100,7 +114,9 @@ class Recorder(QObject):
         self._session_start_time: Optional[datetime] = None
         self._recording = threading.Event()
         self._node = None
-        self._effective_modes = ("bag", "bag")  # (lidar, camera) really in effect
+        # (per-lidar modes, camera mode) really in effect
+        self._effective_modes = (dict(DEFAULT_LIDAR_MODES), "bag")
+        self._laz_groups = set()  # lidars whose LAZ subscription really started
         self._notices: List[str] = []
         self._laz_error_reported = False
         self._stuck_threads: List[object] = []
@@ -151,19 +167,24 @@ class Recorder(QObject):
             # once the recorder that takes it instead is known to be running.
             camera_mode = self._start_camera_recording(config, session_folder, names, notices)
             keep_in_bag = self._start_lidar_recording(config, session_folder, node, cb_group, notices)
-            lidar_mode = config.lidar_mode
-            if lidar_mode in ("laz", "both") and not self._laz_subscriptions:
-                lidar_mode = "bag"
-            self._effective_modes = (lidar_mode, camera_mode)
+            self._effective_modes = (self._effective_lidar_modes(config), camera_mode)
             self._notices = notices
 
             bag_topics = [
                 name for name in names
                 if name in keep_in_bag
-                or should_include_in_rosbag(name, config.lidar_mode, camera_mode)
+                or should_include_in_rosbag(name, config.lidar_modes, camera_mode)
             ]
             self._bag_topics = bag_topics
             self._bag_counts = None
+            if not bag_topics:
+                # ros2 bag record refuses an empty topic list, and would only say
+                # "Invalid choice" from inside a failed Start.
+                raise RuntimeError(
+                    "no selected topic would go into the bag: every selected lidar is "
+                    "recorded to LAZ and nothing else is selected. Select another topic, "
+                    'or set a lidar to "both" so its point clouds are in the bag too'
+                )
 
             bag_proc = BagProcess(self)
             self._bag_proc = bag_proc
@@ -214,14 +235,20 @@ class Recorder(QObject):
         for writer in self._svo2_writers:
             self._retire_thread(writer)
         self._svo2_writers.clear()
-        # Leave no empty session folder behind a Start that did not happen.
+        # Leave no empty session folder behind a Start that did not happen. Only
+        # empty directories go: bottom-up rmdir keeps anything that holds data.
         session_folder = self._generate_session_path()
         if session_folder:
-            for folder in (os.path.join(session_folder, 'pointcloud'), session_folder):
-                try:
-                    os.rmdir(folder)
-                except OSError:
-                    pass  # not there, or it holds data
+            for root, dirs, _files in os.walk(session_folder, topdown=False):
+                for name in dirs:
+                    try:
+                        os.rmdir(os.path.join(root, name))
+                    except OSError:
+                        pass
+            try:
+                os.rmdir(session_folder)
+            except OSError:
+                pass
 
     def check_health(self) -> None:
         """Call about once a second while recording.
@@ -290,14 +317,15 @@ class Recorder(QObject):
 
     def _start_lidar_recording(self, config, session_folder, node, cb_group, notices) -> set:
         """Start LAZ recording if asked for; return the lidar topics that must stay in the bag."""
-        if config.lidar_mode not in ("laz", "both"):
+        self._laz_groups = set()
+        laz_topics = [
+            t['name'] for t in config.topics
+            if should_record_lidar_laz(t['name'], config.lidar_modes)
+        ]
+        if not laz_topics:
             return set()
         pointcloud_dir = os.path.join(session_folder, 'pointcloud')
         os.makedirs(pointcloud_dir, exist_ok=True)
-        laz_topics = [
-            t['name'] for t in config.topics
-            if should_record_lidar_laz(t['name'], config.lidar_mode)
-        ]
         # One lidar keeps the flat pointcloud/ folder the export tools read.
         # Two or more get a folder each: the files are named by timestamp only.
         subdirs = {}
@@ -311,15 +339,31 @@ class Recorder(QObject):
 
         failed = set()
         for topic in config.topics:
-            if should_record_lidar_laz(topic['name'], config.lidar_mode):
-                if not self._create_laz_subscription(node, topic['name'], topic['type'], cb_group):
-                    failed.add(topic['name'])
+            if topic['name'] not in laz_topics:
+                continue
+            if self._create_laz_subscription(node, topic['name'], topic['type'], cb_group):
+                self._laz_groups.add(lidar_group_of(topic['name']))
+            else:
+                failed.add(topic['name'])
         if failed:
             notices.append(
                 f"LAZ recording could not subscribe to {', '.join(sorted(failed))}. "
                 "These topics are recorded into the bag."
             )
         return failed
+
+    def _effective_lidar_modes(self, config) -> Dict[str, str]:
+        """A lidar asked for LAZ whose subscription never started is in the bag instead."""
+        return {
+            group: ("bag" if mode in ("laz", "both") and group not in self._laz_groups
+                    else mode)
+            for group, mode in config.lidar_modes.items()
+        }
+
+    def _laz_frames_also_in_bag(self) -> bool:
+        modes = self._effective_modes[0]
+        recording = [modes.get(group) for group in self._laz_groups]
+        return bool(recording) and all(mode == "both" for mode in recording)
 
     @Slot(str)
     def _on_svo2_error(self, msg: str):
@@ -340,7 +384,7 @@ class Recorder(QObject):
         logger.error("LAZ writer error: %s", msg)
         if self._recording.is_set() and not self._laz_error_reported:
             self._laz_error_reported = True  # one dialog per session, the rest is in the log
-            if self._effective_modes[0] == "both":
+            if self._laz_frames_also_in_bag():
                 consequence = "The point clouds are still recorded into the bag."
             else:
                 consequence = "Point cloud frames are being lost."
@@ -351,7 +395,7 @@ class Recorder(QObject):
         """The LAZ queue was full and a frame was thrown away (writing is too slow)."""
         if self._recording.is_set() and not self._laz_drop_reported:
             self._laz_drop_reported = True  # the total is reported at Stop
-            if self._effective_modes[0] == "both":
+            if self._laz_frames_also_in_bag():
                 consequence = "The frames are still recorded into the bag."
             else:
                 consequence = "These frames are lost: in LAZ mode the lidar is not in the bag."
@@ -568,7 +612,7 @@ class Recorder(QObject):
             self._session_start_time,
             datetime.now(),
             self._topic_counts,
-            lidar_mode=self._effective_modes[0],
+            lidar_modes=self._effective_modes[0],
             camera_mode=self._effective_modes[1],
             notices=self._notices,
             bag_message_counts=self._bag_counts,
