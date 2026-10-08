@@ -184,6 +184,23 @@ class TestRecorderProcessLifecycle:
         assert len(log['errors']) == 1
         assert os.listdir(tmp_path / 'out') == []
 
+    def test_disk_reason_survives_a_session_folder_that_already_holds_data(
+            self, qtbot, tmp_path, fake_node, fake_ros2, monkeypatch):
+        from collections import namedtuple
+        usage = namedtuple('usage', 'total used free')
+        monkeypatch.setattr('shutil.disk_usage', lambda path: usage(400 * 1024**2, 0, 400 * 1024**2))
+        session = tmp_path / 'out' / 'recording_2026-01-01_00-00-00_t'
+        session.mkdir(parents=True)
+        leftover = session / 'rosbag_0.db3'
+        leftover.write_bytes(b'x')
+        monkeypatch.setattr(Recorder, '_generate_session_path', lambda self: str(session))
+        recorder, log = _recorder_with_log()
+
+        assert recorder.start_recording(_config(tmp_path), fake_node) is False
+
+        assert 'GB free' in log['errors'][0]
+        assert leftover.exists()
+
     def test_forced_stop_reason_is_written_to_sync_info(self, qtbot, tmp_path, fake_node, fake_ros2):
         recorder, log = _recorder_with_log()
         assert recorder.start_recording(_config(tmp_path), fake_node) is True
@@ -599,6 +616,14 @@ class TestSideRecorders:
 
         assert cloud['name'] in bag_args
         assert len(session.log['warnings']) == 1
+
+    def test_lidar_mode_says_bag_when_no_laz_subscription_starts(self, session):
+        cloud = {'name': BOOM_CLOUD['name'], 'type': 'no_such_pkg/msg/Nope'}
+
+        session.start([STATUS, cloud], lidar_mode='laz')
+        session.recorder.stop_recording()
+
+        assert _sync_info(session.recorder)['recording_modes']['lidar'] == 'bag'
 
     def test_laz_recording_takes_lidar_out_of_the_bag(self, session):
         bag_args = session.start([STATUS, BOOM_CLOUD], lidar_mode='laz')

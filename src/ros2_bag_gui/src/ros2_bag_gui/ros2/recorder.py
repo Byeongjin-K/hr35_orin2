@@ -131,7 +131,10 @@ class Recorder(QObject):
             os.makedirs(session_folder, exist_ok=True)
             free = shutil.disk_usage(session_folder).free
             if free < self.MIN_FREE_BYTES:
-                os.rmdir(session_folder)  # just created, still empty
+                try:
+                    os.rmdir(session_folder)  # just created, still empty
+                except OSError:
+                    pass  # it already holds data: keep it, and still report the disk
                 raise RuntimeError(
                     f"only {free / 1024**3:.1f} GB free in {config.output_path}; "
                     "a recording would fill the disk and end without a readable bag"
@@ -148,7 +151,10 @@ class Recorder(QObject):
             # once the recorder that takes it instead is known to be running.
             camera_mode = self._start_camera_recording(config, session_folder, names, notices)
             keep_in_bag = self._start_lidar_recording(config, session_folder, node, cb_group, notices)
-            self._effective_modes = (config.lidar_mode, camera_mode)
+            lidar_mode = config.lidar_mode
+            if lidar_mode in ("laz", "both") and not self._laz_subscriptions:
+                lidar_mode = "bag"
+            self._effective_modes = (lidar_mode, camera_mode)
             self._notices = notices
 
             bag_topics = [

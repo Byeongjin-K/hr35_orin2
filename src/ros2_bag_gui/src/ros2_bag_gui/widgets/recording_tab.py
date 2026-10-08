@@ -490,7 +490,7 @@ class RecordingTab(QWidget):
             logger.info("Recording saved to: %s", session_folder)
 
         self._set_controls(recording=False)
-        if self.status_panel._state != RecordingState.ERROR:
+        if self.status_panel.state != RecordingState.ERROR:
             self.status_panel.set_state(RecordingState.STOPPED)
         
         self.recording_stop_requested.emit()

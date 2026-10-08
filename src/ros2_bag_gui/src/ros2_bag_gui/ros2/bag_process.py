@@ -134,11 +134,13 @@ class BagProcess(QObject):
         if self._proc.state() == QProcess.ProcessState.NotRunning:
             return False
         was_alive = self._pid_alive()
-        try:
-            # A suspended process would not see the request to stop.
-            os.kill(self.pid, signal.SIGCONT)
-        except OSError:
-            pass
+        pid = self.pid
+        if pid > 0:  # pid 0 would send the signal to this whole process group
+            try:
+                # A suspended process would not see the request to stop.
+                os.kill(pid, signal.SIGCONT)
+            except OSError:
+                pass
         self._proc.terminate()
 
         waited = 0

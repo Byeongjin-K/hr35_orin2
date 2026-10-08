@@ -135,6 +135,10 @@ class RecordingStatusPanel(QWidget):
         seconds = self._elapsed_seconds % 60
         self.elapsed_label.setText(f"{hours:02d}:{minutes:02d}:{seconds:02d}")
     
+    @property
+    def state(self) -> RecordingState:
+        return self._state
+
     def set_state(self, state: RecordingState):
         self._state = state
         self.state_label.setText(state.value)
