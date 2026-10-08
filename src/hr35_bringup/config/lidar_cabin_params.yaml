@@ -60,4 +60,8 @@ lidar_cabin:
       # min_range[optional]: minimum lidar range to consider (meters)
       min_range: 0.0
       # max_range[optional]: maximum lidar range to consider (meters)
-      max_range: 1000.0 
+      max_range: 1000.0
+      # operating_mode: this sensor boots into STANDBY and then emits no UDP data,
+      # so the driver connects, configures, and times out in poll_client() forever.
+      # The boom lidar already forces NORMAL here for the same reason.
+      operating_mode: NORMAL 
