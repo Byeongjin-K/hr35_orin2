@@ -2,7 +2,7 @@
 
 Caches the import check result so it's only performed once.
 """
-from typing import Optional
+from typing import List, Optional, Tuple
 
 _zed_available: Optional[bool] = None
 
@@ -33,3 +33,18 @@ def get_sl_module():
         import pyzed.sl as sl
         return sl
     return None
+
+
+def list_zed_cameras() -> List[Tuple[str, str, bool]]:
+    """(serial, model, available) of each connected ZED camera; [] without the SDK.
+
+    A camera something else holds open (e.g. the ZED ROS wrapper) is not
+    available: SVO2 recording cannot open it.
+    """
+    sl = get_sl_module()
+    if sl is None:
+        return []
+    return [
+        (str(d.serial_number), str(d.camera_model), d.camera_state == sl.CAMERA_STATE.AVAILABLE)
+        for d in sl.Camera.get_device_list()
+    ]

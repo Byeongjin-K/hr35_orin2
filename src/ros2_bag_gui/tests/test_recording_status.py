@@ -30,17 +30,12 @@ def test_elapsed_timer(status_panel, qtbot):
     status_panel._update_elapsed_display()
     assert status_panel.elapsed_label.text() == "00:01:30"
 
-def test_update_topic_stats(status_panel):
-    stats = {
-        '/topic1': {'count': 100, 'hz': 10.0},
-        '/topic2': {'count': 200, 'hz': 20.0}
-    }
-    status_panel.update_topic_stats(stats)
+def test_recording_topics_wait_for_the_count_in_the_bag(status_panel):
+    status_panel.show_recording_topics(['/topic2', '/topic1'])
+
     assert status_panel.stats_table.rowCount() == 2
-    
     assert status_panel.stats_table.item(0, 0).text() == "/topic1"
-    assert status_panel.stats_table.item(0, 1).text() == "100"
-    assert status_panel.stats_table.item(0, 2).text() == "10.0"
+    assert status_panel.stats_table.item(0, 1).text() == "—"
 
 def test_format_size(status_panel):
     assert 'MB' in status_panel._format_size(1024 * 1024)

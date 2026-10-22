@@ -38,6 +38,76 @@ def test_thread_survives_a_subscription_destroyed_under_the_executor(qtbot, monk
     assert connection == [True]
 
 
+GRAPH = [
+    ('/excavator/status', ['std_msgs/msg/String']),
+    ('/lidar_boom/points', ['sensor_msgs/msg/PointCloud2']),
+    ('/zedx_boom/left/image', ['sensor_msgs/msg/Image']),
+]
+
+
+def _thread_on(fake_node, graph):
+    """A ROS2Thread on a fake node, driven by hand instead of by the executor."""
+    thread = ROS2Thread()
+    fake_node.get_topic_names_and_types = lambda: graph
+    thread._node = fake_node
+    return thread
+
+
+def _refresh(thread):
+    thread.request_discover_topics()
+    thread._process_command()
+
+
+def _measured(fake_node):
+    return sorted(sub['topic'] for sub in fake_node.live_subscriptions)
+
+
+def test_rates_are_measured_for_the_ticked_topics_only(qtbot, fake_node):
+    """Not for every topic: that pulls every image and point cloud into the GUI."""
+    thread = _thread_on(fake_node, GRAPH)
+    _refresh(thread)
+    assert _measured(fake_node) == []
+
+    thread.set_hz_topics(['/excavator/status'])
+    thread._process_command()
+    assert _measured(fake_node) == ['/excavator/status']
+
+    thread.set_hz_topics(['/excavator/status', '/lidar_boom/points'])
+    _refresh(thread)
+    assert _measured(fake_node) == ['/excavator/status', '/lidar_boom/points']
+    assert fake_node.destroyed == []  # the measured topic keeps its subscription and rate
+
+    thread.set_hz_topics(['/lidar_boom/points'])
+    thread._process_command()
+    assert _measured(fake_node) == ['/lidar_boom/points']
+
+
+def test_rates_stay_off_while_recording_through_refreshes(qtbot, fake_node):
+    thread = _thread_on(fake_node, GRAPH)
+    thread.set_hz_topics(['/excavator/status', '/lidar_boom/points'])
+    _refresh(thread)
+
+    thread.set_hz_active(False)
+    thread._process_command()
+    _refresh(thread)  # the 5 s topic refresh goes on during a recording
+    assert _measured(fake_node) == []
+
+    thread.set_hz_active(True)
+    thread._process_command()
+    assert _measured(fake_node) == ['/excavator/status', '/lidar_boom/points']
+
+
+def test_a_ticked_topic_is_measured_once_it_comes_up(qtbot, fake_node):
+    thread = _thread_on(fake_node, GRAPH)
+    thread.set_hz_topics(['/gps/fix'])
+    _refresh(thread)
+    assert _measured(fake_node) == []
+
+    fake_node.get_topic_names_and_types = lambda: GRAPH + [('/gps/fix', ['sensor_msgs/msg/NavSatFix'])]
+    _refresh(thread)
+    assert _measured(fake_node) == ['/gps/fix']
+
+
 def test_thread_says_disconnected_when_ros_is_shut_down_from_outside(qtbot):
     """rclpy shuts its context down on SIGTERM; the label must not stay on Connected."""
     import rclpy

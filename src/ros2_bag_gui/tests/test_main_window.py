@@ -15,6 +15,36 @@ def main_window(qtbot):
     qtbot.addWidget(window)
     return window
 
+def test_ctrl_c_kill_and_a_closed_terminal_close_the_window(qtbot):
+    """Closing is what stops a recording, and the SVO2 a ZED driver records for it."""
+    import signal
+    from typing import Callable, cast
+    from PySide6.QtWidgets import QWidget
+    from ros2_bag_gui.__main__ import _close_on_signals
+    closed = []
+
+    class Window(QWidget):
+        def closeEvent(self, event):
+            closed.append(True)
+            super().closeEvent(event)
+
+    window = Window()
+    qtbot.addWidget(window)
+    window.show()
+    signals = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+    saved = {sig: signal.getsignal(sig) for sig in signals}
+    try:
+        _close_on_signals(window)
+        handlers = [signal.getsignal(sig) for sig in signals]
+    finally:
+        for sig, handler in saved.items():
+            signal.signal(sig, handler)
+
+    assert all(callable(handler) for handler in handlers)
+    cast(Callable[..., object], handlers[1])(signal.SIGTERM, None)
+    assert closed == [True]
+
+
 def test_window_title(main_window):
     """Test window has correct title."""
     assert main_window.windowTitle() == "ROS2 Bag GUI"

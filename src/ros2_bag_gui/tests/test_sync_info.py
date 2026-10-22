@@ -46,28 +46,36 @@ def test_read_bag_message_counts_without_metadata_is_unknown(tmp_path):
 def test_sync_info_counts_come_from_the_bag(tmp_path):
     info = _write(
         tmp_path,
-        topic_counts={'/excavator/joints': 2600},
+        bag_topics=['/excavator/joints'],
         bag_message_counts={'/excavator/joints': 1360},
     )
 
     assert info['topic_message_counts'] == {'/excavator/joints': 1360}
-    assert info['gui_received_counts'] == {'/excavator/joints': 2600}
     assert info['data_sources']['rosbag']['message_counts_source'] == 'rosbag_metadata'
 
 
 def test_sync_info_without_bag_metadata_does_not_invent_counts(tmp_path):
-    info = _write(tmp_path, topic_counts={'/excavator/joints': 2600}, bag_message_counts=None)
+    info = _write(tmp_path, bag_topics=['/excavator/joints'], bag_message_counts=None)
 
     assert info['topic_message_counts'] is None
-    assert info['gui_received_counts'] == {'/excavator/joints': 2600}
+    assert info['data_sources']['rosbag']['topic_count'] == 1
     assert info['data_sources']['rosbag']['message_counts_source'] == 'unavailable'
 
 
 def test_sync_info_time_sources_say_what_is_recorded(tmp_path):
     info = _write(
-        tmp_path, topic_counts={}, camera_mode='svo2', svo2_files=[str(tmp_path / 'camera_0.svo2')]
+        tmp_path, bag_topics=['/tf'], camera_mode='svo2', svo2_files=[str(tmp_path / 'camera_0.svo2')]
     )
 
     assert info['data_sources']['rosbag']['time_source'] == 'receive_time'
     assert info['data_sources']['svo2']['time_source'] == 'camera_image_timestamp'
     assert 'timestamp_key' not in info['data_sources']['svo2']
+
+
+def test_sync_info_of_svo2_only_has_no_bag(tmp_path):
+    info = _write(
+        tmp_path, bag_topics=[], camera_mode='svo2', svo2_files=[str(tmp_path / 'zedx_cabin.svo2')]
+    )
+
+    assert 'rosbag' not in info['data_sources']
+    assert info['data_sources']['svo2']['path'] == ['zedx_cabin.svo2']

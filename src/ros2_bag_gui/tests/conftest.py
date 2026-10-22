@@ -32,23 +32,74 @@ class FakeNode:
     def __init__(self):
         self.subscriptions = []
         self.destroyed = []
+        self.publishers = {}  # topic -> endpoint infos, as get_publishers_info_by_topic gives them
+        self.services = {}  # service name -> (type name, handler: request -> response)
 
     def create_subscription(self, msg_class, topic, callback, qos, **kwargs):
-        sub = {'topic': topic, 'callback': callback}
+        sub = {'topic': topic, 'callback': callback, 'qos': qos}
         self.subscriptions.append(sub)
         return sub
 
     def destroy_subscription(self, sub):
         self.destroyed.append(sub)
 
+    def get_publishers_info_by_topic(self, topic):
+        return self.publishers.get(topic, [])
+
+    def count_publishers(self, topic):
+        return len(self.publishers.get(topic, []))
+
+    def get_service_names_and_types(self):
+        return [(name, [srv_type]) for name, (srv_type, _handler) in self.services.items()]
+
+    def create_client(self, srv_type, name, **kwargs):
+        return FakeClient(self.services.get(name))
+
+    def destroy_client(self, client):
+        pass
+
     @property
     def live_subscriptions(self):
         return [s for s in self.subscriptions if s not in self.destroyed]
 
 
+class FakeClient:
+    """A service client whose server answers at once, or is not there."""
+
+    def __init__(self, service):
+        self._service = service
+
+    def wait_for_service(self, timeout_sec=None):
+        return self._service is not None
+
+    def call_async(self, request):
+        return FakeFuture(self._service[1](request))
+
+
+class FakeFuture:
+    def __init__(self, result):
+        self._result = result
+
+    def add_done_callback(self, callback):
+        callback(self)
+
+    def result(self):
+        return self._result
+
+
 @pytest.fixture
 def fake_node():
     return FakeNode()
+
+
+@pytest.fixture(autouse=True)
+def no_zed_camera_scan(monkeypatch):
+    """The settings panel and the recorder list ZED cameras through the SDK; tests never touch real ones."""
+    monkeypatch.setattr("ros2_bag_gui.widgets.settings_panel.list_zed_cameras", lambda: [])
+    monkeypatch.setattr("ros2_bag_gui.ros2.recorder.list_zed_cameras", lambda: [])
+    # The names come from the bringup package of the robot this runs on
+    monkeypatch.setattr("ros2_bag_gui.widgets.settings_panel.camera_names_by_serial", lambda: {})
+    monkeypatch.setattr("ros2_bag_gui.ros2.recorder.camera_names_by_serial", lambda: {})
 
 
 # A stand-in for the `ros2` executable, so the real QProcess path of BagProcess
@@ -60,6 +111,8 @@ def fake_node():
 #   warn_on_close  (report lost messages while closing, as rosbag2 does)
 #   slowclose      (keep writing to the bag for a second before closing)
 #   hang           (ignore the request to stop)
+#   hidden         (the note about hidden topics rosbag2 gives at start)
+#   discovery_failure (a type it cannot load, said again on each discovery pass)
 # FAKE_ROS2_COUNTS: JSON {topic: count} written into metadata.yaml on a clean stop.
 # FAKE_ROS2_ARGS: file that receives the argument list as JSON.
 _FAKE_ROS2 = r'''#!%(python)s
@@ -103,6 +156,17 @@ if mode == 'warn':
     sys.stderr.flush()
 if mode == 'info_lost':
     sys.stderr.write("[INFO] [rosbag2_recorder]: Subscribed to topic '/gps/lost'\n")
+    sys.stderr.flush()
+if mode == 'hidden':
+    sys.stderr.write('[WARN] [1792661500.000000000] [ROSBAG2_TRANSPORT]: Hidden topics are not '
+                     'recorded. Enable them with --include-hidden-topics\n')
+    sys.stderr.flush()
+if mode == 'discovery_failure':
+    for _ in range(3):
+        sys.stderr.write('[ERROR] [1792661506.195615086] [rosbag2_recorder]: Failure in topics '
+                         'discovery.\nError: Something went wrong loading the typesupport library '
+                         'for message type excavator_msgs/WorkAnchorStatus. Library could not be '
+                         'found.\n')
     sys.stderr.flush()
 open(os.path.join(out, 'ready'), 'w').close()
 while True:

@@ -5,7 +5,7 @@ import tempfile
 import os
 import time
 from ros2_bag_gui.ros2.laz_writer import (
-    LAZWriterThread, PointCloud2Payload, PointFieldInfo, DTYPE_MAP
+    LAZWriterThread, PointCloud2Payload, PointFieldInfo, DTYPE_MAP, estimate_missing_frames
 )
 
 @pytest.fixture
@@ -99,3 +99,16 @@ class TestDTYPEMap:
         dtype, size = DTYPE_MAP[5]
         assert dtype == 'i4'
         assert size == 4
+
+
+class TestMissingFrames:
+    MS = 10**6
+
+    def test_a_gap_of_three_periods_holds_two_missing_frames(self):
+        assert estimate_missing_frames([t * self.MS for t in (0, 100, 200, 500, 600)]) == 2
+
+    def test_jitter_is_not_a_missing_frame(self):
+        assert estimate_missing_frames([t * self.MS for t in (0, 120, 190, 310, 400, 480)]) == 0
+
+    def test_too_few_frames_tell_nothing(self):
+        assert estimate_missing_frames([0, 500 * self.MS]) == 0

@@ -21,8 +21,15 @@ MOCK_TOPICS = [
 ]
 
 
+class _Signal:
+    def disconnect(self):
+        pass
+
+
 class FakeRecorder:
     """Stands in for Recorder: notes what the tab asks for, starts no process."""
+
+    recording_started = recording_stopped = message_recorded = error_occurred = _Signal()
 
     def __init__(self):
         self.recording = False
@@ -31,10 +38,13 @@ class FakeRecorder:
         self.start_calls = 0
         self.stop_calls = 0
         self.stop_reason = None
-        self.topic_counts = {}
         self.session_path = ""
         self.last_bag_counts = {}
         self.last_bag_topics = []
+        self.busy_svo_drivers = []
+        self.stopped_drivers = None
+        self.driver_stop_failures = []
+        self.last_duration_s = 60.0
 
     @property
     def is_recording(self):
@@ -43,17 +53,19 @@ class FakeRecorder:
     def start_recording(self, config, node):
         self.started_with = config
         self.start_calls += 1
-        self.recording = self.start_result
-        return self.start_result
+        self.recording = self.start_result and not self.busy_svo_drivers
+        return self.recording
+
+    def stop_driver_svo2(self, paths, node):
+        self.stopped_drivers = list(paths)
+        self.busy_svo_drivers = []
+        return []
 
     def stop_recording(self, node=None, reason=None):
         self.stop_calls += 1
         self.stop_reason = reason
         self.recording = False
         return "/tmp/fake_session"
-
-    def get_topic_hz(self):
-        return {}
 
     def check_health(self):
         pass
@@ -66,6 +78,7 @@ def recording_tab(qtbot, tmp_path, monkeypatch, fake_node):
     monkeypatch.setattr(ROS2Thread, "start", lambda self: None)
     monkeypatch.setattr(ROS2Thread, "node", property(lambda self: fake_node))
     monkeypatch.setattr("ros2_bag_gui.widgets.recording_tab.find_other_recorders", lambda: [], raising=False)
+    monkeypatch.setattr("ros2_bag_gui.widgets.recording_tab.unloadable_types", lambda topics: {})
     widget = RecordingTab()
     widget._recorder = FakeRecorder()
     widget.settings_panel._settings_manager.update(output_path=str(tmp_path / "recordings"))
@@ -87,6 +100,16 @@ def test_widget_creation(recording_tab):
     assert recording_tab.start_btn is not None
     assert recording_tab.stop_btn is not None
     assert recording_tab.profile_combo is not None
+
+
+def test_ticked_topics_are_handed_to_the_rate_measurement(recording_tab, monkeypatch):
+    """Hz is measured for the ticked topics, also for those not up yet, and no others."""
+    asked = []
+    monkeypatch.setattr(ROS2Thread, "set_hz_topics", lambda self, names: asked.append(sorted(names)))
+
+    recording_tab.topic_list.set_selected_topics(['/tf', '/not/up/yet'])
+
+    assert asked[-1] == ['/not/up/yet', '/tf']
 
 
 def test_initial_button_state(recording_tab):
@@ -365,34 +388,60 @@ def _table(panel):
 
 def test_after_stop_the_table_shows_what_is_in_the_bag(recording_tab, qtbot):
     recorder = recording_tab._recorder
-    recorder.topic_counts = {'/excavator/joints': 2600, '/zedx_boom/left/image': 70}
     recorder.last_bag_counts = {'/excavator/joints': 1360}
     recorder.last_bag_topics = ['/excavator/joints', '/zedx_boom/left/image']
 
     recording_tab._on_recorder_stopped()
 
     headers, rows = _table(recording_tab.status_panel)
-    assert headers == recording_tab.status_panel.FINAL_HEADERS
-    assert rows == [['/excavator/joints', '1360', '2600'], ['/zedx_boom/left/image', '0', '70']]
+    assert headers == recording_tab.status_panel.HEADERS
+    assert rows == [['/excavator/joints', '1360'], ['/zedx_boom/left/image', '0']]
     assert '/zedx_boom/left/image' in recording_tab.status_panel.notice_label.text()
+
+
+def test_a_topic_recorded_far_slower_than_measured_is_reported(recording_tab, qtbot):
+    """Run C on the robot: ticking every image topic made the camera publish at 3.9 of 10 Hz."""
+    recorder = recording_tab._recorder
+    recorder.last_bag_topics = ['/zedx_boom/left/image', '/tf']
+    recorder.last_bag_counts = {'/zedx_boom/left/image': 234, '/tf': 600}
+    recording_tab._on_hz_updated({'/zedx_boom/left/image': 10.0, '/tf': 10.0})
+
+    recording_tab._on_recorder_stopped()
+
+    notice = recording_tab.status_panel.notice_label.text()
+    assert '/zedx_boom/left/image 3.9Hz of 10.0Hz' in notice
+    assert '/tf' not in notice
+
+
+def test_a_recording_too_short_to_judge_is_not_called_slow(recording_tab, qtbot):
+    recorder = recording_tab._recorder
+    recorder.last_duration_s = 2.0
+    recorder.last_bag_topics = ['/tf']
+    recorder.last_bag_counts = {'/tf': 3}
+    recording_tab._on_hz_updated({'/tf': 10.0})
+
+    recording_tab._on_recorder_stopped()
+
+    assert 'of 10.0Hz' not in recording_tab.status_panel.notice_label.text()
 
 
 def test_after_stop_unreadable_bag_counts_are_shown_as_unknown(recording_tab, qtbot):
     recorder = recording_tab._recorder
-    recorder.topic_counts = {'/excavator/joints': 2600}
+    recorder.last_bag_topics = ['/excavator/joints']
     recorder.last_bag_counts = None
 
     recording_tab._on_recorder_stopped()
 
-    assert _table(recording_tab.status_panel)[1] == [['/excavator/joints', 'unknown', '2600']]
+    assert _table(recording_tab.status_panel)[1] == [['/excavator/joints', 'unknown']]
     assert not recording_tab.status_panel.notice_label.isHidden()
 
 
-def test_live_numbers_are_labelled_as_received_by_the_gui(recording_tab, qtbot):
-    recording_tab.status_panel.update_topic_stats({'/excavator/joints': {'count': 5, 'hz': 1.0}})
+def test_while_recording_the_table_lists_the_bag_topics_until_stop(recording_tab, qtbot):
+    recording_tab._recorder.last_bag_topics = ['/tf', '/excavator/status']
 
-    assert _table(recording_tab.status_panel)[0] == recording_tab.status_panel.LIVE_HEADERS
-    assert recording_tab.status_panel.LIVE_HEADERS != recording_tab.status_panel.FINAL_HEADERS
+    _start_with_one_topic(recording_tab)
+
+    assert _table(recording_tab.status_panel)[1] == [['/excavator/status', '—'], ['/tf', '—']]
 
 
 def _load_profile(recording_tab, monkeypatch, topics):
@@ -439,6 +488,33 @@ def test_start_asks_about_selected_topics_that_are_not_available(
     if answer_yes:
         recorded = [t['name'] for t in recording_tab._recorder.started_with.topics]
         assert recorded == [present, absent]
+    else:
+        assert recording_tab._recorder.start_calls == 0
+
+
+@pytest.mark.parametrize("answer_yes", [False, True])
+def test_start_asks_about_topics_whose_message_type_is_not_installed(
+        recording_tab, qtbot, monkeypatch, answer_yes):
+    from PySide6.QtWidgets import QMessageBox
+    asked = []
+
+    def question(parent, title, text, *args, **kwargs):
+        asked.append(text)
+        return QMessageBox.StandardButton.Yes if answer_yes else QMessageBox.StandardButton.No
+
+    monkeypatch.setattr(QMessageBox, 'question', question)
+    gnss, status = MOCK_TOPICS[0]['name'], MOCK_TOPICS[1]['name']
+    monkeypatch.setattr("ros2_bag_gui.widgets.recording_tab.unloadable_types",
+                        lambda topics: {status: 'excavator_msgs/msg/WorkAnchorStatus'})
+    recording_tab.topic_list.set_selected_topics([gnss, status])
+
+    recording_tab._on_start_clicked()
+    recording_tab.status_panel._timer.stop()
+
+    assert len(asked) == 1 and status in asked[0]
+    if answer_yes:
+        assert [t['name'] for t in recording_tab._recorder.started_with.topics] == [gnss]
+        assert status in recording_tab.status_panel.notice_label.text()
     else:
         assert recording_tab._recorder.start_calls == 0
 
@@ -499,6 +575,58 @@ def _start_with_one_topic(recording_tab):
     recording_tab.topic_list.tree.topLevelItem(0).setCheckState(0, Qt.CheckState.Checked)
     recording_tab._on_start_clicked()
     recording_tab.status_panel._timer.stop()
+
+
+@pytest.mark.parametrize("answer_yes", [False, True])
+def test_start_asks_when_a_zed_driver_is_already_recording(recording_tab, qtbot, monkeypatch, answer_yes):
+    from PySide6.QtWidgets import QMessageBox
+    asked = []
+
+    def question(parent, title, text, *args, **kwargs):
+        asked.append(text)
+        return QMessageBox.StandardButton.Yes if answer_yes else QMessageBox.StandardButton.No
+
+    monkeypatch.setattr(QMessageBox, 'question', question)
+    driver = '/zedx_cabin/zedx_cabin_node'
+    recording_tab._recorder.busy_svo_drivers = [driver]
+
+    _start_with_one_topic(recording_tab)
+
+    assert len(asked) == 1 and driver in asked[0]
+    assert recording_tab._recorder.stopped_drivers == ([driver] if answer_yes else None)
+    assert recording_tab._recorder.is_recording == answer_yes
+
+
+def test_svo2_mode_starts_without_any_topic(recording_tab, qtbot):
+    recording_tab.settings_panel._settings_manager.update(camera_mode='svo2')
+
+    recording_tab._on_start_clicked()
+    recording_tab.status_panel._timer.stop()
+
+    assert recording_tab._recorder.started_with.topics == []
+
+
+def test_closing_while_a_zed_driver_does_not_stop_says_how_to_stop_it(recording_tab, qtbot, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    shown = []
+    monkeypatch.setattr(QMessageBox, 'critical', lambda *args, **kwargs: shown.append(args[2]))
+    recorder = recording_tab._recorder
+    recorder.recording = True
+    recorder.driver_stop_failures = [
+        'ros2 service call /zedx_cabin/zedx_cabin_node/stop_svo_rec std_srvs/srv/Trigger']
+
+    recording_tab.cleanup()
+
+    assert recorder.stop_calls == 1
+    assert len(shown) == 1 and 'stop_svo_rec' in shown[0]
+
+
+def test_chosen_svo2_camera_reaches_the_recorder(recording_tab, qtbot):
+    recording_tab.settings_panel._settings_manager.update(svo2_camera_serial='45233238')
+
+    _start_with_one_topic(recording_tab)
+
+    assert recording_tab._recorder.started_with.svo2_camera_serial == '45233238'
 
 
 @pytest.mark.parametrize("answer_yes", [False, True])

@@ -1,4 +1,5 @@
 """Recording tab widget that composes all recording-related widgets."""
+import glob
 import os
 import shutil
 from PySide6.QtWidgets import (
@@ -14,7 +15,7 @@ from ros2_bag_gui.widgets.settings_panel import SettingsPanel
 from ros2_bag_gui.config.profiles import ProfileManager, RecordingProfile
 from ros2_bag_gui.ros2.ros2_thread import ROS2Thread
 from ros2_bag_gui.ros2.topic_discovery import TopicDiscoveryManager
-from ros2_bag_gui.ros2.recorder import Recorder, RecordingConfig
+from ros2_bag_gui.ros2.recorder import Recorder, RecordingConfig, unloadable_types
 from ros2_bag_gui.ros2.bag_process import find_other_recorders
 from ros2_bag_gui.logging_config import get_logger
 
@@ -34,11 +35,16 @@ class RecordingTab(QWidget):
     recording_start_requested = Signal(object)  # Emits recording config dict
     recording_stop_requested = Signal()
     recording_active_changed = Signal(bool)  # True while a recording is running
+
+    # Below this share of the rate measured before Start, a topic is reported as slow
+    SLOW_TOPIC_SHARE = 0.6
+    SLOW_TOPIC_MIN_HZ = 1.0  # rates below this are too uneven to judge
     
     def __init__(self, parent=None):
         super().__init__(parent)
         self.profile_manager = ProfileManager()
         self._topics: List[Dict] = []
+        self._measured_hz: Dict[str, float] = {}
         self._setup_ui()
         self._connect_signals()
         self._load_profile_list()
@@ -164,6 +170,9 @@ class RecordingTab(QWidget):
         self._ros2_thread = ROS2Thread(self)
         self._ros2_thread.connection_status_changed.connect(self._on_connection_changed)
         self._ros2_thread.hz_updated.connect(self.topic_list.update_hz)
+        self._ros2_thread.hz_updated.connect(self._on_hz_updated)
+        # Rates are measured for the ticked topics only, not for every topic.
+        self.topic_list.selection_changed.connect(self._on_topic_selection_changed)
         
         self._discovery = TopicDiscoveryManager(self._ros2_thread, self)
         self._discovery.topics_discovered.connect(self._on_topics_discovered)
@@ -207,6 +216,14 @@ class RecordingTab(QWidget):
                     "written. Stop, restart the GUI and start a new recording."
                 )
     
+    def _on_hz_updated(self, hz_map: Dict[str, float]):
+        """Keep the rates measured before Start: at Stop they say what the bag should hold."""
+        self._measured_hz.update({t: hz for t, hz in hz_map.items() if hz > 0})
+
+    def _on_topic_selection_changed(self, _available: List[str]):
+        # Selected topics that are not up yet are included: measured once they appear.
+        self._ros2_thread.set_hz_topics(self.topic_list.get_selected_topics(include_missing=True))
+
     def _on_topics_discovered(self, topics: List[Dict]):
         self._topics = topics
         self.set_topics(topics)
@@ -234,9 +251,11 @@ class RecordingTab(QWidget):
         self._show_bag_counts()
 
     def _show_bag_counts(self):
-        """Replace the live (GUI-side) numbers with what the finished bag really holds."""
+        """Show what the finished bag really holds, per topic."""
+        if not self._recorder.last_bag_topics:
+            return  # SVO2 only: there is no bag
         bag_counts = self._recorder.last_bag_counts
-        self.status_panel.show_bag_counts(bag_counts, self._recorder.topic_counts)
+        self.status_panel.show_bag_counts(bag_counts, self._recorder.last_bag_topics)
         if bag_counts is None:
             self.status_panel.add_notice(
                 "The bag has no metadata.yaml, so its message counts are unknown. "
@@ -248,6 +267,31 @@ class RecordingTab(QWidget):
             self.status_panel.add_notice(
                 "No messages in the bag for: " + ", ".join(sorted(empty))
             )
+        slow = self._topics_slower_than_measured(bag_counts)
+        if slow:
+            self.status_panel.add_notice(
+                "Recorded slower than measured before Start (data was lost on the way): "
+                + ", ".join(slow)
+            )
+
+    def _topics_slower_than_measured(self, bag_counts: Dict[str, int]) -> List[str]:
+        """Topics the bag holds far fewer messages of than their measured rate implies.
+
+        Too many subscribers can make a driver (the ZED camera above all) publish
+        slower than it did before Start, and nothing else would say so.
+        """
+        duration = self._recorder.last_duration_s
+        if duration < 5:  # too short to tell a rate from
+            return []
+        slow = []
+        for topic, count in sorted(bag_counts.items()):
+            measured = self._measured_hz.get(topic, 0.0)
+            if not count or measured < self.SLOW_TOPIC_MIN_HZ:
+                continue
+            recorded = count / duration
+            if recorded < self.SLOW_TOPIC_SHARE * measured:
+                slow.append(f"{topic} {recorded:.1f}Hz of {measured:.1f}Hz")
+        return slow
     
     def _on_message_recorded(self, topic_name: str, count: int):
         pass
@@ -257,13 +301,6 @@ class RecordingTab(QWidget):
             return
 
         self._recorder.check_health()
-        counts = self._recorder.topic_counts
-        hz_map = self._recorder.get_topic_hz()
-        stats = {}
-        for topic_name, msg_count in counts.items():
-            stats[topic_name] = {'count': msg_count, 'hz': hz_map.get(topic_name, 0.0)}
-        self.status_panel.update_topic_stats(stats)
-        self.topic_list.update_hz(hz_map)
 
         session_path = self._recorder.session_path
         if session_path:
@@ -272,7 +309,8 @@ class RecordingTab(QWidget):
 
             rosbag_bytes = self._dir_size(rosbag_dir)
             pc_bytes = self._dir_size(pc_dir)
-            self.status_panel.update_storage_sizes(rosbag_bytes, pc_bytes, 0)
+            svo2_bytes = sum(os.path.getsize(p) for p in glob.glob(os.path.join(session_path, '*.svo2')))
+            self.status_panel.update_storage_sizes(rosbag_bytes, pc_bytes, svo2_bytes)
     
     def _dir_size(self, path: str) -> int:
         total = 0
@@ -306,6 +344,10 @@ class RecordingTab(QWidget):
     def cleanup(self):
         if self._recorder.is_recording:
             self._recorder.stop_recording(self._ros2_thread.node)
+            failures = self._recorder.driver_stop_failures
+            if failures:
+                # Shown now: the GUI is closing, a queued warning would never appear.
+                QMessageBox.critical(self, "ZED Driver Still Recording", "\n\n".join(failures))
         self._stats_timer.stop()
         self._refresh_timer.stop()
         self._ros2_thread.stop()
@@ -353,11 +395,12 @@ class RecordingTab(QWidget):
         selected_topic_names = self.topic_list.get_selected_topics()
         missing_topic_names = self.topic_list.get_missing_selected()
         
-        if not selected_topic_names and not missing_topic_names:
+        svo2_wanted = settings.camera_mode in ("svo2", "both")  # cameras need no topic
+        if not selected_topic_names and not missing_topic_names and not svo2_wanted:
             QMessageBox.warning(
                 self,
                 "No Topics Selected",
-                "Please select at least one topic to record."
+                "Please select at least one topic to record, or set the camera mode to SVO2."
             )
             return
         
@@ -417,6 +460,29 @@ class RecordingTab(QWidget):
             {'name': name, 'type': topic_type_map.get(name, 'unknown')}
             for name in selected_topic_names
         ]
+
+        unloadable = unloadable_types(topics_with_types)
+        if unloadable:
+            packages = sorted({type_name.split('/')[0] for type_name in unloadable.values()})
+            reply = QMessageBox.question(
+                self,
+                "Message Types Not Installed",
+                f"The message type of {len(unloadable)} selected topic(s) is not installed "
+                "here, so ros2 bag record cannot record them:\n\n"
+                + "\n".join(f"{name}  [{type_name}]" for name, type_name in sorted(unloadable.items()))
+                + "\n\nLeft selected, they also keep it from subscribing to other topics. "
+                "To record them, source the workspace that defines these types "
+                f"({', '.join(packages)}) before starting the GUI."
+                "\n\nStart without these topics?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+            logger.warning("Recording without topics whose message type is not installed: %s",
+                           ", ".join(sorted(unloadable)))
+            topics_with_types = [t for t in topics_with_types if t['name'] not in unloadable]
+            selected_topic_names = [n for n in selected_topic_names if n not in unloadable]
         
         split_bytes = int(settings.split_size_gb * 1024**3) if settings.split_mode == "size" else 0
         split_seconds = settings.split_time_minutes * 60 if settings.split_mode == "time" else 0
@@ -429,6 +495,7 @@ class RecordingTab(QWidget):
             max_bag_duration=split_seconds,
             lidar_modes=self.settings_panel.lidar_modes(),
             camera_mode=settings.camera_mode,
+            svo2_camera_serial=settings.svo2_camera_serial,
         )
         
         node = self._ros2_thread.node
@@ -454,15 +521,25 @@ class RecordingTab(QWidget):
         
         self.status_panel.clear_notices()
         success = self._recorder.start_recording(recording_config, node)
+        if not success and self._recorder.busy_svo_drivers:
+            success = self._stop_busy_svo_drivers_and_start(recording_config, node)
         if not success:
             return
         
         self._set_controls(recording=True)
         self.status_panel.set_state(RecordingState.RECORDING)
+        self.status_panel.show_recording_topics(self._recorder.last_bag_topics)
+        # Rates are not measured while recording: do not leave the last ones looking live.
+        self.topic_list.update_hz(
+            {name: 0.0 for name in self.topic_list.get_selected_topics(include_missing=True)})
         if missing_topic_names:
             self.status_panel.add_notice(
                 "Not available at Start (recorded only once they appear): "
                 + ", ".join(missing_topic_names)
+            )
+        if unloadable:
+            self.status_panel.add_notice(
+                "Not recorded, message type not installed: " + ", ".join(sorted(unloadable))
             )
         self.status_panel.set_target_path(settings.output_path)
         
@@ -475,6 +552,26 @@ class RecordingTab(QWidget):
         }
         self.recording_start_requested.emit(config)
     
+    def _stop_busy_svo_drivers_and_start(self, config, node) -> bool:
+        """A ZED driver already records an SVO2 that this GUI did not start: ask."""
+        busy = self._recorder.busy_svo_drivers
+        reply = QMessageBox.question(
+            self,
+            "ZED Driver Already Recording",
+            "These ZED drivers are already recording an SVO2 file:\n\n" + "\n".join(busy)
+            + "\n\nIt may be left over from a GUI that was closed abnormally, or another "
+            "program may have started it. Stop that recording and start?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return False
+        failures = self._recorder.stop_driver_svo2(busy, node)
+        if failures:
+            QMessageBox.critical(self, "Recording Error", "\n\n".join(failures))
+            return False
+        return self._recorder.start_recording(config, node)
+
     def _on_stop_clicked(self):
         """Handle stop recording button click."""
         self._stop_recording()

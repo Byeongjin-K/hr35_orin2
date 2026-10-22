@@ -6,7 +6,8 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Signal
 from ros2_bag_gui.config.settings import SettingsManager, AppSettings
-from ros2_bag_gui.zed.sdk_check import is_zed_sdk_available
+from ros2_bag_gui.zed.sdk_check import is_zed_sdk_available, list_zed_cameras
+from ros2_bag_gui.zed.camera_names import camera_label, camera_names_by_serial
 from pathlib import Path
 
 class SettingsPanel(QWidget):
@@ -110,6 +111,22 @@ class SettingsPanel(QWidget):
         self.camera_mode_combo.currentIndexChanged.connect(self._on_settings_changed)
         camera_mode_layout.addWidget(self.camera_mode_combo)
         camera_layout.addLayout(camera_mode_layout)
+
+        # SVO2 opens the camera itself, not through ROS: which one, by serial number
+        svo2_camera_layout = QHBoxLayout()
+        svo2_camera_layout.addWidget(QLabel("SVO2 카메라:"))
+        self.svo2_camera_combo = QComboBox()
+        self.svo2_camera_combo.setToolTip(
+            "ZED ROS 드라이버가 켜진 카메라(사용 불가로 표시)는 그 드라이버가 SVO2를 씁니다. "
+            "여기서 고를 것은 드라이버 없이 GUI가 직접 여는 카메라입니다. "
+            "이름은 hr35_bringup 설정(zedx_*_params.yaml)의 카메라 이름입니다.")
+        self.svo2_camera_combo.currentIndexChanged.connect(self._on_settings_changed)
+        svo2_camera_layout.addWidget(self.svo2_camera_combo, 1)
+        self.svo2_camera_refresh_btn = QPushButton("↻")
+        self.svo2_camera_refresh_btn.setToolTip("연결된 ZED 카메라 다시 찾기")
+        self.svo2_camera_refresh_btn.clicked.connect(self._on_refresh_svo2_cameras)
+        svo2_camera_layout.addWidget(self.svo2_camera_refresh_btn)
+        camera_layout.addLayout(svo2_camera_layout)
         
         # ZED SDK status label
         self._zed_available = is_zed_sdk_available()
@@ -176,7 +193,7 @@ class SettingsPanel(QWidget):
             self.session_name_edit, self.split_combo,
             self.split_size_spin, self.split_time_spin,
             self.lidar_boom_mode_combo, self.lidar_cabin_mode_combo,
-            self.camera_mode_combo,
+            self.camera_mode_combo, self.svo2_camera_combo,
         ]
         for w in widgets:
             w.blockSignals(True)
@@ -200,6 +217,7 @@ class SettingsPanel(QWidget):
         if camera_mode_unavailable:
             idx = 0
         self.camera_mode_combo.setCurrentIndex(idx)
+        self._fill_svo2_cameras(s.svo2_camera_serial)
 
         for w in widgets:
             w.blockSignals(False)
@@ -236,6 +254,27 @@ class SettingsPanel(QWidget):
         self.camera_mode_combo.setCurrentIndex(idx if available else 0)
         return available
 
+    def _fill_svo2_cameras(self, selected: str) -> None:
+        """List the connected ZED cameras; a chosen one that is not connected stays chosen."""
+        combo = self.svo2_camera_combo
+        combo.clear()
+        combo.addItem("자동 (드라이버가 없는 카메라 중 먼저 열리는 것)", "")
+        names = camera_names_by_serial() if self._zed_available else {}
+        for serial, _model, available in list_zed_cameras() if self._zed_available else []:
+            combo.addItem(
+                f"{camera_label(serial, names.get(serial, ''))}"
+                f" · {'사용 가능' if available else '사용 불가(드라이버 사용 중)'}", serial)
+        if selected and combo.findData(selected) < 0:
+            combo.addItem(f"{camera_label(selected)} · 연결 안 됨", selected)
+        combo.setCurrentIndex(max(combo.findData(selected), 0))
+        combo.setEnabled(self._zed_available)
+        self.svo2_camera_refresh_btn.setEnabled(self._zed_available)
+
+    def _on_refresh_svo2_cameras(self):
+        self.svo2_camera_combo.blockSignals(True)  # the choice stays; nothing to save
+        self._fill_svo2_cameras(self.svo2_camera_combo.currentData() or "")
+        self.svo2_camera_combo.blockSignals(False)
+
     def _save_settings(self):
         """Save UI state to settings."""
         mode_map = {0: "size", 1: "time", 2: "none"}
@@ -250,7 +289,8 @@ class SettingsPanel(QWidget):
             split_time_minutes=self.split_time_spin.value(),
             lidar_boom_mode=lidar_mode_map[self.lidar_boom_mode_combo.currentIndex()],
             lidar_cabin_mode=lidar_mode_map[self.lidar_cabin_mode_combo.currentIndex()],
-            camera_mode=camera_mode_map[self.camera_mode_combo.currentIndex()]
+            camera_mode=camera_mode_map[self.camera_mode_combo.currentIndex()],
+            svo2_camera_serial=self.svo2_camera_combo.currentData() or "",
         )
     
     def get_settings(self) -> AppSettings:

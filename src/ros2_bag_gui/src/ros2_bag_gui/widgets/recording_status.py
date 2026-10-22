@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPalette
-from typing import Dict, Optional, Union
+from typing import Dict, List, Optional, Union
 from enum import Enum
 import shutil
 
@@ -30,17 +30,18 @@ class RecordingStatusPanel(QWidget):
     DISK_CRITICAL_GB = 5
     DISK_STOP_GB = 1
 
-    # While recording, the numbers are what the GUI's own subscription received:
-    # a hint that data flows, not what is in the bag.
-    LIVE_HEADERS = ["Topic", "Received (GUI)", "Hz"]
-    # After Stop, the bag itself is read.
-    FINAL_HEADERS = ["Topic", "In bag", "Received (GUI)"]
+    # Per topic, what the bag holds: read from it after Stop. While recording the
+    # GUI does not receive the recorded topics a second time to count them.
+    HEADERS = ["Topic", "In bag"]
+    COUNTED_AT_STOP_TIP = (
+        "Read from the bag after Stop. While recording, the GUI does not receive the "
+        "recorded topics a second time to count them (that cost about a CPU core)."
+    )
     
     def __init__(self, parent=None):
         super().__init__(parent)
         self._state = RecordingState.READY
         self._elapsed_seconds = 0
-        self._topic_stats: Dict[str, Dict] = {}
         self._target_path = "/"
         self._disk_critical_reported = False
         self._disk_full_reported = False
@@ -80,7 +81,7 @@ class RecordingStatusPanel(QWidget):
         sizes_layout = QHBoxLayout()
         self.rosbag_size = QLabel("Rosbag: 0 B")
         self.pointcloud_size = QLabel("PointCloud: 0 B")
-        self.images_size = QLabel("Images: 0 B")
+        self.images_size = QLabel("SVO2: 0 B")
         sizes_layout.addWidget(self.rosbag_size)
         sizes_layout.addWidget(self.pointcloud_size)
         sizes_layout.addWidget(self.images_size)
@@ -102,8 +103,8 @@ class RecordingStatusPanel(QWidget):
         stats_layout = QVBoxLayout(stats_group)
         
         self.stats_table = QTableWidget()
-        self.stats_table.setColumnCount(3)
-        self.stats_table.setHorizontalHeaderLabels(self.LIVE_HEADERS)
+        self.stats_table.setColumnCount(2)
+        self.stats_table.setHorizontalHeaderLabels(self.HEADERS)
         self.stats_table.setMinimumHeight(200)
         self.stats_table.verticalHeader().setDefaultSectionSize(22)
         self.stats_table.verticalHeader().setVisible(False)
@@ -111,9 +112,7 @@ class RecordingStatusPanel(QWidget):
         header = self.stats_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
         header.resizeSection(1, 110)
-        header.resizeSection(2, 110)
         
         stats_layout.addWidget(self.stats_table)
         
@@ -183,38 +182,31 @@ class RecordingStatusPanel(QWidget):
         self.notice_label.setText("")
         self.notice_label.setVisible(False)
 
-    def update_topic_stats(self, stats: Dict[str, Dict]):
-        self._topic_stats = stats
-        self.stats_table.setHorizontalHeaderLabels(self.LIVE_HEADERS)
-        self.stats_table.setRowCount(len(stats))
-        
-        sorted_topics = sorted(stats.keys())
-        
-        for row, topic in enumerate(sorted_topics):
-            data = stats[topic]
+    def show_recording_topics(self, topics: List[str]):
+        """While recording: the topics going into the bag; their counts come at Stop."""
+        self.stats_table.setRowCount(len(topics))
+        for row, topic in enumerate(sorted(topics)):
             self.stats_table.setItem(row, 0, QTableWidgetItem(topic))
-            self.stats_table.setItem(row, 1, QTableWidgetItem(str(data.get('count', 0))))
-            self.stats_table.setItem(row, 2, QTableWidgetItem(f"{data.get('hz', 0):.1f}"))
-    
-    def show_bag_counts(self, bag_counts: Optional[Dict[str, int]], gui_counts: Dict[str, int]):
-        """After Stop: per-topic counts read from the bag, next to what the GUI saw.
+            pending = QTableWidgetItem("—")
+            pending.setToolTip(self.COUNTED_AT_STOP_TIP)
+            self.stats_table.setItem(row, 1, pending)
+
+    def show_bag_counts(self, bag_counts: Optional[Dict[str, int]], topics: List[str]):
+        """After Stop: per-topic counts read from the bag.
 
         bag_counts is None when the bag has no metadata (it was not closed properly).
         """
-        topics = sorted(set(gui_counts) | set(bag_counts or {}))
-        self.stats_table.setHorizontalHeaderLabels(self.FINAL_HEADERS)
-        self.stats_table.setRowCount(len(topics))
-        for row, topic in enumerate(topics):
+        rows = sorted(set(topics) | set(bag_counts or {}))
+        self.stats_table.setRowCount(len(rows))
+        for row, topic in enumerate(rows):
             in_bag = "unknown" if bag_counts is None else str(bag_counts.get(topic, 0))
-            received = str(gui_counts[topic]) if topic in gui_counts else ""
             self.stats_table.setItem(row, 0, QTableWidgetItem(topic))
             self.stats_table.setItem(row, 1, QTableWidgetItem(in_bag))
-            self.stats_table.setItem(row, 2, QTableWidgetItem(received))
 
     def update_storage_sizes(self, rosbag_bytes: int, pointcloud_bytes: int, images_bytes: int):
         self.rosbag_size.setText(f"Rosbag: {self._format_size(rosbag_bytes)}")
         self.pointcloud_size.setText(f"PointCloud: {self._format_size(pointcloud_bytes)}")
-        self.images_size.setText(f"Images: {self._format_size(images_bytes)}")
+        self.images_size.setText(f"SVO2: {self._format_size(images_bytes)}")
     
     def _format_size(self, bytes_val: Union[int, float]) -> str:
         current_val = float(bytes_val)
@@ -265,6 +257,5 @@ class RecordingStatusPanel(QWidget):
     def reset(self):
         self.set_state(RecordingState.READY)
         self.clear_notices()
-        self._topic_stats.clear()
         self.stats_table.setRowCount(0)
         self.update_storage_sizes(0, 0, 0)

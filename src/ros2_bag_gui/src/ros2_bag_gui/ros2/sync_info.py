@@ -27,7 +27,7 @@ def create_sync_info(
     session_folder: str,
     start_time: datetime,
     end_time: datetime,
-    topic_counts: Dict[str, int],
+    bag_topics: List[str],
     lidar_modes: Optional[Dict[str, str]] = None,
     camera_mode: str = "bag",
     laz_file_count: int = 0,
@@ -38,6 +38,7 @@ def create_sync_info(
     bag_message_counts: Optional[Dict[str, int]] = None,
     recorder_warnings: Optional[List[str]] = None,
     laz_summary: Optional[Dict] = None,
+    recorder_subscription_failures: Optional[List[str]] = None,
 ) -> str:
     """Create sync_info.json in session folder.
 
@@ -45,8 +46,7 @@ def create_sync_info(
         session_folder: Path to session folder.
         start_time: Recording start time.
         end_time: Recording end time.
-        topic_counts: Dict of topic_name → messages the GUI's own monitoring
-            subscription received. Not what is in the bag.
+        bag_topics: The topics the recording asked the bag to hold.
         bag_message_counts: Dict of topic_name → messages in the bag (from its
             metadata), or None when the bag could not be read.
         lidar_modes: Per lidar ("boom", "cabin"), the "bag", "laz" or "both"
@@ -54,6 +54,8 @@ def create_sync_info(
         camera_mode: "bag", "svo2", or "both" (the mode really in effect).
         notices: What was done differently from what was asked (mode fallbacks).
         recorder_warnings: Problem lines printed by ros2 bag record (first 50).
+        recorder_subscription_failures: Why ros2 bag record could not subscribe
+            to a topic (e.g. its message type is not installed), each reason once.
         laz_summary: LAZ writer totals: dropped_frames, write_errors and, per
             topic, the folder and file count.
         laz_file_count: Number of LAZ files written (if any lidar is on LAZ).
@@ -71,11 +73,12 @@ def create_sync_info(
     # --- data_sources ---
     modes = dict(lidar_modes or {})
 
-    data_sources: Dict = {
-        "rosbag": {
+    data_sources: Dict = {}
+    if bag_topics:  # without any, only SVO2 was recorded: there is no bag
+        data_sources["rosbag"] = {
             "path": "rosbag/",
             "topic_count": len(
-                topic_counts if bag_message_counts is None else bag_message_counts
+                bag_topics if bag_message_counts is None else bag_message_counts
             ),
             # rosbag2 stamps each message with the time the recorder received it
             "time_source": "receive_time",
@@ -83,7 +86,6 @@ def create_sync_info(
                 "unavailable" if bag_message_counts is None else "rosbag_metadata"
             ),
         }
-    }
 
     # Pointcloud (LAZ) source — present when lidar writes LAZ files
     if any(mode in ("laz", "both") for mode in modes.values()):
@@ -116,8 +118,6 @@ def create_sync_info(
         "data_sources": data_sources,
         # What is in the bag; null when the bag has no metadata to read it from
         "topic_message_counts": bag_message_counts,
-        # What the GUI saw on its own best-effort subscription while recording
-        "gui_received_counts": topic_counts
     }
 
     if notices:
@@ -126,6 +126,9 @@ def create_sync_info(
     if recorder_warnings:
         sync_info["recorder_warnings"] = list(recorder_warnings[:50])
         sync_info["recorder_warning_count"] = len(recorder_warnings)
+
+    if recorder_subscription_failures:
+        sync_info["recorder_subscription_failures"] = list(recorder_subscription_failures)
 
     if forced_stop:
         sync_info["forced_stop"] = True

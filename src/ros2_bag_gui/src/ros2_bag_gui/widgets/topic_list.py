@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTreeWidget, QTreeWidgetItem,
     QLineEdit, QPushButton, QLabel, QButtonGroup, QRadioButton, QFrame
 )
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QTimer
 from typing import List, Dict, Optional
 
 
@@ -43,6 +43,9 @@ class TopicListWidget(QWidget):
         # A selected topic that is not in the current list stays selected.
         self._selected: set = set()
         self._group_view = True
+        # Widths of Topic and Type as last fitted to their text; None before the
+        # first fit. Once the operator drags a column, it stays as they left it.
+        self._fitted_widths: Optional[tuple[int, int]] = None
         self._setup_ui()
     
     def _setup_ui(self):
@@ -84,17 +87,15 @@ class TopicListWidget(QWidget):
         # --- Topic Tree ---
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["Topic", "Type", "Hz"])
+        self.tree.headerItem().setToolTip(2, "Measured for the checked topics only")
         self.tree.setAlternatingRowColors(True)
         self.tree.setSelectionMode(QTreeWidget.SelectionMode.NoSelection) # Selection via checkboxes only
         
         from PySide6.QtWidgets import QHeaderView
         header = self.tree.header()
-        header.setStretchLastSection(False)
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
-        header.resizeSection(1, 160)
-        header.resizeSection(2, 40)
+        # Every column can be dragged wider or narrower; Hz takes the rest.
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setStretchLastSection(True)
         
         self.tree.itemChanged.connect(self._on_item_changed)
         layout.addWidget(self.tree)
@@ -132,6 +133,36 @@ class TopicListWidget(QWidget):
         self.tree.blockSignals(False)
         
         self._update_selection_count()
+        self._fit_columns()
+
+    def _fit_columns(self):
+        """Size Topic and Type to their text, until the operator sizes a column.
+
+        Type first, then Topic gets what is left: a long topic name must not
+        push Type or Hz out of view.
+        """
+        widths = (self.tree.columnWidth(0), self.tree.columnWidth(1))
+        if self._fitted_widths is not None and widths != self._fitted_widths:
+            return  # dragged by the operator: theirs from now on
+        if not self.tree.isVisible() or self.tree.topLevelItemCount() == 0:
+            return
+        # The width with the vertical scroll bar shown, whether or not it is yet,
+        # less what Hz keeps: a stretched last column does not go below its
+        # default size.
+        header = self.tree.header()
+        room = (self.tree.contentsRect().width()
+                - self.tree.verticalScrollBar().sizeHint().width()
+                - max(header.minimumSectionSize(), header.defaultSectionSize()))
+        self.tree.resizeColumnToContents(1)
+        self.tree.setColumnWidth(1, min(self.tree.columnWidth(1), int(room * 0.4)))
+        self.tree.resizeColumnToContents(0)
+        self.tree.setColumnWidth(0, min(self.tree.columnWidth(0), room - self.tree.columnWidth(1)))
+        self._fitted_widths = (self.tree.columnWidth(0), self.tree.columnWidth(1))
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Topics may have arrived while hidden (another tab); fit once laid out.
+        QTimer.singleShot(0, self, self._fit_columns)
     
     def _populate_group_view(self, filter_text: str):
         """Populate tree with category groups."""
@@ -162,13 +193,16 @@ class TopicListWidget(QWidget):
             
             self._create_topic_item(topic, self.tree)
             
+    def _hz_text(self, name: str, hz: float) -> str:
+        if name not in self._selected:
+            return ""  # not measured: only the checked topics are subscribed to
+        return f"{hz:.1f}" if hz > 0 else "--"
+
     def _create_topic_item(self, topic: Dict, parent):
-        hz = topic.get('hz', 0.0)
-        hz_text = f"{hz:.1f}" if hz > 0 else "--"
         item = QTreeWidgetItem([
             topic['name'],
             topic['type'],
-            hz_text,
+            self._hz_text(topic['name'], topic.get('hz', 0.0)),
         ])
         item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
         item.setCheckState(
@@ -186,9 +220,8 @@ class TopicListWidget(QWidget):
         def update_item(item):
             if item.childCount() == 0:
                 name = item.data(0, Qt.ItemDataRole.UserRole)
-                if name and name in hz_map:
-                    hz = hz_map[name]
-                    item.setText(2, f"{hz:.1f}" if hz > 0 else "--")
+                if name and name in hz_map and name in self._selected:
+                    item.setText(2, self._hz_text(name, hz_map[name]))
             else:
                 for i in range(item.childCount()):
                     update_item(item.child(i))
@@ -209,12 +242,15 @@ class TopicListWidget(QWidget):
     
     def _on_item_changed(self, item: QTreeWidgetItem, column: int):
         """Handle item check state change."""
+        if column != 0:
+            return  # Type or Hz text was set (a rate update), not a tick
         topic_name = item.data(0, Qt.ItemDataRole.UserRole)
         if topic_name:  # a topic row; group rows only pass the change on to their topics
             if item.checkState(0) == Qt.CheckState.Checked:
                 self._selected.add(topic_name)
             else:
                 self._selected.discard(topic_name)
+            item.setText(2, self._hz_text(topic_name, 0.0))
         self._update_selection_count()
         self.selection_changed.emit(self.get_selected_topics())
     

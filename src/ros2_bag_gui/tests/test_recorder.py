@@ -11,7 +11,7 @@ import pytest
 from PySide6.QtWidgets import QApplication
 from ros2_bag_gui.ros2.recorder import (
     should_include_in_rosbag, should_record_lidar_laz, lidar_group_of,
-    RecordingConfig, Recorder, SYSTEM_EXCLUDE
+    RecordingConfig, Recorder, SYSTEM_EXCLUDE, unloadable_types,
 )
 
 ALL_BAG = {'boom': 'bag', 'cabin': 'bag'}
@@ -102,11 +102,26 @@ class TestRecordingConfig:
         assert config.max_bagfile_size == 3 * 1024**3
 
 
+class TestUnloadableTypes:
+    def test_types_the_recorder_cannot_load_are_found_before_start(self):
+        topics = [
+            {'name': '/ok', 'type': 'std_msgs/msg/String'},
+            {'name': '/no_package', 'type': 'no_such_pkg/msg/Nope'},
+            # The package is there, but built without this type (an older build)
+            {'name': '/no_type', 'type': 'std_msgs/msg/NoSuchType'},
+            {'name': '/not_up_yet', 'type': 'unknown'},
+        ]
+
+        assert unloadable_types(topics) == {
+            '/no_package': 'no_such_pkg/msg/Nope',
+            '/no_type': 'std_msgs/msg/NoSuchType',
+        }
+
+
 class TestRecorder:
     def test_initial_state(self, qtbot):
         recorder = Recorder()
         assert not recorder.is_recording
-        assert recorder.topic_counts == {}
 
     def test_generate_session_path_format(self, qtbot):
         from datetime import datetime
@@ -120,10 +135,6 @@ class TestRecorder:
 
         path = recorder._generate_session_path()
         assert '/tmp/data/recording_2026-01-22_14-30-00_Test_Session' == path
-
-    def test_get_topic_hz_empty(self, qtbot):
-        recorder = Recorder()
-        assert recorder.get_topic_hz() == {}
 
 
 def _config(tmp_path, **kwargs):
@@ -181,28 +192,23 @@ class TestRecorderProcessLifecycle:
         assert recorder.start_recording(_config(tmp_path), fake_node) is True
         ready = os.path.join(recorder.session_path, 'rosbag', 'ready')
         qtbot.waitUntil(lambda: os.path.exists(ready), timeout=10000)
-        # The GUI's own subscription sees a different number than the recorder writes.
-        for _ in range(7):
-            fake_node.subscriptions[0]['callback'](b'')
 
         recorder.stop_recording(fake_node)
 
         sync = _sync_info(recorder)
         assert sync['topic_message_counts'] == {'/excavator/status': 42}
-        assert sync['gui_received_counts'] == {'/excavator/status': 7}
         assert recorder.last_bag_counts == {'/excavator/status': 42}
 
     def test_sync_info_of_a_killed_recorder_has_no_made_up_counts(self, qtbot, tmp_path, fake_node, fake_ros2):
         recorder, log = _recorder_with_log()
         assert recorder.start_recording(_config(tmp_path), fake_node) is True
-        fake_node.subscriptions[0]['callback'](b'')
 
         with qtbot.waitSignal(recorder.error_occurred, timeout=10000):
             os.kill(recorder._bag_proc._proc.processId(), signal.SIGKILL)
 
         sync = _sync_info(recorder)
         assert sync['topic_message_counts'] is None
-        assert sync['gui_received_counts'] == {'/excavator/status': 1}
+        assert sync['data_sources']['rosbag']['topic_count'] == 1  # the topics asked for
         assert recorder.last_bag_counts is None
 
     def test_start_is_refused_when_the_disk_is_nearly_full(self, qtbot, tmp_path, fake_node, fake_ros2, monkeypatch):
@@ -393,6 +399,47 @@ class TestRecorderProcessLifecycle:
         assert warnings == []
         assert 'recorder_warnings' not in _sync_info(recorder)
 
+    @pytest.mark.parametrize("topic, warned", [
+        ('/excavator/status', False),  # the note is about topics nobody asked for
+        ('/_internal/status', True),   # a hidden topic was asked for: it is not recorded
+    ])
+    def test_hidden_topics_note_matters_only_for_a_selected_hidden_topic(
+            self, qtbot, tmp_path, fake_node, fake_ros2, monkeypatch, topic, warned):
+        monkeypatch.setenv('FAKE_ROS2_MODE', 'hidden')
+        recorder, log = _recorder_with_log()
+        warnings = []
+        recorder.warning_occurred.connect(warnings.append)
+        config = _config(tmp_path)
+        config.topics = [{'name': topic, 'type': 'std_msgs/msg/String'}]
+        assert recorder.start_recording(config, fake_node) is True
+        ready = os.path.join(recorder.session_path, 'rosbag', 'ready')
+        qtbot.waitUntil(lambda: os.path.exists(ready), timeout=10000)
+
+        recorder.stop_recording(fake_node)  # also reads what it said before it ended
+
+        assert len(warnings) == int(warned)
+        assert ('recorder_warnings' in _sync_info(recorder)) == warned
+        assert log['errors'] == []
+
+    def test_a_topic_the_recorder_cannot_subscribe_to_is_an_error_shown_once(
+            self, qtbot, tmp_path, fake_node, fake_ros2, monkeypatch):
+        monkeypatch.setenv('FAKE_ROS2_MODE', 'discovery_failure')
+        recorder = Recorder()
+        errors, warnings = [], []
+        recorder.error_occurred.connect(errors.append)
+        recorder.warning_occurred.connect(warnings.append)
+
+        with qtbot.waitSignal(recorder.error_occurred, timeout=10000):
+            recorder.start_recording(_config(tmp_path), fake_node)
+        recorder.stop_recording(fake_node)
+
+        assert len(errors) == 1
+        assert 'excavator_msgs/WorkAnchorStatus' in errors[0]
+        assert warnings == []
+        sync = _sync_info(recorder)
+        assert len(sync['recorder_subscription_failures']) == 1  # said on every pass, kept once
+        assert 'recorder_warnings' not in sync
+
     def test_suspended_recorder_is_reported_and_can_still_be_stopped(
             self, qtbot, tmp_path, fake_node, fake_ros2):
         recorder, log = _recorder_with_log()
@@ -532,15 +579,20 @@ def _laz_files(recorder):
     return found
 
 
-def _fake_zed_sdk(monkeypatch, opens=True, fail_after_grabs=None):
+def _fake_zed_sdk(monkeypatch, opens=True, fail_after_grabs=None,
+                  cameras=(('45233238', 'ZED X', True),)):
     """A stand-in for pyzed.sl: a camera that opens (or not) and delivers frames."""
-    sl = SimpleNamespace(grabs=0, frame_period=threading.Event())
+    sl = SimpleNamespace(grabs=0, frame_period=threading.Event(), serial_asked_for=None)
     sl.ERROR_CODE = SimpleNamespace(
         SUCCESS='SUCCESS', END_OF_SVOFILE_REACHED='EOF', FAILURE='CAMERA NOT DETECTED')
     sl.DEPTH_MODE = SimpleNamespace(NONE=0)
     sl.RESOLUTION = SimpleNamespace(HD1200=1)
     sl.SVO_COMPRESSION_MODE = SimpleNamespace(H265=1)
-    sl.InitParameters = SimpleNamespace
+    class InitParameters(SimpleNamespace):
+        def set_from_serial_number(self, serial):
+            sl.serial_asked_for = serial
+
+    sl.InitParameters = InitParameters
     sl.RecordingParameters = SimpleNamespace
     sl.RuntimeParameters = SimpleNamespace
 
@@ -568,7 +620,33 @@ def _fake_zed_sdk(monkeypatch, opens=True, fail_after_grabs=None):
     sl.Camera = Camera
     monkeypatch.setattr('ros2_bag_gui.zed.svo_writer.get_sl_module', lambda: sl)
     monkeypatch.setattr('ros2_bag_gui.ros2.recorder.is_zed_sdk_available', lambda: True)
+    monkeypatch.setattr('ros2_bag_gui.ros2.recorder.list_zed_cameras', lambda: list(cameras))
     return sl
+
+
+def _fake_zed_driver(node, camera='zedx_cabin', recording=False, fails=None):
+    """A running ZED ROS driver: records its camera to SVO2 on request, as zed_wrapper does."""
+    path = f'/{camera}/{camera}_node'
+    driver = SimpleNamespace(recording=recording, files=[], stops=0)
+
+    def start(request):
+        if fails:
+            return SimpleNamespace(success=False, message=fails)
+        if driver.recording:
+            return SimpleNamespace(success=False, message='SVO Recording is already enabled')
+        driver.recording = True
+        driver.files.append(request.svo_filename)
+        open(request.svo_filename, 'wb').close()
+        return SimpleNamespace(success=True, message='SVO Recording started')
+
+    def stop(_request):
+        driver.stops += 1
+        was_recording, driver.recording = driver.recording, False
+        return SimpleNamespace(success=was_recording, message='SVO Recording stopped')
+
+    node.services[f'{path}/start_svo_rec'] = ('zed_msgs/srv/StartSvoRec', start)
+    node.services[f'{path}/stop_svo_rec'] = ('std_srvs/srv/Trigger', stop)
+    return driver
 
 
 class TestSideRecorders:
@@ -627,13 +705,19 @@ class TestSideRecorders:
         assert os.path.exists(os.path.join(session.recorder.session_path, 'camera_0.svo2'))
         assert _sync_info(session.recorder)['recording_modes']['camera'] == 'svo2'
 
-    def test_svo2_with_two_cameras_keeps_images_in_bag(self, session, monkeypatch):
+    def test_svo2_keeps_images_that_ros_publishes_in_the_bag(self, session, monkeypatch):
         _fake_zed_sdk(monkeypatch)
+        # The cabin driver publishes, so it holds the cabin camera: SVO2 records another one.
+        session.node.publishers[CABIN_IMAGE['name']] = [SimpleNamespace()]
 
-        bag_args = session.start([BOOM_IMAGE, CABIN_IMAGE], camera_mode='svo2')
+        bag_args = session.start([STATUS, CABIN_IMAGE], camera_mode='svo2')
 
-        assert BOOM_IMAGE['name'] in bag_args and CABIN_IMAGE['name'] in bag_args
-        assert len(session.log['warnings']) == 1
+        assert CABIN_IMAGE['name'] in bag_args
+        assert session.log['warnings'] == []
+        session.recorder.stop_recording()
+        sync = _sync_info(session.recorder)
+        assert sync['recording_modes']['camera'] == 'both'
+        assert sync['data_sources']['svo2']['file_count'] == 1
 
     def test_svo2_failure_while_recording_is_reported(self, session, qtbot, monkeypatch):
         _fake_zed_sdk(monkeypatch, fail_after_grabs=3)
@@ -772,3 +856,197 @@ class TestSideRecorders:
         assert pointcloud['dropped_frames'] >= 3
         assert pointcloud['dropped_frames'] + len(_laz_files(session.recorder)) == 5
         assert len(session.log['warnings']) >= 1
+
+    def test_frames_missing_between_laz_files_are_reported(self, session):
+        session.start([STATUS, BOOM_CLOUD], lidar_modes={'boom': 'laz'})
+
+        for second in (0, 1, 2, 5):  # the frames of seconds 3 and 4 never arrive
+            _laz_callback(session.node, BOOM_CLOUD['name'])(_cloud_bytes(1_700_000_000 + second))
+        session.recorder.stop_recording()
+
+        pointcloud = _sync_info(session.recorder)['data_sources']['pointcloud']
+        assert pointcloud['topics'][BOOM_CLOUD['name']]['missing_frames_est'] == 2
+        assert pointcloud['dropped_frames'] == 0
+        assert any('about 2 of 6 frames' in w for w in session.log['warnings'])
+
+    @pytest.mark.parametrize("publishers, expected", [
+        (['RELIABLE'], 'RELIABLE'),                    # the Ouster driver
+        (['RELIABLE', 'BEST_EFFORT'], 'BEST_EFFORT'),  # reliable would not match the second
+        ([], 'BEST_EFFORT'),                           # not up yet: matches whatever comes
+    ])
+    def test_laz_subscription_is_reliable_when_every_publisher_is(
+            self, session, publishers, expected):
+        from rclpy.qos import QoSProfile, QoSReliabilityPolicy
+        session.node.publishers[BOOM_CLOUD['name']] = [
+            SimpleNamespace(qos_profile=QoSProfile(depth=1, reliability=QoSReliabilityPolicy[r]))
+            for r in publishers
+        ]
+
+        session.start([STATUS, BOOM_CLOUD], lidar_modes={'boom': 'laz'})
+
+        qos = next(s['qos'] for s in session.node.subscriptions if s['topic'] == BOOM_CLOUD['name'])
+        assert qos.reliability == QoSReliabilityPolicy[expected]
+
+    def test_recorded_topics_are_not_received_again_just_to_count_them(self, session):
+        session.start([STATUS, BOOM_IMAGE, BOOM_CLOUD], lidar_modes={'boom': 'both'})
+
+        # Only the LAZ writer subscribes; what is in the bag is read from it at Stop.
+        assert [s['topic'] for s in session.node.subscriptions] == [BOOM_CLOUD['name']]
+
+    def test_a_camera_whose_driver_runs_is_recorded_by_the_driver(self, session, monkeypatch):
+        _fake_zed_sdk(monkeypatch, cameras=[('49749405', 'ZED X', False)])  # held by its driver
+        driver = _fake_zed_driver(session.node)
+        session.node.publishers[CABIN_IMAGE['name']] = [SimpleNamespace()]
+
+        bag_args = session.start([STATUS, CABIN_IMAGE], camera_mode='svo2')
+
+        assert CABIN_IMAGE['name'] not in bag_args  # the driver's SVO2 has that camera
+        assert driver.files == [os.path.join(session.recorder.session_path, 'zedx_cabin.svo2')]
+        assert session.log['warnings'] == []
+        session.recorder.stop_recording()
+        assert not driver.recording
+        sync = _sync_info(session.recorder)
+        assert sync['recording_modes']['camera'] == 'svo2'
+        assert sync['data_sources']['svo2']['path'] == ['zedx_cabin.svo2']
+
+    def test_driver_and_direct_svo2_record_both_cameras(self, session, monkeypatch):
+        _fake_zed_sdk(monkeypatch, cameras=[('49749405', 'ZED X', False), ('45233238', 'ZED X', True)])
+        _fake_zed_driver(session.node)
+
+        session.start([STATUS, CABIN_IMAGE], camera_mode='svo2')
+        session.recorder.stop_recording()
+
+        svo2 = _sync_info(session.recorder)['data_sources']['svo2']['path']
+        assert sorted(svo2) == ['camera_0.svo2', 'zedx_cabin.svo2']
+
+    def test_a_driver_that_cannot_record_keeps_its_images_in_the_bag(self, session, monkeypatch):
+        _fake_zed_sdk(monkeypatch, cameras=[('49749405', 'ZED X', False)])
+        _fake_zed_driver(session.node, fails='Error starting SVO recording: NO GPU COMPATIBLE')
+        session.node.publishers[CABIN_IMAGE['name']] = [SimpleNamespace()]
+
+        bag_args = session.start([STATUS, CABIN_IMAGE], camera_mode='svo2')
+
+        assert CABIN_IMAGE['name'] in bag_args
+        assert len(session.log['warnings']) == 1
+
+    def test_a_driver_already_recording_holds_the_start(self, qtbot, tmp_path, fake_node, fake_ros2, monkeypatch):
+        _fake_zed_sdk(monkeypatch, cameras=[('49749405', 'ZED X', False)])
+        driver = _fake_zed_driver(fake_node, recording=True)  # left over from a GUI that was killed
+        recorder = Recorder()
+        errors = []
+        recorder.error_occurred.connect(errors.append)
+        config = _config(tmp_path, camera_mode='svo2')
+
+        assert recorder.start_recording(config, fake_node) is False
+        assert errors == []  # the operator is asked instead
+        assert recorder.busy_svo_drivers == ['/zedx_cabin/zedx_cabin_node']
+        assert os.listdir(tmp_path / 'out') == []
+
+        assert recorder.stop_driver_svo2(recorder.busy_svo_drivers, fake_node) == []
+        assert recorder.start_recording(config, fake_node) is True
+        recorder.stop_recording(fake_node)
+        assert driver.stops == 2  # the left-over recording, then this session's
+        assert errors == []
+
+    def test_svo2_only_records_without_a_bag(self, qtbot, tmp_path, fake_node, fake_ros2, monkeypatch):
+        _fake_zed_sdk(monkeypatch, cameras=[('49749405', 'ZED X', False)])
+        driver = _fake_zed_driver(fake_node)
+        recorder = Recorder()
+        errors = []
+        recorder.error_occurred.connect(errors.append)
+        config = RecordingConfig(
+            topics=[], output_path=str(tmp_path / 'out'), session_name='t', camera_mode='svo2')
+
+        assert recorder.start_recording(config, fake_node) is True
+        assert recorder._bag_proc is None  # no ros2 bag record
+        recorder.stop_recording(fake_node)
+
+        assert not driver.recording
+        assert errors == []
+        sync = _sync_info(recorder)
+        assert 'rosbag' not in sync['data_sources']
+        assert sync['data_sources']['svo2']['path'] == ['zedx_cabin.svo2']
+
+    def test_start_is_refused_when_nothing_at_all_would_be_recorded(
+            self, qtbot, tmp_path, fake_node, fake_ros2, monkeypatch):
+        _fake_zed_sdk(monkeypatch, cameras=[])  # no camera to open, no driver to ask
+        recorder, log = _recorder_with_log()
+        config = RecordingConfig(
+            topics=[], output_path=str(tmp_path / 'out'), session_name='t', camera_mode='svo2')
+
+        assert recorder.start_recording(config, fake_node) is False
+
+        assert recorder._bag_proc is None
+        assert os.listdir(tmp_path / 'out') == []
+
+    def test_stopping_a_driver_waits_longer_than_starting_it(self, session, monkeypatch):
+        _fake_zed_sdk(monkeypatch, cameras=[('49749405', 'ZED X', False)])
+        _fake_zed_driver(session.node)
+        waits = []
+        call = Recorder._call_service
+
+        def note(self, node, srv_type, name, timeout_s=None, **fields):
+            waits.append((name.rsplit('/', 1)[-1], timeout_s))
+            return call(self, node, srv_type, name, timeout_s=timeout_s, **fields)
+
+        monkeypatch.setattr(Recorder, '_call_service', note)
+        session.start([STATUS], camera_mode='svo2')
+        session.recorder.stop_recording()
+
+        # Closing the SVO2 file flushes its encoder, so it may answer later than a start
+        assert waits == [('start_svo_rec', None), ('stop_svo_rec', Recorder.SVO_STOP_TIMEOUT_S)]
+        assert Recorder.SVO_STOP_TIMEOUT_S > Recorder.SERVICE_TIMEOUT_S
+
+    def test_a_driver_that_does_not_stop_is_reported_with_the_command_to_stop_it(
+            self, qtbot, tmp_path, fake_node, fake_ros2, monkeypatch):
+        _fake_zed_sdk(monkeypatch, cameras=[('49749405', 'ZED X', False)])
+        _fake_zed_driver(fake_node)
+        fake_node.services['/zedx_cabin/zedx_cabin_node/stop_svo_rec'] = (
+            'std_srvs/srv/Trigger', lambda _request: SimpleNamespace(success=False, message='busy'))
+        recorder = Recorder()
+        warnings = []
+        recorder.warning_occurred.connect(warnings.append)
+        config = RecordingConfig(
+            topics=[], output_path=str(tmp_path / 'out'), session_name='t', camera_mode='svo2')
+        assert recorder.start_recording(config, fake_node) is True
+
+        recorder.stop_recording(fake_node)
+
+        assert len(recorder.driver_stop_failures) == 1
+        assert 'ros2 service call /zedx_cabin/zedx_cabin_node/stop_svo_rec' in recorder.driver_stop_failures[0]
+        assert warnings == recorder.driver_stop_failures
+
+    def test_svo2_opens_the_camera_chosen_by_serial(self, session, monkeypatch):
+        sl = _fake_zed_sdk(monkeypatch)
+
+        session.start([STATUS, BOOM_IMAGE], camera_mode='svo2', svo2_camera_serial='45233238')
+
+        assert sl.serial_asked_for == 45233238
+
+    def test_the_svo2_file_is_named_after_the_camera_it_holds(self, session, monkeypatch):
+        _fake_zed_sdk(monkeypatch)
+        monkeypatch.setattr('ros2_bag_gui.ros2.recorder.camera_names_by_serial',
+                            lambda: {'45233238': 'zedx_boom'})
+
+        session.start([STATUS, BOOM_IMAGE], camera_mode='svo2', svo2_camera_serial='45233238')
+        session.recorder.stop_recording()
+
+        assert _sync_info(session.recorder)['data_sources']['svo2']['path'] == ['zedx_boom.svo2']
+
+    def test_the_camera_opened_without_a_choice_is_named_too(self, session, monkeypatch):
+        _fake_zed_sdk(monkeypatch, cameras=[('49749405', 'ZED X', False), ('45233238', 'ZED X', True)])
+        monkeypatch.setattr('ros2_bag_gui.ros2.recorder.camera_names_by_serial',
+                            lambda: {'45233238': 'zedx_boom', '49749405': 'zedx_cabin'})
+
+        session.start([STATUS, BOOM_IMAGE], camera_mode='svo2')  # no serial chosen
+        session.recorder.stop_recording()
+
+        assert _sync_info(session.recorder)['data_sources']['svo2']['path'] == ['zedx_boom.svo2']
+
+    def test_an_unknown_camera_keeps_the_old_file_name(self, session, monkeypatch):
+        _fake_zed_sdk(monkeypatch)
+
+        session.start([STATUS, BOOM_IMAGE], camera_mode='svo2', svo2_camera_serial='45233238')
+        session.recorder.stop_recording()
+
+        assert _sync_info(session.recorder)['data_sources']['svo2']['path'] == ['camera_0.svo2']
