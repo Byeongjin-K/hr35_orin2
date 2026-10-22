@@ -102,7 +102,10 @@ class TimeRangeSelector(QWidget):
         """Get the currently selected (start_ns, end_ns) range."""
         start_offset_ns = self.start_slider.value() * 1_000_000
         end_offset_ns = self.end_slider.value() * 1_000_000
-        return (self._start_ns + start_offset_ns, self._start_ns + end_offset_ns)
+        # The slider has millisecond resolution; its maximum means the exact bag end.
+        end_ns = (self._end_ns if self.end_slider.value() == self.end_slider.maximum()
+                  else self._start_ns + end_offset_ns)
+        return (self._start_ns + start_offset_ns, end_ns)
     
     def reset_to_full_range(self):
         """Reset selection to the full available range."""

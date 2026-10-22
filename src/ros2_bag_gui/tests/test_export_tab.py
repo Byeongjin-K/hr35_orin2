@@ -406,3 +406,116 @@ def test_laz_checkbox_disabled_when_no_pointcloud(export_tab, tmp_path, monkeypa
     assert not export_tab.laz_checkbox.isEnabled()
     assert not export_tab.laz_checkbox.isChecked()
     assert "No pointcloud data" in export_tab.laz_status_label.text()
+
+
+@pytest.mark.parametrize("topics,selected", [
+    (["/lidar_boom/points", "/lidar_cabin/points", "/local_pc"],
+     ["/lidar_boom/points", "/lidar_cabin/points"]),
+    (["/ouster/points", "/local_pc"], ["/ouster/points"]),
+    (["/local_pc", "/rn/original/transformed_points"],
+     ["/local_pc", "/rn/original/transformed_points"]),
+])
+def test_laz_bag_topics_default_and_operator_selection(
+    export_tab, mock_session_dir, tmp_path, topics, selected
+):
+    from ros2_bag_gui.export.bag_loader import BagLoader
+
+    session = BagLoader.load_session(str(mock_session_dir))
+    session.has_pointcloud = False
+    session.pointcloud_topic_names = topics
+    export_tab._session = session
+    export_tab._update_laz_status()
+    export_tab.csv_checkbox.setChecked(False)
+    export_tab.output_dir_edit.setText(str(tmp_path / "output"))
+
+    tasks = export_tab._build_export_tasks()
+
+    assert tasks[0].config.topic_names == selected
+    tree = export_tab.laz_topic_tree
+    for i in range(tree.topLevelItemCount()):
+        item = tree.topLevelItem(i)
+        item.setCheckState(0, Qt.CheckState.Checked if i == len(topics) - 1
+                           else Qt.CheckState.Unchecked)
+    assert export_tab._build_export_tasks()[0].config.topic_names == [topics[-1]]
+    tree.topLevelItem(len(topics) - 1).setCheckState(0, Qt.CheckState.Unchecked)
+    assert export_tab._build_export_tasks() == []
+    assert not export_tab.export_btn.isEnabled()
+
+
+def test_load_and_export_nested_recorder_laz(export_tab, mock_session_dir, tmp_path):
+    pointcloud = mock_session_dir / "pointcloud"
+    for path in pointcloud.glob("*.laz"):
+        path.unlink()
+    stamp = 1733824508000000000
+    for topic in ("lidar_boom_points", "lidar_cabin_points"):
+        folder = pointcloud / topic
+        folder.mkdir()
+        (folder / f"{stamp}.laz").write_bytes(topic.encode())
+    export_tab.session_path_edit.setText(str(mock_session_dir))
+    export_tab._on_load_session()
+    export_tab.csv_checkbox.setChecked(False)
+    export_tab.output_dir_edit.setText(str(tmp_path / "output"))
+
+    from ros2_bag_gui.export.laz_exporter import LAZExporter
+    result = LAZExporter().export(export_tab._build_export_tasks()[0].config)
+
+    assert len(export_tab._session.pointcloud_files) == 2
+    assert result.success
+    assert result.file_count == 2
+    for topic in ("lidar_boom_points", "lidar_cabin_points"):
+        assert (tmp_path / "output" / "pointcloud" / topic / f"{stamp}.laz").read_bytes() == topic.encode()
+
+
+def test_full_default_range_exports_last_csv_message(export_tab, tmp_path):
+    import csv
+    import rosbag2_py
+    from rclpy.serialization import serialize_message
+    from std_msgs.msg import Int32
+    from ros2_bag_gui.compat import create_topic_metadata
+    from ros2_bag_gui.export.csv_exporter import CSVExporter
+
+    bag = tmp_path / "bag"
+    start = 1733824508000000000
+    end = start + 2_000_894_901
+    writer = rosbag2_py.SequentialWriter()
+    writer.open(rosbag2_py.StorageOptions(uri=str(bag), storage_id="sqlite3"),
+                rosbag2_py.ConverterOptions("cdr", "cdr"))
+    writer.create_topic(create_topic_metadata(1, "/imu", "std_msgs/msg/Int32"))
+    for stamp in (start, end):
+        writer.write("/imu", serialize_message(Int32(data=42)), stamp)
+    del writer
+    export_tab.session_path_edit.setText(str(bag))
+    export_tab._on_load_session()
+    export_tab.laz_checkbox.setChecked(False)
+    export_tab.output_dir_edit.setText(str(tmp_path / "output"))
+
+    result = CSVExporter().export_topic(export_tab._build_export_tasks()[0].config)
+
+    assert result.success
+    assert result.message_count == 2
+    with open(result.output_path) as stream:
+        rows = list(csv.DictReader(stream))
+    assert int(rows[-1]["timestamp_sec"]) * 1_000_000_000 + int(rows[-1]["timestamp_nanosec"]) == end
+
+
+@pytest.mark.parametrize("source", [ImageSource.SVO, ImageSource.ROSBAG])
+def test_image_task_receives_exact_session_end(
+    export_tab, mock_session_dir, tmp_path, monkeypatch, source
+):
+    from ros2_bag_gui.export.bag_loader import BagLoader
+    from ros2_bag_gui.export.image_exporter import ImageExporter
+
+    session = BagLoader.load_session(str(mock_session_dir))
+    session.end_time_ns += 894901
+    export_tab._session = session
+    export_tab.time_range_selector.set_time_range(session.start_time_ns, session.end_time_ns)
+    monkeypatch.setattr(ImageExporter, "detect_image_source", lambda _: source)
+    export_tab.csv_checkbox.setChecked(False)
+    export_tab.laz_checkbox.setChecked(False)
+    export_tab.image_checkbox.setChecked(True)
+    export_tab.output_dir_edit.setText(str(tmp_path / "output"))
+
+    tasks = export_tab._build_export_tasks()
+
+    assert tasks[0].task_type == "image"
+    assert tasks[0].config.end_time_ns == session.end_time_ns

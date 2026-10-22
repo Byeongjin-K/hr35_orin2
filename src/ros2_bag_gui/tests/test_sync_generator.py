@@ -12,6 +12,34 @@ from ros2_bag_gui.export.sync_generator import (
 
 
 class TestSyncGenerator:
+
+    def test_nested_export_folders_keep_relative_file_paths(self, tmp_path):
+        stamp = 1733824508854518630
+        pointcloud = tmp_path / "pointcloud"
+        images = tmp_path / "images"
+        for folder, filename in [
+            (pointcloud / "lidar_boom_points", f"{stamp}.laz"),
+            (images / "camera_0", f"{stamp}.jpg"),
+            (images / "zed_right", f"{stamp}.jpg"),
+            (images / "zed_depth", f"{stamp}_depth.png"),
+        ]:
+            folder.mkdir(parents=True)
+            (folder / filename).touch()
+        output = tmp_path / "timestamps.csv"
+
+        result = SyncGenerator().generate(SyncGeneratorConfig(
+            output_path=str(output), pointcloud_dir=str(pointcloud),
+            image_dirs={"images": str(images)},
+        ))
+
+        assert result.success
+        assert result.row_count == 1
+        with output.open() as stream:
+            row = next(csv.DictReader(stream))
+        assert row["pointcloud_file"] == f"lidar_boom_points/{stamp}.laz"
+        assert row["image_left"] == f"camera_0/{stamp}.jpg"
+        assert row["image_right"] == f"zed_right/{stamp}.jpg"
+        assert row["image_depth"] == f"zed_depth/{stamp}_depth.png"
     
     @pytest.fixture
     def temp_dir(self):

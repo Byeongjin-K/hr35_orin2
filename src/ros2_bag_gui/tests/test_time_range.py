@@ -56,8 +56,21 @@ def test_get_selected_range_returns_correct_values(widget):
     
     selected_start, selected_end = widget.get_selected_range()
     assert selected_start == start_ns
-    # Millisecond resolution means we lose sub-millisecond precision
-    assert abs(selected_end - end_ns) < 1_000_000  # Within 1ms
+    assert selected_end == end_ns
+
+
+@pytest.mark.parametrize("reset", [False, True])
+def test_full_range_preserves_exact_nanosecond_end(widget, reset):
+    start = 1765331708854518630
+    end = start + 53_701_894_901
+    widget.set_time_range(start, end)
+    if reset:
+        widget.end_slider.setValue(1000)
+        widget.reset_to_full_range()
+
+    selected = widget.get_selected_range()
+
+    assert selected == (start, end)
 
 
 def test_slider_movement_emits_range_changed_signal(widget, qtbot):

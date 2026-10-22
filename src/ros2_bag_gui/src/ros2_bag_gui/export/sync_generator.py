@@ -64,14 +64,15 @@ class SyncGenerator:
             if config.image_dirs:
                 for topic_name, dir_path in config.image_dirs.items():
                     files = self._collect_files(dir_path, ['.jpg', '.png', '.jpeg'])
-                    
-                    topic_lower = topic_name.lower()
-                    if 'left' in topic_lower:
-                        image_left_files.extend(files)
-                    elif 'right' in topic_lower:
-                        image_right_files.extend(files)
-                    elif 'depth' in topic_lower:
-                        image_depth_files.extend(files)
+                    for filename, timestamp in files:
+                        source = f"{topic_name}/{filename}".lower()
+                        if 'depth' in source:
+                            image_depth_files.append((filename, timestamp))
+                        elif 'right' in source:
+                            image_right_files.append((filename, timestamp))
+                        else:
+                            # SVO extraction writes VIEW.LEFT under the camera name.
+                            image_left_files.append((filename, timestamp))
             
             # Create output directory if needed
             os.makedirs(os.path.dirname(os.path.abspath(config.output_path)), exist_ok=True)
@@ -133,35 +134,17 @@ class SyncGenerator:
         timestamps = set()
         
         # Collect from pointcloud directory
-        if pointcloud_dir and os.path.exists(pointcloud_dir):
-            for filename in os.listdir(pointcloud_dir):
-                if filename.endswith('.laz'):
-                    try:
-                        ts = int(Path(filename).stem)
-                        timestamps.add(ts)
-                    except ValueError:
-                        # Skip files that don't have numeric names
-                        continue
+        if pointcloud_dir:
+            timestamps.update(
+                ts for _, ts in SyncGenerator._collect_files(pointcloud_dir, ['.laz'])
+            )
         
         # Collect from image directories
         if image_dirs:
             for dir_path in image_dirs.values():
-                if not os.path.exists(dir_path):
-                    continue
-                    
-                for filename in os.listdir(dir_path):
-                    if filename.endswith(('.jpg', '.png', '.jpeg')):
-                        try:
-                            # Handle depth images: {timestamp}_depth.png
-                            stem = Path(filename).stem
-                            if stem.endswith('_depth'):
-                                stem = stem[:-6]  # Remove '_depth' suffix
-                            
-                            ts = int(stem)
-                            timestamps.add(ts)
-                        except ValueError:
-                            # Skip files that don't have numeric names
-                            continue
+                timestamps.update(
+                    ts for _, ts in SyncGenerator._collect_files(dir_path, ['.jpg', '.png', '.jpeg'])
+                )
         
         return sorted(list(timestamps))
     
@@ -219,16 +202,16 @@ class SyncGenerator:
         if not os.path.exists(directory):
             return files
         
-        for filename in os.listdir(directory):
-            if any(filename.endswith(ext) for ext in extensions):
+        for path in sorted(Path(directory).rglob("*")):
+            if path.is_file() and path.suffix in extensions:
                 try:
                     # Handle depth images: {timestamp}_depth.png
-                    stem = Path(filename).stem
+                    stem = path.stem
                     if stem.endswith('_depth'):
                         stem = stem[:-6]  # Remove '_depth' suffix
                     
                     ts = int(stem)
-                    files.append((filename, ts))
+                    files.append((str(path.relative_to(directory)), ts))
                 except ValueError:
                     # Skip files that don't have numeric names
                     continue

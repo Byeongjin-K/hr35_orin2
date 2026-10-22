@@ -8,7 +8,9 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal
 from typing import Optional, List
 import os
+import re
 
+from ros2_bag_gui.ros2.recorder import LIDAR_GROUPS
 from ros2_bag_gui.export.bag_loader import BagLoader, BagSessionInfo, TopicInfo
 from ros2_bag_gui.export.csv_exporter import CSVExportConfig
 from ros2_bag_gui.export.laz_exporter import LAZExportConfig, LAZFromBagConfig, LAZToRosbagConfig
@@ -96,6 +98,13 @@ class ExportTab(QWidget):
         
         self.laz_status_label = QLabel("Status: No pointcloud data")
         export_options_layout.addWidget(self.laz_status_label)
+
+        self.laz_topic_tree = QTreeWidget()
+        self.laz_topic_tree.setHeaderLabels(["PointCloud2 Topic"])
+        self.laz_topic_tree.setMaximumHeight(100)
+        self.laz_topic_tree.setVisible(False)
+        self.laz_topic_tree.itemChanged.connect(self._update_export_state)
+        export_options_layout.addWidget(self.laz_topic_tree)
         
         # Image Export
         self.image_checkbox = QCheckBox("Image Export")
@@ -321,6 +330,8 @@ class ExportTab(QWidget):
     
     def _update_laz_status(self):
         """Update LAZ export status."""
+        self.laz_topic_tree.clear()
+        self.laz_topic_tree.setVisible(False)
         if not self._session:
             self.laz_status_label.setText("Status: No pointcloud data")
             self.laz_checkbox.setEnabled(False)
@@ -331,8 +342,20 @@ class ExportTab(QWidget):
             self.laz_status_label.setText(f"Status: {file_count} LAZ files (pointcloud/ folder)")
             self.laz_checkbox.setEnabled(True)
         elif self._session.has_pointcloud_topics:
-            topic_names = ', '.join(self._session.pointcloud_topic_names)
-            self.laz_status_label.setText(f"Status: PointCloud2 in rosbag ({topic_names})")
+            topics = self._session.pointcloud_topic_names
+            lidar_topics = {
+                topic for topic in topics
+                if any(re.match(pattern, topic)
+                       for patterns in LIDAR_GROUPS.values() for pattern in patterns)
+            }
+            for topic in topics:
+                item = QTreeWidgetItem([topic])
+                item.setCheckState(0, Qt.CheckState.Checked
+                                   if not lidar_topics or topic in lidar_topics
+                                   else Qt.CheckState.Unchecked)
+                self.laz_topic_tree.addTopLevelItem(item)
+            self.laz_topic_tree.setVisible(True)
+            self.laz_status_label.setText(f"Status: PointCloud2 in rosbag ({len(topics)} topics)")
             self.laz_checkbox.setEnabled(True)
         else:
             self.laz_status_label.setText("Status: No pointcloud data")
@@ -365,7 +388,8 @@ class ExportTab(QWidget):
         if self._session and self.output_dir_edit.text().strip():
             if self.csv_checkbox.isChecked() and self._get_selected_topics():
                 can_export = True
-            elif self.laz_checkbox.isChecked() and self.laz_checkbox.isEnabled():
+            elif (self.laz_checkbox.isChecked() and self.laz_checkbox.isEnabled()
+                  and (self._session.has_pointcloud or self._get_selected_laz_topics())):
                 can_export = True
             elif self.image_checkbox.isChecked() and self.image_checkbox.isEnabled():
                 can_export = True
@@ -383,6 +407,14 @@ class ExportTab(QWidget):
                 selected.append(topic)
         
         return selected
+
+    def _get_selected_laz_topics(self) -> List[str]:
+        """Get selected PointCloud2 topics for bag conversion."""
+        return [
+            self.laz_topic_tree.topLevelItem(i).text(0)
+            for i in range(self.laz_topic_tree.topLevelItemCount())
+            if self.laz_topic_tree.topLevelItem(i).checkState(0) == Qt.CheckState.Checked
+        ]
     
     def _on_export_clicked(self):
         """Execute export operation."""
@@ -458,11 +490,11 @@ class ExportTab(QWidget):
                     description="Export LAZ pointcloud files",
                     config=config
                 ))
-            elif self._session.has_pointcloud_topics:
+            elif self._session.has_pointcloud_topics and self._get_selected_laz_topics():
                 # Source B: convert PointCloud2 from rosbag → LAZ
                 config = LAZFromBagConfig(
                     bag_path=self._session.rosbag_path,
-                    topic_names=self._session.pointcloud_topic_names,
+                    topic_names=self._get_selected_laz_topics(),
                     output_dir=laz_output_dir,
                     start_time_ns=start_ns,
                     end_time_ns=end_ns,

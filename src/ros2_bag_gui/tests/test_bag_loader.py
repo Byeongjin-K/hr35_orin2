@@ -1,5 +1,6 @@
 """Tests for bag_loader module."""
 
+import json
 import os
 import tempfile
 from pathlib import Path
@@ -377,3 +378,13 @@ class TestBagLoader:
         assert session.duration_ns == 1000000000
         assert session.has_pointcloud is False
         assert session.has_pointcloud_topics is False
+
+    def test_session_recorded_to_svo2_only_loads_from_sync_info(self, tmp_path):
+        (tmp_path / "sync_info.json").write_text(json.dumps({"start_time_ns": 100, "end_time_ns": 350}))
+        (tmp_path / "zedx_cabin.svo2").write_bytes(b"")
+
+        session = BagLoader.load_session(str(tmp_path))
+
+        assert session.topics == [] and session.db3_files == []
+        assert (session.start_time_ns, session.end_time_ns, session.duration_ns) == (100, 350, 250)
+        assert session.svo_files == [str(tmp_path / "zedx_cabin.svo2")]

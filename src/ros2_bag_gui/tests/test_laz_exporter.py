@@ -7,8 +7,57 @@ from pathlib import Path
 from ros2_bag_gui.export.laz_exporter import (
     LAZExporter,
     LAZExportConfig,
+    LAZFromBagConfig,
     LAZExportResult
 )
+
+
+@pytest.mark.parametrize("topics", [
+    ["/lidar_boom/points"],
+    ["/lidar_boom/points", "/lidar_cabin/points"],
+])
+def test_bag_export_keeps_selected_topics_separate(tmp_path, qtbot, topics):
+    import numpy as np
+    import rosbag2_py
+    from rclpy.serialization import serialize_message
+    from sensor_msgs.msg import PointCloud2, PointField
+    from ros2_bag_gui.compat import create_topic_metadata
+    from ros2_bag_gui.widgets.time_range import TimeRangeSelector
+    laspy = pytest.importorskip("laspy")
+
+    bag = tmp_path / "bag"
+    stamp = 1733824508854518630
+    writer = rosbag2_py.SequentialWriter()
+    writer.open(rosbag2_py.StorageOptions(uri=str(bag), storage_id="sqlite3"),
+                rosbag2_py.ConverterOptions("cdr", "cdr"))
+    for index, topic in enumerate(topics + ["/local_pc"]):
+        writer.create_topic(create_topic_metadata(index + 1, topic, "sensor_msgs/msg/PointCloud2"))
+        msg = PointCloud2(
+            height=1, width=1, point_step=12, row_step=12,
+            fields=[PointField(name=name, offset=i * 4, datatype=7, count=1)
+                    for i, name in enumerate(("x", "y", "z"))],
+            data=np.array([[index + 1, 2, 3]], dtype=np.float32).tobytes(),
+        )
+        writer.write(topic, serialize_message(msg), stamp)
+    del writer
+    output = tmp_path / "pointcloud"
+    selector = TimeRangeSelector()
+    qtbot.addWidget(selector)
+    selector.set_time_range(stamp - 2_000_894_901, stamp)
+    start, end = selector.get_selected_range()
+
+    result = LAZExporter().export_from_bag(LAZFromBagConfig(
+        bag_path=str(bag), topic_names=topics, output_dir=str(output),
+        start_time_ns=start, end_time_ns=end,
+    ))
+
+    assert result.success
+    assert result.file_count == len(topics)
+    assert len(list(output.rglob("*.laz"))) == len(topics)
+    for index, topic in enumerate(topics):
+        folder = output / topic.strip("/").replace("/", "_") if len(topics) > 1 else output
+        las = laspy.read(folder / f"{stamp}.laz")
+        assert list(las.x) == [index + 1]
 
 
 @pytest.fixture

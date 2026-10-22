@@ -1,5 +1,6 @@
 """Bag file loader module for loading ROS2 bag recording sessions."""
 
+import json
 import os
 from dataclasses import dataclass
 from datetime import datetime
@@ -89,6 +90,8 @@ class BagLoader:
             if os.path.exists(candidate2):
                 metadata_path = candidate2
                 rosbag_path = session_path
+            elif os.path.exists(os.path.join(session_path, "sync_info.json")):
+                return BagLoader._load_session_without_bag(session_path)
             else:
                 raise FileNotFoundError(
                     f"metadata.yaml not found in {session_path} or {session_path}/rosbag"
@@ -150,15 +153,7 @@ class BagLoader:
                 abs_path = os.path.join(rosbag_path, rel_path)
                 db3_files.append(abs_path)
         
-        # Check for pointcloud files
-        pointcloud_dir = os.path.join(session_path, "pointcloud")
-        has_pointcloud = os.path.isdir(pointcloud_dir)
-        pointcloud_files = []
-        if has_pointcloud:
-            for file in os.listdir(pointcloud_dir):
-                if file.endswith('.laz'):
-                    pointcloud_files.append(os.path.join(pointcloud_dir, file))
-            pointcloud_files.sort()
+        has_pointcloud, pointcloud_files, svo_files = BagLoader._side_recordings(session_path)
         
         # Detect PointCloud2 topics in rosbag
         pointcloud_topic_names = [
@@ -166,13 +161,6 @@ class BagLoader:
             if t.type == 'sensor_msgs/msg/PointCloud2'
         ]
         has_pointcloud_topics = len(pointcloud_topic_names) > 0
-        
-        # Check for SVO files
-        svo_files = []
-        for file in os.listdir(session_path):
-            if file.endswith('.svo2'):
-                svo_files.append(os.path.join(session_path, file))
-        svo_files.sort()
         has_svo = len(svo_files) > 0
         
         return BagSessionInfo(
@@ -194,6 +182,49 @@ class BagLoader:
             svo_files=svo_files
         )
     
+    @staticmethod
+    def _side_recordings(session_path: str):
+        """(pointcloud/ exists, its LAZ files incl. per-lidar subfolders, the SVO2 files)."""
+        pointcloud_dir = os.path.join(session_path, "pointcloud")
+        has_pointcloud = os.path.isdir(pointcloud_dir)
+        pointcloud_files = sorted(
+            str(path) for path in Path(pointcloud_dir).rglob("*.laz") if path.is_file()
+        ) if has_pointcloud else []
+        svo_files = sorted(
+            os.path.join(session_path, name) for name in os.listdir(session_path)
+            if name.endswith('.svo2')
+        )
+        return has_pointcloud, pointcloud_files, svo_files
+
+    @staticmethod
+    def _load_session_without_bag(session_path: str) -> BagSessionInfo:
+        """A session recorded to SVO2 (or LAZ) only: its times come from sync_info.json."""
+        try:
+            with open(os.path.join(session_path, "sync_info.json")) as f:
+                info = json.load(f)
+            start_time_ns, end_time_ns = int(info['start_time_ns']), int(info['end_time_ns'])
+        except (OSError, ValueError, KeyError) as e:
+            raise ValueError(f"Failed to read sync_info.json: {e}")
+        has_pointcloud, pointcloud_files, svo_files = BagLoader._side_recordings(session_path)
+        return BagSessionInfo(
+            session_path=session_path,
+            metadata_path="",
+            rosbag_path="",
+            topics=[],
+            total_message_count=0,
+            duration_ns=end_time_ns - start_time_ns,
+            start_time_ns=start_time_ns,
+            end_time_ns=end_time_ns,
+            db3_files=[],
+            storage_identifier="",
+            has_pointcloud=has_pointcloud,
+            has_pointcloud_topics=False,
+            has_svo=bool(svo_files),
+            pointcloud_files=pointcloud_files,
+            pointcloud_topic_names=[],
+            svo_files=svo_files,
+        )
+
     @staticmethod
     def get_topics_by_type(session: BagSessionInfo, type_filter: str) -> List[TopicInfo]:
         """Filter topics by message type (partial match).

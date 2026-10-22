@@ -102,7 +102,10 @@ class LAZExporter:
                 if progress_callback:
                     progress_callback(idx, total_files)
                 
-                dest_path = os.path.join(config.output_dir, os.path.basename(file_path))
+                dest_path = os.path.join(
+                    config.output_dir, os.path.relpath(file_path, config.pointcloud_dir)
+                )
+                os.makedirs(os.path.dirname(dest_path), exist_ok=True)
                 shutil.copy2(file_path, dest_path)
                 total_size += os.path.getsize(dest_path)
             
@@ -114,7 +117,7 @@ class LAZExporter:
                 try:
                     merged_file = os.path.join(config.output_dir, "merged.laz")
                     copied_files = [
-                        os.path.join(config.output_dir, os.path.basename(fp))
+                        os.path.join(config.output_dir, os.path.relpath(fp, config.pointcloud_dir))
                         for fp, _ in files_in_range
                     ]
                     self.merge_laz_files(copied_files, merged_file)
@@ -220,6 +223,14 @@ class LAZExporter:
                 total_size_bytes=0,
                 error="No PointCloud2 topics found in bag for requested topic names"
             )
+
+        topic_dirs = {
+            topic: os.path.join(config.output_dir, topic.strip('/').replace('/', '_'))
+            if len(pointcloud_topics) > 1 else config.output_dir
+            for topic in pointcloud_topics
+        }
+        for directory in topic_dirs.values():
+            os.makedirs(directory, exist_ok=True)
 
         try:
             msg_type = get_message('sensor_msgs/msg/PointCloud2')
@@ -338,7 +349,7 @@ class LAZExporter:
 
             try:
                 msg = deserialize_message(raw_data, msg_type)
-                output_path = pointcloud2_to_laz(msg, timestamp_ns, config.output_dir)
+                output_path = pointcloud2_to_laz(msg, timestamp_ns, topic_dirs[topic_name])
                 if output_path is None:
                     continue
 
@@ -527,11 +538,11 @@ class LAZExporter:
         
         files_with_timestamps = []
         
-        for filename in os.listdir(pointcloud_dir):
-            if not filename.endswith('.laz'):
+        for path in Path(pointcloud_dir).rglob("*.laz"):
+            if not path.is_file():
                 continue
             
-            timestamp = LAZExporter.parse_timestamp_from_filename(filename)
+            timestamp = LAZExporter.parse_timestamp_from_filename(path.name)
             if timestamp is None:
                 continue
             
@@ -540,8 +551,7 @@ class LAZExporter:
             if end_ns is not None and timestamp > end_ns:
                 continue
             
-            file_path = os.path.join(pointcloud_dir, filename)
-            files_with_timestamps.append((file_path, timestamp))
+            files_with_timestamps.append((str(path), timestamp))
         
         files_with_timestamps.sort(key=lambda x: x[1])
         
