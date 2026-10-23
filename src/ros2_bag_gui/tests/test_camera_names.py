@@ -1,4 +1,6 @@
 """Tests for naming ZED cameras by where they are mounted, not by index."""
+import locale
+
 import pytest
 
 from ros2_bag_gui.zed import camera_names
@@ -38,6 +40,25 @@ def test_camera_names_come_from_the_bringup_parameters(bringup_config):
 
 def test_a_broken_parameter_file_does_not_hide_the_others(bringup_config):
     (bringup_config / "zedx_boom_params.yaml").write_text("not: what we expect\n")
+
+    assert camera_names_by_serial() == {'49749405': 'zedx_cabin'}
+
+
+def test_names_are_read_after_the_zed_sdk_set_the_c_locale(bringup_config):
+    # The ZED SDK sets LC_CTYPE to C when it opens a camera; the bringup files hold Korean comments.
+    (bringup_config / "zedx_boom_params.yaml").write_text("# 붐 카메라\n" + BOOM_PARAMS, encoding="utf-8")
+    previous = locale.setlocale(locale.LC_CTYPE)
+    locale.setlocale(locale.LC_CTYPE, "C")
+    try:
+        names = camera_names_by_serial()
+    finally:
+        locale.setlocale(locale.LC_CTYPE, previous)
+
+    assert names == {'45233238': 'zedx_boom', '49749405': 'zedx_cabin'}
+
+
+def test_a_file_that_is_not_text_does_not_hide_the_others(bringup_config):
+    (bringup_config / "zedx_boom_params.yaml").write_bytes(b"\xff\xfe# not text\n")
 
     assert camera_names_by_serial() == {'49749405': 'zedx_cabin'}
 

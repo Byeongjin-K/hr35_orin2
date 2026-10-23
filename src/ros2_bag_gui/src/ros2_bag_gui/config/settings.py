@@ -36,7 +36,7 @@ class SettingsManager:
         """Load settings from file."""
         try:
             if self.CONFIG_FILE.exists():
-                with open(self.CONFIG_FILE) as f:
+                with open(self.CONFIG_FILE, encoding='utf-8') as f:
                     data = json.load(f)
                     # Filter out unknown keys to avoid TypeError
                     valid_keys = self._settings.__annotations__.keys()
@@ -54,7 +54,7 @@ class SettingsManager:
         """Save settings to file."""
         try:
             self.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-            with open(self.CONFIG_FILE, 'w') as f:
+            with open(self.CONFIG_FILE, 'w', encoding='utf-8') as f:
                 json.dump(asdict(self._settings), f, indent=2)
         except Exception as e:
             _logger.error("Failed to save settings: %s", e)

@@ -26,11 +26,13 @@ def camera_names_by_serial() -> Dict[str, str]:
     names = {}
     for path in sorted(glob.glob(os.path.join(share, CAMERA_PARAM_GLOB))):
         try:
-            with open(path) as f:
+            # The files hold Korean comments, and once the ZED SDK has opened a camera
+            # the process locale is C: the default encoding would then be ASCII.
+            with open(path, encoding='utf-8') as f:
                 params = yaml.safe_load(f)
             general = params['/**']['ros__parameters']['general']
             names[str(general['serial_number'])] = str(general['camera_name'])
-        except (OSError, KeyError, TypeError, yaml.YAMLError) as e:
+        except (OSError, ValueError, KeyError, TypeError, yaml.YAMLError) as e:
             logger.warning("Cannot read the camera name in %s: %s", path, e)
     return names
 

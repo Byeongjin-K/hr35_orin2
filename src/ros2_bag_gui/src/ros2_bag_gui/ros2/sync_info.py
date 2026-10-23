@@ -13,7 +13,7 @@ def read_bag_message_counts(rosbag_dir: str) -> Optional[Dict[str, int]]:
     """
     try:
         import yaml
-        with open(os.path.join(rosbag_dir, 'metadata.yaml')) as f:
+        with open(os.path.join(rosbag_dir, 'metadata.yaml'), encoding='utf-8') as f:
             info = yaml.safe_load(f)['rosbag2_bagfile_information']
         return {
             t['topic_metadata']['name']: int(t['message_count'])
@@ -135,7 +135,7 @@ def create_sync_info(
         sync_info["stop_reason"] = stop_reason or "unknown"
 
     sync_path = os.path.join(session_folder, 'sync_info.json')
-    with open(sync_path, 'w') as f:
+    with open(sync_path, 'w', encoding='utf-8') as f:
         json.dump(sync_info, f, indent=2)
 
     return sync_path
