@@ -45,6 +45,22 @@ def test_set_camera_mode_with_sdk_selects_it(qtbot, monkeypatch):
     assert panel.get_settings().camera_mode == "svo2"
 
 
+def test_sensor_switches_are_kept_and_a_lidar_switched_off_has_no_mode(qtbot):
+    panel = SettingsPanel()
+    qtbot.addWidget(panel)
+
+    panel.sensor_checks['lidar_cabin'].setChecked(False)
+    panel.sensor_checks['camera_boom'].setChecked(False)
+
+    again = SettingsPanel()
+    qtbot.addWidget(again)
+    assert again.sensor_switches() == {
+        'lidar_boom': True, 'lidar_cabin': False, 'camera_boom': False, 'camera_cabin': True}
+    assert again.camera_switches() == {'boom': False, 'cabin': True}
+    assert again.lidar_boom_mode_combo.isEnabled()
+    assert not again.lidar_cabin_mode_combo.isEnabled()
+
+
 def _with_cameras(monkeypatch, cameras, names=None):
     monkeypatch.setattr('ros2_bag_gui.widgets.settings_panel.is_zed_sdk_available', lambda: True)
     monkeypatch.setattr('ros2_bag_gui.widgets.settings_panel.list_zed_cameras', lambda: cameras)

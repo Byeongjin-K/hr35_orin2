@@ -22,7 +22,7 @@ from ros2_bag_gui.ros2.qos_overrides import (
 )
 from ros2_bag_gui.zed.svo_writer import SVO2WriterThread, SVO2Config
 from ros2_bag_gui.zed.sdk_check import is_zed_sdk_available, list_zed_cameras
-from ros2_bag_gui.zed.camera_names import camera_label, camera_names_by_serial
+from ros2_bag_gui.zed.camera_names import camera_label, camera_names_by_serial, camera_position
 from ros2_bag_gui.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -73,6 +73,8 @@ class RecordingConfig:
         default_factory=lambda: dict(DEFAULT_LIDAR_MODES))
     camera_mode: str = "bag"
     svo2_camera_serial: str = ""  # "" = the first camera that opens
+    cameras: Dict[str, bool] = field(  # switched on, by position; SVO2 records only these
+        default_factory=lambda: {'boom': True, 'cabin': True})
 
 
 def lidar_group_of(topic_name: str) -> Optional[str]:
@@ -145,6 +147,12 @@ def _recorder_can_load(type_name: str) -> bool:
 
 def _is_hidden(topic_name: str) -> bool:
     return any(token.startswith('_') for token in topic_name.split('/'))
+
+
+def _camera_switched_on(name: str, cameras: Dict[str, bool]) -> bool:
+    """A camera whose name does not say where it is mounted has no switch."""
+    position = camera_position(name)
+    return position is None or cameras.get(position, True)
 
 
 class SvoDriverBusy(Exception):
@@ -383,8 +391,10 @@ class Recorder(QObject):
         mode = config.camera_mode
         if mode not in ("svo2", "both"):
             return mode, set()
-        by_driver, failures = self._start_driver_svo2(node, session_folder)
-        reason = self._start_direct_svo2(config.svo2_camera_serial, session_folder, bool(by_driver))
+        if not any(config.cameras.values()):
+            return "bag", set()  # every camera is switched off: no SVO2
+        by_driver, failures = self._start_driver_svo2(node, session_folder, config.cameras)
+        reason = self._start_direct_svo2(config, session_folder, bool(by_driver))
         if reason:
             failures.append(reason)
         if not by_driver and not self._svo2_writers:
@@ -411,14 +421,17 @@ class Recorder(QObject):
             if name.endswith(suffix) and 'zed_msgs/srv/StartSvoRec' in types
         )
 
-    def _start_driver_svo2(self, node, session_folder: str) -> Tuple[set[str], List[str]]:
-        """Have each running ZED ROS driver record its camera into the session folder.
+    def _start_driver_svo2(self, node, session_folder: str,
+                           cameras: Dict[str, bool]) -> Tuple[set[str], List[str]]:
+        """Have each running ZED ROS driver of a switched-on camera record it into the session folder.
 
         Returns the cameras it records (e.g. zedx_cabin) and what failed.
         """
         recording, failures = set(), []
         for path in self._svo2_drivers(node):  # e.g. /zedx_cabin/zedx_cabin_node
             camera = path.split('/')[1]
+            if not _camera_switched_on(camera, cameras):
+                continue
             filename = os.path.join(os.path.abspath(session_folder), f'{camera}.svo2')
             ok, message = self._call_service(
                 node, 'zed_msgs/srv/StartSvoRec', f'{path}/start_svo_rec',
@@ -435,15 +448,20 @@ class Recorder(QObject):
             raise SvoDriverBusy(", ".join(self._busy_svo_drivers))
         return recording, failures
 
-    def _start_direct_svo2(self, serial: str, session_folder: str, drivers_record: bool) -> Optional[str]:
+    def _start_direct_svo2(self, config, session_folder: str, drivers_record: bool) -> Optional[str]:
         """Open a camera no driver holds and record it; return why that did not happen.
 
         A camera that is held open is taken to be held by its driver: while drivers
-        record, that is no failure.
+        record, that is no failure. A camera switched off is not opened.
         """
         if not is_zed_sdk_available():
             return "the ZED SDK (pyzed) is not installed"
-        free = {s: available for s, _model, available in list_zed_cameras()}
+        names = camera_names_by_serial()
+        serial = config.svo2_camera_serial
+        if serial and not _camera_switched_on(names.get(serial, ''), config.cameras):
+            return None
+        free = {s: available for s, _model, available in list_zed_cameras()
+                if _camera_switched_on(names.get(s, ''), config.cameras)}
         if serial and not free.get(serial):
             if serial in free and drivers_record:
                 return None

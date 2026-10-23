@@ -824,6 +824,108 @@ def test_profile_save_load_cycle(recording_tab, qtbot, monkeypatch):
     assert len(selected) == 2
 
 
+ZED_NODE = '/zedx_cabin/zedx_cabin_node'
+SENSOR_TOPICS = [
+    {'name': '/lidar_boom/points', 'type': 'sensor_msgs/msg/PointCloud2', 'hz': 10.0, 'category': 'lidar'},
+    {'name': '/lidar_boom/imu', 'type': 'sensor_msgs/msg/Imu', 'hz': 100.0, 'category': 'lidar'},
+    {'name': '/lidar_boom/lidar_packets', 'type': 'ouster_sensor_msgs/msg/PacketMsg', 'hz': 320.0,
+     'category': 'lidar'},
+    {'name': '/lidar_cabin/points', 'type': 'sensor_msgs/msg/PointCloud2', 'hz': 10.0, 'category': 'lidar'},
+    {'name': f'{ZED_NODE}/left/image_rect_color/compressed', 'type': 'sensor_msgs/msg/CompressedImage',
+     'hz': 10.0, 'category': 'zed'},
+    {'name': f'{ZED_NODE}/right/image_rect_color/compressed', 'type': 'sensor_msgs/msg/CompressedImage',
+     'hz': 10.0, 'category': 'zed'},
+    {'name': f'{ZED_NODE}/left/image_rect_color', 'type': 'sensor_msgs/msg/Image', 'hz': 10.0, 'category': 'zed'},
+    {'name': f'{ZED_NODE}/imu/data', 'type': 'sensor_msgs/msg/Imu', 'hz': 100.0, 'category': 'zed'},
+    {'name': '/excavator/status', 'type': 'std_msgs/msg/String', 'hz': 1.0, 'category': 'excavator'},
+]
+CABIN_IMAGES = {f'{ZED_NODE}/left/image_rect_color/compressed', f'{ZED_NODE}/right/image_rect_color/compressed'}
+
+
+def _selected(tab):
+    return set(tab.topic_list.get_selected_topics(include_missing=True))
+
+
+def _switch(tab, sensor, on):
+    tab.settings_panel.sensor_checks[sensor].setChecked(on)
+
+
+def test_switching_a_lidar_off_unticks_every_topic_of_it(recording_tab):
+    recording_tab.set_topics(SENSOR_TOPICS)
+    recording_tab.topic_list.set_selected_topics(
+        ['/lidar_boom/points', '/lidar_boom/lidar_packets', '/lidar_cabin/points', '/excavator/status'])
+
+    _switch(recording_tab, 'lidar_boom', False)
+
+    assert _selected(recording_tab) == {'/lidar_cabin/points', '/excavator/status'}
+    assert not recording_tab.settings_panel.lidar_boom_mode_combo.isEnabled()
+
+
+def test_switching_a_lidar_on_ticks_its_topics_but_the_raw_packets(recording_tab):
+    recording_tab.set_topics(SENSOR_TOPICS)
+    _switch(recording_tab, 'lidar_boom', False)
+
+    _switch(recording_tab, 'lidar_boom', True)
+
+    assert _selected(recording_tab) == {'/lidar_boom/points', '/lidar_boom/imu'}
+
+
+def test_the_camera_mode_decides_whether_a_switched_on_camera_ticks_its_images(recording_tab):
+    recording_tab.set_topics(SENSOR_TOPICS)
+    _switch(recording_tab, 'camera_cabin', False)
+    _switch(recording_tab, 'camera_cabin', True)  # camera mode Bag
+    assert _selected(recording_tab) == {f'{ZED_NODE}/imu/data'} | CABIN_IMAGES
+
+    recording_tab.settings_panel.camera_mode_combo.setCurrentIndex(1)  # SVO2 holds the images
+    assert _selected(recording_tab) == {f'{ZED_NODE}/imu/data'}
+
+    recording_tab.settings_panel.camera_mode_combo.setCurrentIndex(0)
+    assert _selected(recording_tab) == {f'{ZED_NODE}/imu/data'} | CABIN_IMAGES
+
+
+def test_a_topic_is_ticked_by_its_switch_the_first_time_it_shows_up_only(recording_tab):
+    recording_tab._on_topics_discovered(SENSOR_TOPICS)
+    assert _selected(recording_tab) == {
+        '/lidar_boom/points', '/lidar_boom/imu', '/lidar_cabin/points', f'{ZED_NODE}/imu/data'} | CABIN_IMAGES
+
+    recording_tab.topic_list.set_selected_topics(_selected(recording_tab) - {'/lidar_cabin/points'})
+    recording_tab._on_topics_discovered(SENSOR_TOPICS + [
+        {'name': '/lidar_cabin/imu', 'type': 'sensor_msgs/msg/Imu', 'hz': 100.0, 'category': 'lidar'}])
+
+    assert '/lidar_cabin/imu' in _selected(recording_tab)
+    assert '/lidar_cabin/points' not in _selected(recording_tab)  # unticked by the operator
+
+
+def test_a_switched_off_sensor_ticks_nothing_when_its_topics_show_up(recording_tab):
+    _switch(recording_tab, 'lidar_cabin', False)
+
+    recording_tab._on_topics_discovered(SENSOR_TOPICS)
+
+    assert '/lidar_cabin/points' not in _selected(recording_tab)
+
+
+def test_camera_switches_reach_the_recorder(recording_tab, qtbot):
+    _switch(recording_tab, 'camera_cabin', False)
+
+    _start_with_one_topic(recording_tab)
+
+    assert recording_tab._recorder.started_with.cameras == {'boom': True, 'cabin': False}
+
+
+def test_svo2_with_every_camera_switched_off_needs_a_topic(recording_tab, qtbot, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    shown = []
+    monkeypatch.setattr(QMessageBox, 'warning', lambda *args, **kwargs: shown.append(args[1]))
+    _switch(recording_tab, 'camera_boom', False)
+    _switch(recording_tab, 'camera_cabin', False)
+    recording_tab.settings_panel._settings_manager.update(camera_mode='svo2')
+
+    recording_tab._on_start_clicked()
+
+    assert recording_tab._recorder.start_calls == 0
+    assert len(shown) == 1
+
+
 def test_reset(recording_tab, qtbot):
     """Test reset functionality."""
     recording_tab.topic_list.list_btn.setChecked(True)

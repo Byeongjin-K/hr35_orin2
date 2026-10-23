@@ -37,11 +37,15 @@ def camera_names_by_serial() -> Dict[str, str]:
     return names
 
 
+def camera_position(name: str) -> str | None:
+    """Where a camera is mounted ('boom', 'cabin'), from its name; None if the name does not say."""
+    return next((token for token in POSITION_LABELS if token in name.lower()), None)
+
+
 def camera_label(serial: str, name: str = "") -> str:
     """How to call a camera on screen: its position, its name and its serial number."""
     name = name or camera_names_by_serial().get(serial, "")
-    position = next(
-        (label for token, label in POSITION_LABELS.items() if token in name.lower()), "")
+    position = camera_position(name)
     if position:
-        return f"{position} 카메라 ({name}, {serial})"
+        return f"{POSITION_LABELS[position]} 카메라 ({name}, {serial})"
     return f"{name} ({serial})" if name else serial

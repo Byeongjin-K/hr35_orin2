@@ -20,6 +20,10 @@ class AppSettings:
     lidar_cabin_mode: str = "bag"  # "bag", "laz", "both"
     camera_mode: str = "bag"       # "bag", "svo2", "both"
     svo2_camera_serial: str = ""   # ZED camera SVO2 records; "" = the first that opens
+    lidar_boom_enabled: bool = True
+    lidar_cabin_enabled: bool = True
+    camera_boom_enabled: bool = True
+    camera_cabin_enabled: bool = True
     last_selected_topics: list = field(default_factory=list)
 
 class SettingsManager:

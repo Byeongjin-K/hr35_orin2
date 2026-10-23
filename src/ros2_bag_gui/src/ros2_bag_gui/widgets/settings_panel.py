@@ -10,10 +10,18 @@ from ros2_bag_gui.zed.sdk_check import is_zed_sdk_available, list_zed_cameras
 from ros2_bag_gui.zed.camera_names import camera_label, camera_names_by_serial
 from pathlib import Path
 
+_LIDAR_SWITCH_TIP = ("켜면 이 라이다의 토픽을 체크합니다(원시 *_packets 제외). "
+                     "끄면 이 라이다의 토픽을 모두 해제합니다.")
+_CAMERA_SWITCH_TIP = ("켜면 이 카메라의 가벼운 토픽과, Bag에 포함·둘 다 모드면 left/right 압축 영상을 "
+                      "체크하고, SVO2 모드면 SVO2로 녹화합니다. 끄면 토픽을 모두 해제하고 SVO2도 "
+                      "녹화하지 않습니다.")
+
+
 class SettingsPanel(QWidget):
     """Panel for recording settings."""
     
     settings_changed = Signal()
+    sensor_toggled = Signal(str, bool)  # sensor (lidar_boom, ..., camera_cabin), switched on
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -88,8 +96,9 @@ class SettingsPanel(QWidget):
         lidar_group = QGroupBox("LiDAR Recording Mode")
         lidar_layout = QVBoxLayout(lidar_group)
         
-        self.lidar_boom_mode_combo = self._add_lidar_mode_row(lidar_layout, "붐 LiDAR:")
-        self.lidar_cabin_mode_combo = self._add_lidar_mode_row(lidar_layout, "캐빈 LiDAR:")
+        self.sensor_checks: dict[str, QCheckBox] = {}
+        self.lidar_boom_mode_combo = self._add_lidar_mode_row(lidar_layout, "붐 LiDAR:", 'lidar_boom')
+        self.lidar_cabin_mode_combo = self._add_lidar_mode_row(lidar_layout, "캐빈 LiDAR:", 'lidar_cabin')
         
         self.lidar_info_label = QLabel(
             "ℹ️ LAZ 모드: LiDAR PointCloud2 → pointcloud/ 폴더에 프레임별 저장. "
@@ -104,6 +113,13 @@ class SettingsPanel(QWidget):
         camera_group = QGroupBox("Camera Recording Mode")
         camera_layout = QVBoxLayout(camera_group)
         
+        camera_switch_layout = QHBoxLayout()
+        camera_switch_layout.addWidget(QLabel("카메라:"))
+        self._add_sensor_switch(camera_switch_layout, "붐 카메라", 'camera_boom')
+        self._add_sensor_switch(camera_switch_layout, "캐빈 카메라", 'camera_cabin')
+        camera_switch_layout.addStretch()
+        camera_layout.addLayout(camera_switch_layout)
+
         camera_mode_layout = QHBoxLayout()
         camera_mode_layout.addWidget(QLabel("Mode:"))
         self.camera_mode_combo = QComboBox()
@@ -147,15 +163,28 @@ class SettingsPanel(QWidget):
         layout.addWidget(camera_group)
         layout.addStretch()
     
-    def _add_lidar_mode_row(self, layout, label: str) -> QComboBox:
+    def _add_lidar_mode_row(self, layout, label: str, sensor: str) -> QComboBox:
         row = QHBoxLayout()
-        row.addWidget(QLabel(label))
+        switch = self._add_sensor_switch(row, label, sensor)
         combo = QComboBox()
         combo.addItems(["Bag에 포함", "LAZ 분리 저장", "둘 다"])
         combo.currentIndexChanged.connect(self._on_settings_changed)
+        switch.toggled.connect(combo.setEnabled)  # a lidar switched off has no mode to choose
         row.addWidget(combo)
         layout.addLayout(row)
         return combo
+
+    def _add_sensor_switch(self, row, label: str, sensor: str) -> QCheckBox:
+        switch = QCheckBox(label)
+        switch.setToolTip(_LIDAR_SWITCH_TIP if sensor.startswith('lidar') else _CAMERA_SWITCH_TIP)
+        switch.toggled.connect(lambda on, s=sensor: self._on_sensor_toggled(s, on))
+        row.addWidget(switch)
+        self.sensor_checks[sensor] = switch
+        return switch
+
+    def _on_sensor_toggled(self, sensor: str, on: bool):
+        self._on_settings_changed()
+        self.sensor_toggled.emit(sensor, on)
 
     def _on_browse(self):
         """Open folder selection dialog."""
@@ -194,6 +223,7 @@ class SettingsPanel(QWidget):
             self.split_size_spin, self.split_time_spin,
             self.lidar_boom_mode_combo, self.lidar_cabin_mode_combo,
             self.camera_mode_combo, self.svo2_camera_combo,
+            *self.sensor_checks.values(),
         ]
         for w in widgets:
             w.blockSignals(True)
@@ -210,6 +240,10 @@ class SettingsPanel(QWidget):
         lidar_mode_map = {"bag": 0, "laz": 1, "both": 2}
         self.lidar_boom_mode_combo.setCurrentIndex(lidar_mode_map.get(s.lidar_boom_mode, 0))
         self.lidar_cabin_mode_combo.setCurrentIndex(lidar_mode_map.get(s.lidar_cabin_mode, 0))
+        for sensor, switch in self.sensor_checks.items():
+            switch.setChecked(getattr(s, f'{sensor}_enabled'))
+        self.lidar_boom_mode_combo.setEnabled(s.lidar_boom_enabled)
+        self.lidar_cabin_mode_combo.setEnabled(s.lidar_cabin_enabled)
 
         camera_mode_map = {"bag": 0, "svo2": 1, "both": 2}
         idx = camera_mode_map.get(s.camera_mode, 0)
@@ -232,6 +266,15 @@ class SettingsPanel(QWidget):
         self.split_size_spin.setEnabled(split_idx == 0)
         self.split_time_spin.setEnabled(split_idx == 1)
     
+    def sensor_switches(self) -> dict[str, bool]:
+        """Which sensors are switched on: lidar_boom, lidar_cabin, camera_boom, camera_cabin."""
+        return {sensor: switch.isChecked() for sensor, switch in self.sensor_checks.items()}
+
+    def camera_switches(self) -> dict[str, bool]:
+        """Which cameras are switched on, by position ('boom', 'cabin'), as the recorder expects."""
+        return {sensor.removeprefix('camera_'): on for sensor, on in self.sensor_switches().items()
+                if sensor.startswith('camera_')}
+
     def lidar_modes(self) -> dict[str, str]:
         """The chosen mode per lidar, keyed the way the recorder expects."""
         s = self.get_settings()
@@ -291,6 +334,7 @@ class SettingsPanel(QWidget):
             lidar_cabin_mode=lidar_mode_map[self.lidar_cabin_mode_combo.currentIndex()],
             camera_mode=camera_mode_map[self.camera_mode_combo.currentIndex()],
             svo2_camera_serial=self.svo2_camera_combo.currentData() or "",
+            **{f'{sensor}_enabled': on for sensor, on in self.sensor_switches().items()},
         )
     
     def get_settings(self) -> AppSettings:

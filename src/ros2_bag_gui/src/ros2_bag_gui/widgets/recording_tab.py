@@ -16,6 +16,7 @@ from ros2_bag_gui.config.profiles import ProfileManager, RecordingProfile
 from ros2_bag_gui.ros2.ros2_thread import ROS2Thread
 from ros2_bag_gui.ros2.topic_discovery import TopicDiscoveryManager
 from ros2_bag_gui.ros2.recorder import Recorder, RecordingConfig, unloadable_types
+from ros2_bag_gui.ros2.sensor_topics import BAG_IMAGE_MODES, CAMERAS, sensor_of, switch_topics
 from ros2_bag_gui.ros2.bag_process import find_other_recorders
 from ros2_bag_gui.logging_config import get_logger
 
@@ -45,7 +46,9 @@ class RecordingTab(QWidget):
         self.profile_manager = ProfileManager()
         self._topics: List[Dict] = []
         self._measured_hz: Dict[str, float] = {}
+        self._seen_topics: set[str] = set()  # a sensor switch ticks a topic the first time it shows up
         self._setup_ui()
+        self._camera_mode = self.settings_panel.get_settings().camera_mode
         self._connect_signals()
         self._load_profile_list()
         self._setup_ros2()
@@ -157,6 +160,7 @@ class RecordingTab(QWidget):
     
     def _connect_signals(self):
         self.settings_panel.settings_changed.connect(self._on_settings_changed)
+        self.settings_panel.sensor_toggled.connect(self._on_sensor_toggled)
         # Queued: these come out of the status panel's one-second timer, and a
         # timer does not fire again while its own slot is inside a dialog. Shown
         # directly, the low-space warning would switch off the automatic stop
@@ -225,12 +229,48 @@ class RecordingTab(QWidget):
         self._ros2_thread.set_hz_topics(self.topic_list.get_selected_topics(include_missing=True))
 
     def _on_topics_discovered(self, topics: List[Dict]):
-        self._topics = topics
         self.set_topics(topics)
+        self._tick_new_sensor_topics(topics)
         count = len(topics)
         self.connection_label.setText(f"✅ ROS2 Connected ({count} topics)")
         logger.info(f"Discovered {count} topics")
     
+    def _selection(self) -> set[str]:
+        return set(self.topic_list.get_selected_topics(include_missing=True))
+
+    def _topic_types(self, topics: List[Dict]) -> List[tuple[str, str]]:
+        return [(t['name'], t['type']) for t in topics]
+
+    def _on_sensor_toggled(self, sensor: str, on: bool):
+        """Switched on, a sensor ticks its topics; switched off, every topic of it is unticked."""
+        if on:
+            ticked = self._selection() | switch_topics(
+                sensor, self._topic_types(self._topics), self._camera_mode)
+        else:
+            ticked = {name for name in self._selection() if sensor_of(name) != sensor}
+        self.topic_list.set_selected_topics(sorted(ticked))
+
+    def _tick_new_sensor_topics(self, topics: List[Dict]):
+        """A topic seen for the first time is ticked when its sensor is switched on."""
+        new = self._topic_types([t for t in topics if t['name'] not in self._seen_topics])
+        self._seen_topics.update(name for name, _type in new)
+        ticked = set()
+        for sensor, on in self.settings_panel.sensor_switches().items():
+            if on:
+                ticked |= switch_topics(sensor, new, self._camera_mode)
+        if ticked:
+            self.topic_list.set_selected_topics(sorted(self._selection() | ticked))
+
+    def _tick_camera_images(self):
+        """Camera images go into the bag in some camera modes only: follow the mode."""
+        pairs = self._topic_types(self._topics)
+        ticked = self._selection()
+        for sensor, on in self.settings_panel.sensor_switches().items():
+            if sensor in CAMERAS and on:
+                images = switch_topics(sensor, pairs, 'bag') - switch_topics(sensor, pairs, 'svo2')
+                ticked = ticked | images if self._camera_mode in BAG_IMAGE_MODES else ticked - images
+        self.topic_list.set_selected_topics(sorted(ticked))
+
     def _on_discovery_error(self, msg: str):
         self.connection_label.setText(f"⚠️ {msg}")
         logger.warning(f"Topic discovery error: {msg}")
@@ -363,6 +403,9 @@ class RecordingTab(QWidget):
         """Handle settings changes."""
         settings = self.settings_panel.get_settings()
         self.status_panel.set_target_path(settings.output_path)
+        if settings.camera_mode != self._camera_mode:
+            self._camera_mode = settings.camera_mode
+            self._tick_camera_images()
     
     def _on_disk_critical(self):
         """Handle critical disk space warning (raised once per fall below the limit)."""
@@ -395,7 +438,8 @@ class RecordingTab(QWidget):
         selected_topic_names = self.topic_list.get_selected_topics()
         missing_topic_names = self.topic_list.get_missing_selected()
         
-        svo2_wanted = settings.camera_mode in ("svo2", "both")  # cameras need no topic
+        svo2_wanted = (settings.camera_mode in ("svo2", "both")  # cameras need no topic
+                       and any(self.settings_panel.camera_switches().values()))
         if not selected_topic_names and not missing_topic_names and not svo2_wanted:
             QMessageBox.warning(
                 self,
@@ -496,6 +540,7 @@ class RecordingTab(QWidget):
             lidar_modes=self.settings_panel.lidar_modes(),
             camera_mode=settings.camera_mode,
             svo2_camera_serial=settings.svo2_camera_serial,
+            cameras=self.settings_panel.camera_switches(),
         )
         
         node = self._ros2_thread.node
@@ -750,6 +795,7 @@ class RecordingTab(QWidget):
         Args:
             topics: List of dicts with 'name', 'type', 'hz', 'category'
         """
+        self._topics = topics
         self.topic_list.set_topics(topics)
     
     def reset(self):

@@ -1055,6 +1055,43 @@ class TestSideRecorders:
         assert _sync_info(session.recorder)['data_sources']['svo2']['path'] == ['camera_0.svo2']
 
 
+    def test_a_camera_switched_off_is_recorded_neither_by_its_driver_nor_directly(self, session, monkeypatch):
+        _fake_zed_sdk(monkeypatch, cameras=[('49749405', 'ZED X', False), ('45233238', 'ZED X', True)])
+        monkeypatch.setattr('ros2_bag_gui.ros2.recorder.camera_names_by_serial',
+                            lambda: {'45233238': 'zedx_boom', '49749405': 'zedx_cabin'})
+        driver = _fake_zed_driver(session.node)  # the cabin's driver holds the cabin camera
+
+        session.start([STATUS], camera_mode='svo2', cameras={'boom': True, 'cabin': False})
+        session.recorder.stop_recording()
+
+        assert driver.files == []
+        assert _sync_info(session.recorder)['data_sources']['svo2']['path'] == ['zedx_boom.svo2']
+
+    def test_a_chosen_camera_switched_off_is_not_opened(self, session, monkeypatch):
+        sl = _fake_zed_sdk(monkeypatch)
+        monkeypatch.setattr('ros2_bag_gui.ros2.recorder.camera_names_by_serial',
+                            lambda: {'45233238': 'zedx_boom', '49749405': 'zedx_cabin'})
+        _fake_zed_driver(session.node)
+
+        session.start([STATUS], camera_mode='svo2', svo2_camera_serial='45233238',
+                      cameras={'boom': False, 'cabin': True})
+        session.recorder.stop_recording()
+
+        assert sl.serial_asked_for is None
+        assert _sync_info(session.recorder)['data_sources']['svo2']['path'] == ['zedx_cabin.svo2']
+
+    def test_with_every_camera_switched_off_no_svo2_is_recorded(self, session, monkeypatch):
+        _fake_zed_sdk(monkeypatch)
+        driver = _fake_zed_driver(session.node)
+
+        session.start([STATUS], camera_mode='svo2', cameras={'boom': False, 'cabin': False})
+        session.recorder.stop_recording()
+
+        assert driver.files == []
+        assert 'svo2' not in _sync_info(session.recorder)['data_sources']
+        assert session.log['warnings'] == []
+
+
 ALERT = {'name': '/excavator/safety/operator_alert', 'type': 'std_msgs/msg/String'}
 ACTION_STATUS = {'name': '/task_manager/execute_task/_action/status',
                  'type': 'action_msgs/msg/GoalStatusArray'}
