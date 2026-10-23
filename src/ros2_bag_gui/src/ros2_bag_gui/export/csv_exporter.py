@@ -113,12 +113,14 @@ class CSVExporter:
         
         # Write to temporary file first
         temp_path = config.output_path + '.tmp'
+        expanded_path = temp_path + '.columns'
         message_count = 0
         column_count = 0
-        columns = None
+        columns: list[str] = []
+        seen_columns: set[str] = set()
         
         try:
-            with open(temp_path, 'w', newline='') as csvfile:
+            with open(temp_path, 'w', newline='', encoding='utf-8') as csvfile:
                 writer = None
                 
                 while reader.has_next():
@@ -143,9 +145,17 @@ class CSVExporter:
                     # Initialize CSV writer with columns from first message
                     if writer is None:
                         columns = list(row.keys())
+                        seen_columns.update(columns)
                         column_count = len(columns)
                         writer = csv.DictWriter(csvfile, fieldnames=columns)
                         writer.writeheader()
+
+                    # Append new fields without retaining previous messages.
+                    # DictWriter shares this list; each row uses its current prefix.
+                    for column in row:
+                        if column not in seen_columns:
+                            columns.append(column)
+                            seen_columns.add(column)
                     
                     # Write row
                     writer.writerow(row)
@@ -156,11 +166,25 @@ class CSVExporter:
             
             # If no messages were written, create empty CSV with just timestamp columns
             if message_count == 0:
-                with open(temp_path, 'w', newline='') as csvfile:
+                with open(temp_path, 'w', newline='', encoding='utf-8') as csvfile:
                     columns = ['timestamp_sec', 'timestamp_nanosec']
                     column_count = 2
                     writer = csv.DictWriter(csvfile, fieldnames=columns)
                     writer.writeheader()
+
+            # Earlier rows are prefixes of the final schema. Rewrite once only
+            # when it grew, padding each streamed row to the full header.
+            if len(columns) > column_count:
+                with open(temp_path, 'r', newline='', encoding='utf-8') as source, \
+                        open(expanded_path, 'w', newline='', encoding='utf-8') as target:
+                    rows = csv.reader(source)
+                    next(rows)
+                    writer = csv.writer(target)
+                    writer.writerow(columns)
+                    for values in rows:
+                        writer.writerow(values + [''] * (len(columns) - len(values)))
+                os.replace(expanded_path, temp_path)
+                column_count = len(columns)
             
             # Rename temp file to final output
             if os.path.exists(config.output_path):
@@ -176,8 +200,9 @@ class CSVExporter:
             
         except Exception as e:
             # Clean up temp file on error
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
+            for path in (temp_path, expanded_path):
+                if os.path.exists(path):
+                    os.remove(path)
             
             return CSVExportResult(
                 success=False,

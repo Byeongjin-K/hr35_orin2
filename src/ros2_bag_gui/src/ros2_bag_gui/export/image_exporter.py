@@ -88,7 +88,7 @@ class ImageExporter:
             if metadata_path.exists():
                 try:
                     import yaml
-                    with open(metadata_path, 'r') as f:
+                    with open(metadata_path, 'r', encoding='utf-8') as f:
                         metadata = yaml.safe_load(f)
                     
                     # Look for sensor_msgs/msg/Image topics

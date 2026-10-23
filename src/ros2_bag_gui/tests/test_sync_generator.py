@@ -2,6 +2,7 @@ import pytest
 import tempfile
 import os
 import csv
+import locale
 from pathlib import Path
 
 from ros2_bag_gui.export.sync_generator import (
@@ -12,6 +13,58 @@ from ros2_bag_gui.export.sync_generator import (
 
 
 class TestSyncGenerator:
+
+    def test_nearest_images_stay_per_camera_when_subfolders_exist(self, tmp_path):
+        # Given two cameras with offset timestamps and a gap beyond tolerance.
+        images = tmp_path / "images"
+        for camera, stamps in [("zedx_boom", [1000000000, 1300000000]),
+                               ("zedx_cabin", [1040000000])]:
+            folder = images / camera
+            folder.mkdir(parents=True)
+            for stamp in stamps:
+                (folder / f"{stamp}.jpg").touch()
+        output = tmp_path / "timestamps.csv"
+
+        # When called with the same root mapping as ExportTab.
+        result = SyncGenerator().generate(SyncGeneratorConfig(
+            output_path=str(output), image_dirs={"images": str(images)},
+        ))
+
+        # Then each column uses only its own camera's nearest image.
+        assert result.success, result.error
+        with output.open(encoding="utf-8") as stream:
+            rows = list(csv.DictReader(stream))
+        assert result.row_count == 3
+        assert [row["image_zedx_boom"] for row in rows] == [
+            "zedx_boom/1000000000.jpg", "zedx_boom/1000000000.jpg",
+            "zedx_boom/1300000000.jpg",
+        ]
+        assert [row["image_zedx_cabin"] for row in rows] == [
+            "zedx_cabin/1040000000.jpg", "zedx_cabin/1040000000.jpg", "",
+        ]
+
+    def test_write_utf8_when_ctype_is_c(self, tmp_path):
+        # Given a relative image path containing non-ASCII text.
+        images = tmp_path / "images"
+        camera = "camera_\ud55c\uae00"
+        (images / camera).mkdir(parents=True)
+        (images / camera / "1000000000.jpg").touch()
+        output = tmp_path / "timestamps.csv"
+        previous = locale.setlocale(locale.LC_CTYPE)
+        try:
+            locale.setlocale(locale.LC_CTYPE, "C")
+            # When generating after the SDK has switched the locale.
+            result = SyncGenerator().generate(SyncGeneratorConfig(
+                output_path=str(output), image_dirs={"images": str(images)},
+            ))
+        finally:
+            locale.setlocale(locale.LC_CTYPE, previous)
+
+        # Then both the header and relative path round-trip as UTF-8.
+        assert result.success, result.error
+        with output.open(encoding="utf-8") as stream:
+            row = next(csv.DictReader(stream))
+        assert row[f"image_{camera}"] == f"{camera}/1000000000.jpg"
 
     def test_nested_export_folders_keep_relative_file_paths(self, tmp_path):
         stamp = 1733824508854518630
@@ -37,9 +90,9 @@ class TestSyncGenerator:
         with output.open() as stream:
             row = next(csv.DictReader(stream))
         assert row["pointcloud_file"] == f"lidar_boom_points/{stamp}.laz"
-        assert row["image_left"] == f"camera_0/{stamp}.jpg"
-        assert row["image_right"] == f"zed_right/{stamp}.jpg"
-        assert row["image_depth"] == f"zed_depth/{stamp}_depth.png"
+        assert row["image_camera_0"] == f"camera_0/{stamp}.jpg"
+        assert row["image_zed_right"] == f"zed_right/{stamp}.jpg"
+        assert row["image_zed_depth"] == f"zed_depth/{stamp}_depth.png"
     
     @pytest.fixture
     def temp_dir(self):

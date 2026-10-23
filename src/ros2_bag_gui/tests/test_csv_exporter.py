@@ -1,6 +1,7 @@
 """Tests for CSV exporter module."""
 
 import csv
+import locale
 import os
 import tempfile
 from pathlib import Path
@@ -16,6 +17,96 @@ from ros2_bag_gui.export.csv_exporter import (
 
 
 class TestCSVExporter:
+
+    @pytest.fixture
+    def variable_bag(self, tmp_path):
+        from rclpy.serialization import serialize_message
+        from rosbag2_py import ConverterOptions, SequentialWriter, StorageOptions
+        from sensor_msgs.msg import JointState
+        from ros2_bag_gui.compat import create_topic_metadata
+
+        bag = tmp_path / "bag"
+        writer = SequentialWriter()
+        writer.open(StorageOptions(uri=str(bag), storage_id="sqlite3"),
+                    ConverterOptions("", ""))
+        writer.create_topic(create_topic_metadata(
+            topic_id=1, name="/joints", type_="sensor_msgs/msg/JointState",
+            serialization_format="cdr",
+        ))
+        for stamp, size in enumerate([1, 3, 2, 4], start=1):
+            msg = JointState(name=[f"joint_{index}" for index in range(size)])
+            msg.header.frame_id = "\ud55c\uae00"
+            writer.write("/joints", serialize_message(msg), stamp)
+        del writer
+        return bag
+
+    def test_export_union_when_later_messages_add_fields(self, variable_bag, tmp_path):
+        # Given messages whose arrays grow, shrink, and grow again.
+        output = tmp_path / "union.csv"
+        config = CSVExportConfig(str(variable_bag), "/joints",
+                                 "sensor_msgs/msg/JointState", str(output))
+
+        # When exporting the whole topic.
+        result = CSVExporter().export_topic(config)
+
+        # Then columns keep first-seen order and absent fields are empty.
+        assert result.success, result.error
+        assert result.message_count == 4
+        assert result.column_count == 9
+        with output.open(encoding="utf-8", newline="") as stream:
+            reader = csv.DictReader(stream)
+            assert reader.fieldnames == [
+                "timestamp_sec", "timestamp_nanosec", "header_stamp_sec",
+                "header_stamp_nanosec", "header_frame_id",
+                "name_0", "name_1", "name_2", "name_3",
+            ]
+            rows = list(reader)
+        assert [[row[f"name_{i}"] for i in range(4)] for row in rows] == [
+            ["joint_0", "", "", ""],
+            ["joint_0", "joint_1", "joint_2", ""],
+            ["joint_0", "joint_1", "", ""],
+            ["joint_0", "joint_1", "joint_2", "joint_3"],
+        ]
+
+    def test_export_utf8_when_ctype_is_c(self, variable_bag, tmp_path):
+        # Given Unicode fields and the locale left by the ZED SDK.
+        output = tmp_path / "utf8.csv"
+        config = CSVExportConfig(str(variable_bag), "/joints",
+                                 "sensor_msgs/msg/JointState", str(output))
+        previous = locale.setlocale(locale.LC_CTYPE)
+        try:
+            locale.setlocale(locale.LC_CTYPE, "C")
+            # When streaming and rewriting the export under that locale.
+            result = CSVExporter().export_topic(config)
+        finally:
+            locale.setlocale(locale.LC_CTYPE, previous)
+
+        # Then UTF-8 field values survive both passes.
+        assert result.success, result.error
+        with output.open(encoding="utf-8", newline="") as stream:
+            assert [row["header_frame_id"] for row in csv.DictReader(stream)] == [
+                "\ud55c\uae00",
+            ] * 4
+
+    def test_export_preserves_bytes_when_columns_stay_constant(self, variable_bag, tmp_path):
+        # Given a range exporting only the first message's fixed schema.
+        output = tmp_path / "fixed.csv"
+        config = CSVExportConfig(str(variable_bag), "/joints",
+                                 "sensor_msgs/msg/JointState", str(output),
+                                 start_time_ns=1, end_time_ns=1)
+
+        # When exporting without any new columns in the selected range.
+        result = CSVExporter().export_topic(config)
+
+        # Then the original header order, values, and CSV line endings survive.
+        assert result.success, result.error
+        assert result.message_count == 1
+        assert result.column_count == 6
+        assert output.read_bytes() == (
+            "timestamp_sec,timestamp_nanosec,header_stamp_sec,"
+            "header_stamp_nanosec,header_frame_id,name_0\r\n"
+            "0,1,0,0,\ud55c\uae00,joint_0\r\n"
+        ).encode("utf-8")
     
     @pytest.fixture
     def sample_bag_path(self):

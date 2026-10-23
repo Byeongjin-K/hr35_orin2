@@ -1,6 +1,7 @@
 """Tests for bag_loader module."""
 
 import json
+import locale
 import os
 import tempfile
 from pathlib import Path
@@ -11,6 +12,34 @@ from ros2_bag_gui.export.bag_loader import BagLoader, BagSessionInfo, TopicInfo
 
 
 class TestBagLoader:
+
+    @pytest.mark.parametrize("metadata_file", ["metadata.yaml", "sync_info.json"])
+    def test_load_utf8_metadata_when_ctype_is_c(self, tmp_path, metadata_file):
+        # Given UTF-8 metadata for either a bag or an SVO-only session.
+        if metadata_file == "metadata.yaml":
+            content = """rosbag2_bagfile_information:
+  duration: {nanoseconds: 10}
+  starting_time: {nanoseconds_since_epoch: 100}
+  topics_with_message_count: []
+  relative_file_paths: ["\ud55c\uae00.db3"]
+"""
+        else:
+            content = json.dumps({
+                "start_time_ns": 100, "end_time_ns": 110, "camera": "\ud55c\uae00",
+            }, ensure_ascii=False)
+        (tmp_path / metadata_file).write_text(content, encoding="utf-8")
+        previous = locale.setlocale(locale.LC_CTYPE)
+        try:
+            locale.setlocale(locale.LC_CTYPE, "C")
+            # When loading after SVO extraction has changed the locale.
+            session = BagLoader.load_session(str(tmp_path))
+        finally:
+            locale.setlocale(locale.LC_CTYPE, previous)
+
+        # Then the session is parsed without ASCII decoding failures.
+        assert (session.start_time_ns, session.end_time_ns) == (100, 110)
+        if metadata_file == "metadata.yaml":
+            assert session.db3_files == [str(tmp_path / "\ud55c\uae00.db3")]
     
     @pytest.fixture
     def sample_session_path(self):

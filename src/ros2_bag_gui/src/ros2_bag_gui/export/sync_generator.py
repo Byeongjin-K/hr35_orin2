@@ -36,6 +36,8 @@ class SyncGenerator:
         - image_left: left camera image filename (or empty)
         - image_right: right camera image filename (or empty)
         - image_depth: depth image filename (or empty)
+
+        Per-camera subfolders use image_<folder> columns instead.
         
         Rows are generated from the UNION of all timestamps found across
         all data sources, sorted chronologically.
@@ -60,11 +62,17 @@ class SyncGenerator:
             image_left_files = []
             image_right_files = []
             image_depth_files = []
+            camera_files: dict[str, list[tuple[str, int]]] = {}
             
             if config.image_dirs:
                 for topic_name, dir_path in config.image_dirs.items():
                     files = self._collect_files(dir_path, ['.jpg', '.png', '.jpeg'])
                     for filename, timestamp in files:
+                        parts = Path(filename).parts
+                        if len(parts) > 1:
+                            column = f"image_{parts[0]}"
+                            camera_files.setdefault(column, []).append((filename, timestamp))
+                            continue
                         source = f"{topic_name}/{filename}".lower()
                         if 'depth' in source:
                             image_depth_files.append((filename, timestamp))
@@ -73,12 +81,22 @@ class SyncGenerator:
                         else:
                             # SVO extraction writes VIEW.LEFT under the camera name.
                             image_left_files.append((filename, timestamp))
+
+            image_files = {
+                'image_left': image_left_files,
+                'image_right': image_right_files,
+                'image_depth': image_depth_files,
+            }
+            if camera_files and not any(image_files.values()):
+                image_files = camera_files
+            else:
+                image_files.update(camera_files)
             
             # Create output directory if needed
             os.makedirs(os.path.dirname(os.path.abspath(config.output_path)), exist_ok=True)
             
             # Write CSV
-            with open(config.output_path, 'w', newline='') as csvfile:
+            with open(config.output_path, 'w', newline='', encoding='utf-8') as csvfile:
                 writer = csv.writer(csvfile)
                 
                 # Write header
@@ -86,9 +104,7 @@ class SyncGenerator:
                     'timestamp_ns',
                     'datetime_local',
                     'pointcloud_file',
-                    'image_left',
-                    'image_right',
-                    'image_depth'
+                    *image_files,
                 ])
                 
                 # Write data rows
@@ -97,9 +113,7 @@ class SyncGenerator:
                         str(ts),
                         self.ns_to_datetime_local(ts),
                         self.find_closest_file(ts, pointcloud_files),
-                        self.find_closest_file(ts, image_left_files),
-                        self.find_closest_file(ts, image_right_files),
-                        self.find_closest_file(ts, image_depth_files)
+                        *(self.find_closest_file(ts, files) for files in image_files.values()),
                     ]
                     writer.writerow(row)
             

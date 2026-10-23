@@ -99,7 +99,7 @@ class BagLoader:
         
         # Parse metadata.yaml
         try:
-            with open(metadata_path, 'r') as f:
+            with open(metadata_path, 'r', encoding='utf-8') as f:
                 metadata = yaml.safe_load(f)
         except Exception as e:
             raise ValueError(f"Failed to parse metadata.yaml: {e}")
@@ -200,7 +200,7 @@ class BagLoader:
     def _load_session_without_bag(session_path: str) -> BagSessionInfo:
         """A session recorded to SVO2 (or LAZ) only: its times come from sync_info.json."""
         try:
-            with open(os.path.join(session_path, "sync_info.json")) as f:
+            with open(os.path.join(session_path, "sync_info.json"), encoding='utf-8') as f:
                 info = json.load(f)
             start_time_ns, end_time_ns = int(info['start_time_ns']), int(info['end_time_ns'])
         except (OSError, ValueError, KeyError) as e:

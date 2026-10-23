@@ -3,6 +3,7 @@
 import pytest
 import tempfile
 import os
+import locale
 import shutil
 import numpy as np
 from pathlib import Path
@@ -34,6 +35,29 @@ def temp_output():
 
 class TestImageSourceDetection:
     """Test image source detection logic."""
+
+    def test_detect_utf8_metadata_when_ctype_is_c(self, tmp_path):
+        # Given an image topic with a non-ASCII name in UTF-8 YAML.
+        bag = tmp_path / "rosbag"
+        bag.mkdir()
+        (bag / "metadata.yaml").write_text(
+            "rosbag2_bagfile_information:\n"
+            "  topics_with_message_count:\n"
+            "    - topic_metadata:\n"
+            "        name: /camera_\ud55c\uae00/image\n"
+            "        type: sensor_msgs/msg/Image\n",
+            encoding="utf-8",
+        )
+        previous = locale.setlocale(locale.LC_CTYPE)
+        try:
+            locale.setlocale(locale.LC_CTYPE, "C")
+            # When detecting sources under the SDK's locale.
+            source = ImageExporter.detect_image_source(str(tmp_path))
+        finally:
+            locale.setlocale(locale.LC_CTYPE, previous)
+
+        # Then the image source is still discovered.
+        assert source == ImageSource.ROSBAG
     
     def test_detect_unavailable_empty_session(self, temp_session):
         """Empty session should return UNAVAILABLE."""
