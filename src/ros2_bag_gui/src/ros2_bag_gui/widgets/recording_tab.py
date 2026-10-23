@@ -84,6 +84,12 @@ class RecordingTab(QWidget):
         self.refresh_btn.setEnabled(False)
         self.refresh_btn.clicked.connect(self._on_refresh_topics)
         topic_header_layout.addWidget(self.refresh_btn)
+        self.reset_btn = QPushButton("⟲ Reset")
+        self.reset_btn.setToolTip(
+            "ROS2에 새로 연결하고 토픽·카메라 목록과 상태 표시를 다시 읽습니다(프로그램 재시작 없이). "
+            "체크한 토픽과 설정은 그대로 둡니다. 녹화 중에는 쓸 수 없습니다.")
+        self.reset_btn.clicked.connect(self._on_reset_clicked)
+        topic_header_layout.addWidget(self.reset_btn)
         left_layout.addLayout(topic_header_layout)
         
         # Topic list widget
@@ -176,17 +182,9 @@ class RecordingTab(QWidget):
             self._on_disk_full, Qt.ConnectionType.QueuedConnection)
     
     def _setup_ros2(self):
-        self._ros2_thread = ROS2Thread(self)
-        self._ros2_thread.connection_status_changed.connect(self._on_connection_changed)
-        self._ros2_thread.hz_updated.connect(self.topic_list.update_hz)
-        self._ros2_thread.hz_updated.connect(self._on_hz_updated)
-        self._ros2_thread.rate_updated.connect(self._on_rates_updated)
         # Rates are measured for the ticked topics only, not for every topic.
         self.topic_list.selection_changed.connect(self._on_topic_selection_changed)
         
-        self._discovery = TopicDiscoveryManager(self._ros2_thread, self)
-        self._discovery.topics_discovered.connect(self._on_topics_discovered)
-        self._discovery.error.connect(self._on_discovery_error)
         
         self._recorder = Recorder(self)
         self._recorder.recording_started.connect(self._on_recorder_started)
@@ -198,7 +196,22 @@ class RecordingTab(QWidget):
             self._on_recorder_warning, Qt.ConnectionType.QueuedConnection
         )
         
-        self._ros2_thread.start()
+        self._retired_threads: List[ROS2Thread] = []  # stopped, not yet finished: kept, never dropped
+        self._ros2_thread, self._discovery = self._connect_ros2()
+
+    def _connect_ros2(self) -> tuple[ROS2Thread, TopicDiscoveryManager]:
+        """A ROS2 thread with a node of its own, and the topic discovery on it (also for Reset)."""
+        thread = ROS2Thread(self)
+        thread.connection_status_changed.connect(self._on_connection_changed)
+        thread.hz_updated.connect(self.topic_list.update_hz)
+        thread.hz_updated.connect(self._on_hz_updated)
+        thread.rate_updated.connect(self._on_rates_updated)
+        discovery = TopicDiscoveryManager(thread, self)
+        discovery.topics_discovered.connect(self._on_topics_discovered)
+        discovery.error.connect(self._on_discovery_error)
+        thread.set_hz_topics(self.topic_list.get_selected_topics(include_missing=True))
+        thread.start()
+        return thread, discovery
     
     def _setup_auto_refresh(self):
         self._refresh_timer = QTimer(self)
@@ -252,7 +265,7 @@ class RecordingTab(QWidget):
 
     def _on_topics_discovered(self, topics: List[Dict]):
         self.set_topics(topics)
-        self._tick_new_sensor_topics(topics)
+        self._tick_new_sensor_topics(self._known_topics())
         count = len(topics)
         self.connection_label.setText(f"✅ ROS2 Connected ({count} topics)")
         logger.info(f"Discovered {count} topics")
@@ -260,21 +273,21 @@ class RecordingTab(QWidget):
     def _selection(self) -> set[str]:
         return set(self.topic_list.get_selected_topics(include_missing=True))
 
-    def _topic_types(self, topics: List[Dict]) -> List[tuple[str, str]]:
-        return [(t['name'], t['type']) for t in topics]
+    def _known_topics(self) -> List[tuple[str, str]]:
+        """(name, type) of every topic in the list."""
+        return [(t['name'], t['type']) for t in self._topics]
 
     def _on_sensor_toggled(self, sensor: str, on: bool):
         """Switched on, a sensor ticks its topics; switched off, every topic of it is unticked."""
         if on:
-            ticked = self._selection() | switch_topics(
-                sensor, self._topic_types(self._topics), self._camera_mode)
+            ticked = self._selection() | switch_topics(sensor, self._known_topics(), self._camera_mode)
         else:
             ticked = {name for name in self._selection() if sensor_of(name) != sensor}
         self.topic_list.set_selected_topics(sorted(ticked))
 
-    def _tick_new_sensor_topics(self, topics: List[Dict]):
+    def _tick_new_sensor_topics(self, topics: List[tuple[str, str]]):
         """A topic seen for the first time is ticked when its sensor is switched on."""
-        new = self._topic_types([t for t in topics if t['name'] not in self._seen_topics])
+        new = [(name, type_name) for name, type_name in topics if name not in self._seen_topics]
         self._seen_topics.update(name for name, _type in new)
         ticked = set()
         for sensor, on in self.settings_panel.sensor_switches().items():
@@ -285,7 +298,7 @@ class RecordingTab(QWidget):
 
     def _tick_camera_images(self):
         """Camera images go into the bag in some camera modes only: follow the mode."""
-        pairs = self._topic_types(self._topics)
+        pairs = self._known_topics()
         ticked = self._selection()
         for sensor, on in self.settings_panel.sensor_switches().items():
             if sensor in CAMERAS and on:
@@ -301,6 +314,34 @@ class RecordingTab(QWidget):
         if self._ros2_thread.is_connected:
             self._discovery.discover_topics()
     
+    def _on_reset_clicked(self):
+        """Connect to ROS2 anew and read the graph again, without restarting the program.
+
+        Ticked topics and settings stay; the measured rates, the notices and the
+        table of the last recording go.
+        """
+        if self._recorder.is_recording:
+            return
+        self._refresh_timer.stop()
+        old = self._ros2_thread
+        old.blockSignals(True)  # what it still says belongs to the connection being dropped
+        self._discovery.blockSignals(True)
+        self._discovery.deleteLater()
+        old.stop()
+        if old.isRunning():
+            self._retired_threads.append(old)  # a QThread dropped while it runs aborts the program
+        else:
+            old.deleteLater()
+        self._measured_hz.clear()
+        self._measured_gb_per_hour.clear()
+        self.status_panel.reset()
+        self.settings_panel.refresh_svo2_cameras()
+        self.connection_label.setText("⏳ Reconnecting to ROS2...")
+        self.refresh_btn.setEnabled(False)
+        self.set_topics([])
+        self._ros2_thread, self._discovery = self._connect_ros2()
+        logger.info("Reset: reconnecting to ROS2")
+
     def _on_recorder_started(self):
         logger.info("Recorder started successfully")
         self._ros2_thread.set_hz_active(False)
@@ -401,6 +442,7 @@ class RecordingTab(QWidget):
         """Start/Stop buttons, and whoever mirrors them (the menu), follow one state."""
         self.start_btn.setEnabled(not recording)
         self.stop_btn.setEnabled(recording)
+        self.reset_btn.setEnabled(not recording)
         self.recording_active_changed.emit(recording)
 
     def cleanup(self):
@@ -413,6 +455,8 @@ class RecordingTab(QWidget):
         self._stats_timer.stop()
         self._refresh_timer.stop()
         self._ros2_thread.stop()
+        for thread in self._retired_threads:
+            thread.wait(2000)
         try:
             self._recorder.recording_started.disconnect()
             self._recorder.recording_stopped.disconnect()

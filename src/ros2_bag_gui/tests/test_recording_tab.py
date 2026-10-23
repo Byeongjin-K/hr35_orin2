@@ -975,6 +975,38 @@ def test_a_light_recording_starts_without_a_question(recording_tab, qtbot, monke
     assert recording_tab._recorder.start_calls == 1
 
 
+def test_reset_connects_anew_and_keeps_the_ticks(recording_tab, monkeypatch):
+    stopped = []
+    monkeypatch.setattr(ROS2Thread, "stop", lambda self: stopped.append(self))
+    old = recording_tab._ros2_thread
+    recording_tab.topic_list.set_selected_topics(['/tf'])
+    recording_tab._on_rates_updated({'/tf': 1e6})
+    recording_tab.status_panel.add_notice("from the last recording")
+
+    recording_tab.reset_btn.click()
+
+    new = recording_tab._ros2_thread
+    assert stopped == [old] and new is not old
+    assert new._hz_topics == {'/tf'}  # measured again on the new connection
+    assert recording_tab.topic_list.get_selected_topics(include_missing=True) == ['/tf']
+    assert recording_tab._measured_gb_per_hour == {}
+    assert recording_tab.status_panel.notice_label.text() == ''
+
+    old.topic_list_updated.emit([MOCK_TOPICS[0]])  # the dropped connection has no more say
+    new.topic_list_updated.emit(MOCK_TOPICS)
+    assert recording_tab.topic_list._topics == MOCK_TOPICS
+
+
+def test_reset_waits_until_the_recording_is_stopped(recording_tab, qtbot):
+    _start_with_one_topic(recording_tab)
+    old = recording_tab._ros2_thread
+
+    recording_tab._on_reset_clicked()
+
+    assert not recording_tab.reset_btn.isEnabled()
+    assert recording_tab._ros2_thread is old
+
+
 def test_reset(recording_tab, qtbot):
     """Test reset functionality."""
     recording_tab.topic_list.list_btn.setChecked(True)

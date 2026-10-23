@@ -140,7 +140,7 @@ class SettingsPanel(QWidget):
         svo2_camera_layout.addWidget(self.svo2_camera_combo, 1)
         self.svo2_camera_refresh_btn = QPushButton("↻")
         self.svo2_camera_refresh_btn.setToolTip("연결된 ZED 카메라 다시 찾기")
-        self.svo2_camera_refresh_btn.clicked.connect(self._on_refresh_svo2_cameras)
+        self.svo2_camera_refresh_btn.clicked.connect(self.refresh_svo2_cameras)
         svo2_camera_layout.addWidget(self.svo2_camera_refresh_btn)
         camera_layout.addLayout(svo2_camera_layout)
         
@@ -313,7 +313,8 @@ class SettingsPanel(QWidget):
         combo.setEnabled(self._zed_available)
         self.svo2_camera_refresh_btn.setEnabled(self._zed_available)
 
-    def _on_refresh_svo2_cameras(self):
+    def refresh_svo2_cameras(self):
+        """Look for the connected ZED cameras again; the chosen one stays chosen."""
         self.svo2_camera_combo.blockSignals(True)  # the choice stays; nothing to save
         self._fill_svo2_cameras(self.svo2_camera_combo.currentData() or "")
         self.svo2_camera_combo.blockSignals(False)
