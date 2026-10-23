@@ -17,8 +17,24 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTreeWidget, QTreeWidgetItem,
     QLineEdit, QPushButton, QLabel, QButtonGroup, QRadioButton, QFrame
 )
+import os
+
 from PySide6.QtCore import Qt, Signal, QTimer
+from PySide6.QtGui import QColor
 from typing import List, Dict, Optional
+
+from ros2_bag_gui.ros2.topic_notes import (
+    HEAVY_GB_PER_HOUR, HEAVY_TYPES, NOTABLE_GB_PER_HOUR, duplicates, gb_per_hour,
+)
+
+_HZ, _SIZE, _NOTE = 2, 3, 4
+_NUMBER_WIDTH = 64
+
+
+def _relative(original: str, name: str) -> str:
+    """The original topic as seen from a topic beside it: without the namespace they share."""
+    common = os.path.commonpath([original, name])
+    return original if common in ('', '/') else original[len(common):].lstrip('/')
 
 
 class TopicListWidget(QWidget):
@@ -42,6 +58,9 @@ class TopicListWidget(QWidget):
         # filter keystroke, view toggle and 5 s refresh, and only shows this set.
         # A selected topic that is not in the current list stays selected.
         self._selected: set = set()
+        self._sizes: Dict[str, float] = {}  # GB per hour, measured for checked topics
+        self._duplicates: Dict[str, str] = {}  # topic -> the topic holding the same data
+        self._heavy: set = set()  # topics of a type that is big by nature
         self._group_view = True
         # Widths of Topic and Type as last fitted to their text; None before the
         # first fit. Once the operator drags a column, it stays as they left it.
@@ -86,8 +105,13 @@ class TopicListWidget(QWidget):
         
         # --- Topic Tree ---
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["Topic", "Type", "Hz"])
-        self.tree.headerItem().setToolTip(2, "Measured for the checked topics only")
+        self.tree.setHeaderLabels(["Topic", "Type", "Hz", "GB/h", "Note"])
+        self.tree.headerItem().setToolTip(_HZ, "Measured for the checked topics only")
+        self.tree.headerItem().setToolTip(
+            _SIZE, "체크한 토픽이 시간당 쌓는 양(GB), Start 전에 측정. '큰 타입'은 이미지·점군 등")
+        self.tree.headerItem().setToolTip(_NOTE, "같은 데이터를 다른 형태로 담은 토픽")
+        self.tree.setColumnWidth(_HZ, _NUMBER_WIDTH)
+        self.tree.setColumnWidth(_SIZE, _NUMBER_WIDTH)
         self.tree.setAlternatingRowColors(True)
         self.tree.setSelectionMode(QTreeWidget.SelectionMode.NoSelection) # Selection via checkboxes only
         
@@ -115,6 +139,8 @@ class TopicListWidget(QWidget):
             topics: List of dicts, each containing 'name', 'type', 'hz', 'category'
         """
         self._topics = topics
+        self._duplicates = duplicates(t['name'] for t in topics)
+        self._heavy = {t['name'] for t in topics if t['type'] in HEAVY_TYPES}
         self._refresh_tree()
     
     def _refresh_tree(self):
@@ -152,9 +178,10 @@ class TopicListWidget(QWidget):
         header = self.tree.header()
         room = (self.tree.contentsRect().width()
                 - self.tree.verticalScrollBar().sizeHint().width()
+                - self.tree.columnWidth(_HZ) - self.tree.columnWidth(_SIZE)
                 - max(header.minimumSectionSize(), header.defaultSectionSize()))
         self.tree.resizeColumnToContents(1)
-        self.tree.setColumnWidth(1, min(self.tree.columnWidth(1), int(room * 0.4)))
+        self.tree.setColumnWidth(1, min(self.tree.columnWidth(1), int(room * 0.5)))
         self.tree.resizeColumnToContents(0)
         self.tree.setColumnWidth(0, min(self.tree.columnWidth(0), room - self.tree.columnWidth(1)))
         self._fitted_widths = (self.tree.columnWidth(0), self.tree.columnWidth(1))
@@ -174,7 +201,7 @@ class TopicListWidget(QWidget):
             
             cat = topic.get('category', 'other')
             if cat not in categories:
-                cat_item = QTreeWidgetItem([cat.upper(), '', ''])
+                cat_item = QTreeWidgetItem([cat.upper(), '', '', '', ''])
                 # AutoTristate allows the group checkbox to reflect children state
                 cat_item.setFlags(cat_item.flags() | Qt.ItemFlag.ItemIsAutoTristate | Qt.ItemFlag.ItemIsUserCheckable)
                 cat_item.setCheckState(0, Qt.CheckState.Unchecked)
@@ -198,12 +225,37 @@ class TopicListWidget(QWidget):
             return ""  # not measured: only the checked topics are subscribed to
         return f"{hz:.1f}" if hz > 0 else "--"
 
+    def _size_text(self, name: str) -> str:
+        if name not in self._selected:
+            return "큰 타입" if name in self._heavy else ""
+        size = self._sizes.get(name, 0.0)
+        return f"{size:.1f}" if size > 0 else "--"
+
+    def _show_size(self, item: QTreeWidgetItem, name: str):
+        item.setText(_SIZE, self._size_text(name))
+        size = self._sizes.get(name, 0.0)
+        if name not in self._selected:
+            color = QColor("#999999")
+        elif size >= HEAVY_GB_PER_HOUR:
+            color = QColor("#c0392b")
+        elif size >= NOTABLE_GB_PER_HOUR:
+            color = QColor("#e67e22")
+        else:
+            color = self.tree.palette().text().color()
+        item.setForeground(_SIZE, color)
+
     def _create_topic_item(self, topic: Dict, parent):
+        original = self._duplicates.get(topic['name'])
         item = QTreeWidgetItem([
             topic['name'],
             topic['type'],
             self._hz_text(topic['name'], topic.get('hz', 0.0)),
+            '',
+            f"중복: {_relative(original, topic['name'])}" if original else '',
         ])
+        self._show_size(item, topic['name'])
+        if original:
+            item.setToolTip(_NOTE, f"{original} 와 같은 데이터를 다른 형태로 담고 있습니다")
         item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
         item.setCheckState(
             0,
@@ -229,6 +281,22 @@ class TopicListWidget(QWidget):
         for i in range(self.tree.topLevelItemCount()):
             update_item(self.tree.topLevelItem(i))
     
+    def _topic_items(self):
+        stack = [self.tree.topLevelItem(i) for i in range(self.tree.topLevelItemCount())]
+        while stack:
+            item = stack.pop()
+            stack.extend(item.child(i) for i in range(item.childCount()))
+            if item.data(0, Qt.ItemDataRole.UserRole):
+                yield item
+
+    def update_rates(self, bytes_per_second: Dict[str, float]):
+        """Show the measured size of the checked topics, in GB per hour."""
+        self._sizes.update({name: gb_per_hour(rate) for name, rate in bytes_per_second.items()})
+        for item in self._topic_items():
+            name = item.data(0, Qt.ItemDataRole.UserRole)
+            if name in bytes_per_second:
+                self._show_size(item, name)
+
     def _on_view_changed(self, checked: bool):
         """Handle view toggle between Group and List."""
         # Only react to the button that got checked to avoid double refresh
@@ -250,7 +318,9 @@ class TopicListWidget(QWidget):
                 self._selected.add(topic_name)
             else:
                 self._selected.discard(topic_name)
-            item.setText(2, self._hz_text(topic_name, 0.0))
+            self._sizes.pop(topic_name, None)  # measured again once ticked
+            item.setText(_HZ, self._hz_text(topic_name, 0.0))
+            self._show_size(item, topic_name)
         self._update_selection_count()
         self.selection_changed.emit(self.get_selected_topics())
     

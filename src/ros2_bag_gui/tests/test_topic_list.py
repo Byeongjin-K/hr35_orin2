@@ -192,6 +192,46 @@ def test_rates_are_shown_for_checked_topics_only(topic_list, qtbot):
     assert _hz_column(topic_list)['/tf'] == ''
 
 
+def _column(widget, column):
+    shown = {}
+
+    def visit(item):
+        name = item.data(0, Qt.ItemDataRole.UserRole)
+        if name:
+            shown[name] = item.text(column)
+        for i in range(item.childCount()):
+            visit(item.child(i))
+
+    for i in range(widget.tree.topLevelItemCount()):
+        visit(widget.tree.topLevelItem(i))
+    return shown
+
+
+def test_sizes_are_shown_for_checked_topics_and_big_types_are_marked(topic_list, qtbot):
+    _tick(topic_list, ['/tf'])
+    topic_list.update_rates({t['name']: 1e6 for t in MOCK_TOPICS})  # 3.6 GB an hour each
+
+    sizes = _column(topic_list, 3)
+    assert sizes['/tf'] == '3.6'
+    assert sizes['/lidar_boom/points'] and sizes['/zedx_boom/left/image']  # big by type, not measured
+    assert sizes['/excavator/status'] == ''
+
+
+def test_a_topic_holding_the_data_of_another_one_says_which(topic_list):
+    node = '/zedx_cabin/zedx_cabin_node'
+    topic_list.set_topics([
+        {'name': f'{node}/left/image_rect_color/compressed', 'type': 'sensor_msgs/msg/CompressedImage',
+         'hz': 10.0, 'category': 'zed'},
+        {'name': f'{node}/rgb/image_rect_color', 'type': 'sensor_msgs/msg/Image', 'hz': 10.0, 'category': 'zed'},
+        {'name': f'{node}/imu/data', 'type': 'sensor_msgs/msg/Imu', 'hz': 100.0, 'category': 'zed'},
+    ])
+
+    notes = _column(topic_list, 4)
+    assert 'left/image_rect_color/compressed' in notes[f'{node}/rgb/image_rect_color']
+    assert notes[f'{node}/left/image_rect_color/compressed'] == ''
+    assert notes[f'{node}/imu/data'] == ''
+
+
 def test_a_rate_update_is_not_a_selection_change(topic_list, qtbot):
     _tick(topic_list, FIVE)
     changes = []
@@ -232,17 +272,17 @@ def shown_topic_list(topic_list, qtbot):
 
 def _widths(widget):
     header = widget.tree.header()
-    return [header.sectionSize(column) for column in range(3)]
+    return [header.sectionSize(column) for column in range(widget.tree.columnCount())]
 
 
 def test_operator_can_drag_every_column_border(shown_topic_list):
-    topic, type_, hz = _widths(shown_topic_list)
+    topic, type_, hz, size, note = _widths(shown_topic_list)
 
-    _drag_column_edge(shown_topic_list, 0, -40)  # Topic | Type
-    assert _widths(shown_topic_list) == [topic - 40, type_, hz + 40]
+    _drag_column_edge(shown_topic_list, 0, -40)  # Topic | Type; the last column takes the rest
+    assert _widths(shown_topic_list) == [topic - 40, type_, hz, size, note + 40]
 
     _drag_column_edge(shown_topic_list, 1, 30)  # Type | Hz
-    assert _widths(shown_topic_list) == [topic - 40, type_ + 30, hz + 10]
+    assert _widths(shown_topic_list) == [topic - 40, type_ + 30, hz, size, note + 10]
 
 
 def test_refresh_keeps_the_widths_the_operator_set(shown_topic_list):

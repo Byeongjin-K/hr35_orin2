@@ -1,4 +1,5 @@
 """ROS2 thread for running rclpy in background."""
+import itertools
 import time
 import threading
 
@@ -31,6 +32,7 @@ class ROS2Thread(QThread):
     connection_status_changed = Signal(bool)
     error_occurred = Signal(str)
     hz_updated = Signal(dict)
+    rate_updated = Signal(dict)  # topic -> bytes per second, of the measured topics
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -45,7 +47,7 @@ class ROS2Thread(QThread):
         # of the robot into this process, and makes drivers that publish only
         # for a subscriber (the cameras) produce all of their streams.
         self._hz_lock = threading.Lock()
-        self._hz_timestamps: Dict[str, deque] = {}
+        self._hz_samples: Dict[str, deque] = {}  # topic -> (time, message bytes) of the last window
         self._hz_topics: set[str] = set()  # asked for by the GUI; under _command_lock
         self._hz_dirty = False  # _hz_topics or _hz_active changed; under _command_lock
         self._hz_subs: Dict[str, tuple[Subscription, str]] = {}  # topic -> (subscription, type); ROS thread only
@@ -145,10 +147,10 @@ class ROS2Thread(QThread):
 
     def _cached_hz(self, topic_name: str) -> float:
         with self._hz_lock:
-            ts_list = self._hz_timestamps.get(topic_name)
-            if ts_list and len(ts_list) >= 2:
-                span = ts_list[-1] - ts_list[0]
-                return (len(ts_list) - 1) / span if span > 0 else 0.0
+            samples = self._hz_samples.get(topic_name)
+            if samples and len(samples) >= 2:
+                span = samples[-1][0] - samples[0][0]
+                return (len(samples) - 1) / span if span > 0 else 0.0
         return 0.0
 
     def set_hz_topics(self, names) -> None:
@@ -181,8 +183,8 @@ class ROS2Thread(QThread):
             except Exception:
                 continue
 
-            def raw_cb(_raw, t=name):
-                self._hz_tick(t)
+            def raw_cb(raw, t=name):
+                self._hz_tick(t, len(raw))
 
             try:
                 sub = self._node.create_subscription(
@@ -193,35 +195,39 @@ class ROS2Thread(QThread):
                 continue
             self._hz_subs[name] = (sub, topic_type)
 
-    def _hz_tick(self, topic_name: str):
+    def _hz_tick(self, topic_name: str, size: int = 0):
         if not self._hz_active.is_set():
             return
         now = time.monotonic()
         with self._hz_lock:
-            ts_list = self._hz_timestamps.setdefault(topic_name, deque())
-            ts_list.append(now)
+            samples = self._hz_samples.setdefault(topic_name, deque())
+            samples.append((now, size))
             cutoff = now - _HZ_WINDOW
-            while ts_list and ts_list[0] < cutoff:
-                ts_list.popleft()
+            while samples and samples[0][0] < cutoff:
+                samples.popleft()
 
     def _emit_hz(self):
         if not self._hz_active.is_set() or not self._hz_subs:
             return
         now = time.monotonic()
         result: Dict[str, float] = {}
+        sizes: Dict[str, float] = {}
         with self._hz_lock:
             for topic in self._hz_subs:  # a measured topic with no message yet is 0.0
-                ts_list = self._hz_timestamps.get(topic)
+                samples = self._hz_samples.get(topic)
                 cutoff = now - _HZ_WINDOW
-                while ts_list and ts_list[0] < cutoff:
-                    ts_list.popleft()
-                if ts_list and len(ts_list) >= 2:
-                    span = ts_list[-1] - ts_list[0]
-                    result[topic] = (len(ts_list) - 1) / span if span > 0 else 0.0
+                while samples and samples[0][0] < cutoff:
+                    samples.popleft()
+                if samples is not None and len(samples) >= 2 and samples[-1][0] > samples[0][0]:
+                    span = samples[-1][0] - samples[0][0]
+                    result[topic] = (len(samples) - 1) / span
+                    # the bytes of the messages after the first, over the time they took
+                    sizes[topic] = sum(size for _t, size in itertools.islice(samples, 1, None)) / span
                 else:
-                    result[topic] = 0.0
+                    result[topic] = sizes[topic] = 0.0
         if result:
             self.hz_updated.emit(result)
+            self.rate_updated.emit(sizes)
 
     def _destroy_hz_sub(self, name: str):
         sub, _type = self._hz_subs.pop(name)
@@ -230,7 +236,7 @@ class ROS2Thread(QThread):
         except Exception:
             pass
         with self._hz_lock:
-            self._hz_timestamps.pop(name, None)
+            self._hz_samples.pop(name, None)
 
     def _destroy_hz_subs(self):
         for name in list(self._hz_subs):

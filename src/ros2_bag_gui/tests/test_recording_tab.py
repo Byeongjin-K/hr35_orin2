@@ -926,6 +926,55 @@ def test_svo2_with_every_camera_switched_off_needs_a_topic(recording_tab, qtbot,
     assert len(shown) == 1
 
 
+def _answering(monkeypatch, answer_yes, asked):
+    from PySide6.QtWidgets import QMessageBox
+
+    def question(*args, **kwargs):
+        asked.append(args[1])
+        return QMessageBox.StandardButton.Yes if answer_yes else QMessageBox.StandardButton.No
+
+    monkeypatch.setattr(QMessageBox, 'question', question)
+
+
+@pytest.mark.parametrize("answer_yes", [False, True])
+def test_start_asks_before_a_topic_that_fills_the_disk_fast(recording_tab, qtbot, monkeypatch, answer_yes):
+    asked = []
+    _answering(monkeypatch, answer_yes, asked)
+    recording_tab.topic_list.set_selected_topics(['/lidar_boom/points', '/tf'])
+    recording_tab._on_rates_updated({'/lidar_boom/points': 31e6, '/tf': 1e4})  # 112 and 0.04 GB/h
+
+    recording_tab._on_start_clicked()
+    recording_tab.status_panel._timer.stop()
+
+    assert len(asked) == 1
+    assert recording_tab._recorder.start_calls == (1 if answer_yes else 0)
+
+
+def test_start_asks_when_a_lidar_goes_to_laz_and_into_the_bag(recording_tab, qtbot, monkeypatch):
+    asked = []
+    _answering(monkeypatch, False, asked)
+    recording_tab.settings_panel.set_lidar_modes('both', 'bag')
+    recording_tab.topic_list.set_selected_topics(['/lidar_boom/points'])
+
+    recording_tab._on_start_clicked()
+
+    assert len(asked) == 1
+    assert recording_tab._recorder.start_calls == 0
+
+
+def test_a_light_recording_starts_without_a_question(recording_tab, qtbot, monkeypatch):
+    asked = []
+    _answering(monkeypatch, False, asked)
+    recording_tab.topic_list.set_selected_topics(['/tf'])
+    recording_tab._on_rates_updated({'/tf': 1e4})
+
+    recording_tab._on_start_clicked()
+    recording_tab.status_panel._timer.stop()
+
+    assert asked == []
+    assert recording_tab._recorder.start_calls == 1
+
+
 def test_reset(recording_tab, qtbot):
     """Test reset functionality."""
     recording_tab.topic_list.list_btn.setChecked(True)

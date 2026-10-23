@@ -15,7 +15,11 @@ from ros2_bag_gui.widgets.settings_panel import SettingsPanel
 from ros2_bag_gui.config.profiles import ProfileManager, RecordingProfile
 from ros2_bag_gui.ros2.ros2_thread import ROS2Thread
 from ros2_bag_gui.ros2.topic_discovery import TopicDiscoveryManager
-from ros2_bag_gui.ros2.recorder import Recorder, RecordingConfig, unloadable_types
+from ros2_bag_gui.ros2.recorder import (
+    Recorder, RecordingConfig, should_include_in_rosbag, should_record_lidar_laz, unloadable_types,
+)
+from ros2_bag_gui.ros2.topic_notes import StartPlan, gb_per_hour, start_report
+from ros2_bag_gui.widgets.start_check import confirm_start
 from ros2_bag_gui.ros2.sensor_topics import BAG_IMAGE_MODES, CAMERAS, sensor_of, switch_topics
 from ros2_bag_gui.ros2.bag_process import find_other_recorders
 from ros2_bag_gui.logging_config import get_logger
@@ -46,6 +50,7 @@ class RecordingTab(QWidget):
         self.profile_manager = ProfileManager()
         self._topics: List[Dict] = []
         self._measured_hz: Dict[str, float] = {}
+        self._measured_gb_per_hour: Dict[str, float] = {}  # kept like the rates, for the Start question
         self._seen_topics: set[str] = set()  # a sensor switch ticks a topic the first time it shows up
         self._setup_ui()
         self._camera_mode = self.settings_panel.get_settings().camera_mode
@@ -175,6 +180,7 @@ class RecordingTab(QWidget):
         self._ros2_thread.connection_status_changed.connect(self._on_connection_changed)
         self._ros2_thread.hz_updated.connect(self.topic_list.update_hz)
         self._ros2_thread.hz_updated.connect(self._on_hz_updated)
+        self._ros2_thread.rate_updated.connect(self._on_rates_updated)
         # Rates are measured for the ticked topics only, not for every topic.
         self.topic_list.selection_changed.connect(self._on_topic_selection_changed)
         
@@ -223,6 +229,22 @@ class RecordingTab(QWidget):
     def _on_hz_updated(self, hz_map: Dict[str, float]):
         """Keep the rates measured before Start: at Stop they say what the bag should hold."""
         self._measured_hz.update({t: hz for t, hz in hz_map.items() if hz > 0})
+
+    def _on_rates_updated(self, bytes_per_second: Dict[str, float]):
+        self.topic_list.update_rates(bytes_per_second)
+        self._measured_gb_per_hour.update(
+            {t: gb_per_hour(rate) for t, rate in bytes_per_second.items() if rate > 0})
+
+    def _confirm_size(self, topic_names: List[str], camera_mode: str, free_bytes: int) -> bool:
+        """Ask before a recording that fills the disk fast or records the same data twice."""
+        lidar_modes = self.settings_panel.lidar_modes()
+        bag = tuple(n for n in topic_names if should_include_in_rosbag(n, lidar_modes, camera_mode))
+        laz = [n for n in topic_names if should_record_lidar_laz(n, lidar_modes)]
+        cameras = sum(self.settings_panel.camera_switches().values()) if camera_mode in ("svo2", "both") else 0
+        plan = StartPlan(bag_topics=bag, laz_and_bag=tuple(n for n in laz if n in bag),
+                         laz_lidars=len(laz), svo2_cameras=cameras)
+        report = start_report(plan, self._measured_gb_per_hour, free_bytes)
+        return not report.worth_asking or confirm_start(self, report)
 
     def _on_topic_selection_changed(self, _available: List[str]):
         # Selected topics that are not up yet are included: measured once they appear.
@@ -458,7 +480,8 @@ class RecordingTab(QWidget):
 
         try:
             os.makedirs(settings.output_path, exist_ok=True)
-            free_gb = shutil.disk_usage(settings.output_path).free / 1024**3
+            free_bytes = shutil.disk_usage(settings.output_path).free
+            free_gb = free_bytes / 1024**3
         except OSError as e:
             QMessageBox.critical(
                 self, "Output Path Not Usable",
@@ -528,6 +551,9 @@ class RecordingTab(QWidget):
             topics_with_types = [t for t in topics_with_types if t['name'] not in unloadable]
             selected_topic_names = [n for n in selected_topic_names if n not in unloadable]
         
+        if not self._confirm_size(selected_topic_names, settings.camera_mode, free_bytes):
+            return
+
         split_bytes = int(settings.split_size_gb * 1024**3) if settings.split_mode == "size" else 0
         split_seconds = settings.split_time_minutes * 60 if settings.split_mode == "time" else 0
         
@@ -575,8 +601,9 @@ class RecordingTab(QWidget):
         self.status_panel.set_state(RecordingState.RECORDING)
         self.status_panel.show_recording_topics(self._recorder.last_bag_topics)
         # Rates are not measured while recording: do not leave the last ones looking live.
-        self.topic_list.update_hz(
-            {name: 0.0 for name in self.topic_list.get_selected_topics(include_missing=True)})
+        measured = self.topic_list.get_selected_topics(include_missing=True)
+        self.topic_list.update_hz({name: 0.0 for name in measured})
+        self.topic_list.update_rates({name: 0.0 for name in measured})
         if missing_topic_names:
             self.status_panel.add_notice(
                 "Not available at Start (recorded only once they appear): "

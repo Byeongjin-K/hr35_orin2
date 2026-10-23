@@ -1,5 +1,8 @@
 """Tests for the ROS2 thread."""
 import threading
+from types import SimpleNamespace
+
+import pytest
 
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.impl.implementation_singleton import rclpy_implementation as _rclpy
@@ -95,6 +98,24 @@ def test_rates_stay_off_while_recording_through_refreshes(qtbot, fake_node):
     thread.set_hz_active(True)
     thread._process_command()
     assert _measured(fake_node) == ['/excavator/status', '/lidar_boom/points']
+
+
+def test_the_measured_topics_report_their_size_in_bytes_per_second(qtbot, fake_node, monkeypatch):
+    clock = {'now': 100.0}
+    monkeypatch.setattr('ros2_bag_gui.ros2.ros2_thread.time', SimpleNamespace(monotonic=lambda: clock['now']))
+    thread = _thread_on(fake_node, GRAPH)
+    thread.set_hz_topics(['/lidar_boom/points'])
+    _refresh(thread)
+    receive = fake_node.live_subscriptions[0]['callback']
+    for _ in range(11):  # 10 Hz for a second, 2000 bytes a message
+        receive(b'x' * 2000)
+        clock['now'] += 0.1
+    sizes = []
+    thread.rate_updated.connect(sizes.append)
+
+    thread._emit_hz()
+
+    assert sizes == [{'/lidar_boom/points': pytest.approx(20000.0)}]
 
 
 def test_a_ticked_topic_is_measured_once_it_comes_up(qtbot, fake_node):
