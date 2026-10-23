@@ -962,6 +962,22 @@ def test_start_asks_when_a_lidar_goes_to_laz_and_into_the_bag(recording_tab, qtb
     assert recording_tab._recorder.start_calls == 0
 
 
+def test_start_asks_about_the_images_of_a_camera_switched_off_in_svo2_mode(recording_tab, qtbot, monkeypatch):
+    asked = []
+    _answering(monkeypatch, False, asked)
+    image = f'{ZED_NODE}/left/image_rect_color/compressed'
+    recording_tab.set_topics(SENSOR_TOPICS)
+    _switch(recording_tab, 'camera_cabin', False)
+    recording_tab.settings_panel._settings_manager.update(camera_mode='svo2')
+    recording_tab.topic_list.set_selected_topics([image])  # no SVO2 records this camera: the bag does
+    recording_tab._on_rates_updated({image: 4.3e6})  # 15.5 GB/h
+
+    recording_tab._on_start_clicked()
+
+    assert len(asked) == 1
+    assert recording_tab._recorder.start_calls == 0
+
+
 def test_a_light_recording_starts_without_a_question(recording_tab, qtbot, monkeypatch):
     asked = []
     _answering(monkeypatch, False, asked)

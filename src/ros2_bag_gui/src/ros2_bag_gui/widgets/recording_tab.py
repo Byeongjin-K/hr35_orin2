@@ -20,11 +20,18 @@ from ros2_bag_gui.ros2.recorder import (
 )
 from ros2_bag_gui.ros2.topic_notes import StartPlan, gb_per_hour, start_report
 from ros2_bag_gui.widgets.start_check import confirm_start
+from ros2_bag_gui.zed.camera_names import camera_position
 from ros2_bag_gui.ros2.sensor_topics import BAG_IMAGE_MODES, CAMERAS, sensor_of, switch_topics
 from ros2_bag_gui.ros2.bag_process import find_other_recorders
 from ros2_bag_gui.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+
+def _image_of_camera_switched_off(topic: str, cameras: Dict[str, bool]) -> bool:
+    """SVO2 records no camera switched off: its ticked images go into the bag in any camera mode."""
+    position = camera_position(topic.split('/')[1]) if topic.startswith('/zedx_') else None
+    return position is not None and not cameras.get(position, True)
 
 
 class RecordingTab(QWidget):
@@ -251,9 +258,11 @@ class RecordingTab(QWidget):
     def _confirm_size(self, topic_names: List[str], camera_mode: str, free_bytes: int) -> bool:
         """Ask before a recording that fills the disk fast or records the same data twice."""
         lidar_modes = self.settings_panel.lidar_modes()
-        bag = tuple(n for n in topic_names if should_include_in_rosbag(n, lidar_modes, camera_mode))
+        switches = self.settings_panel.camera_switches()
+        bag = tuple(n for n in topic_names if should_include_in_rosbag(n, lidar_modes, camera_mode)
+                    or _image_of_camera_switched_off(n, switches))
         laz = [n for n in topic_names if should_record_lidar_laz(n, lidar_modes)]
-        cameras = sum(self.settings_panel.camera_switches().values()) if camera_mode in ("svo2", "both") else 0
+        cameras = sum(switches.values()) if camera_mode in ("svo2", "both") else 0
         plan = StartPlan(bag_topics=bag, laz_and_bag=tuple(n for n in laz if n in bag),
                          laz_lidars=len(laz), svo2_cameras=cameras)
         report = start_report(plan, self._measured_gb_per_hour, free_bytes)
