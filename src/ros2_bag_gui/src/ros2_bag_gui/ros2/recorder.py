@@ -1,6 +1,7 @@
 """Recording orchestrator: ros2 bag record subprocess + LAZ/SVO2 writers."""
 import re
 import os
+import contextlib
 import ctypes
 import shutil
 import threading
@@ -16,6 +17,9 @@ from rosidl_runtime_py.utilities import get_message, get_service
 
 from ros2_bag_gui.ros2.bag_process import BagProcess
 from ros2_bag_gui.ros2.laz_writer import LAZWriterThread
+from ros2_bag_gui.ros2.qos_overrides import (
+    OVERRIDES_FILE, mixed_durability_overrides, write_qos_overrides,
+)
 from ros2_bag_gui.zed.svo_writer import SVO2WriterThread, SVO2Config
 from ros2_bag_gui.zed.sdk_check import is_zed_sdk_available, list_zed_cameras
 from ros2_bag_gui.zed.camera_names import camera_label, camera_names_by_serial
@@ -266,6 +270,9 @@ class Recorder(QObject):
                 if not bag_proc.start(
                     rosbag_path, bag_topics, max_bag_size=config.max_bagfile_size,
                     max_bag_duration=config.max_bag_duration,
+                    include_hidden_topics=any(map(_is_hidden, bag_topics)),
+                    qos_overrides_path=write_qos_overrides(
+                        session_folder, mixed_durability_overrides(node, bag_topics)),
                 ):
                     raise RuntimeError(bag_proc.last_error)
             elif self._driver_svo or self._svo2_writers:
@@ -325,6 +332,8 @@ class Recorder(QObject):
         # empty directories go: bottom-up rmdir keeps anything that holds data.
         session_folder = self._generate_session_path()
         if session_folder:
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(os.path.join(session_folder, OVERRIDES_FILE))
             for root, dirs, _files in os.walk(session_folder, topdown=False):
                 for name in dirs:
                     try:

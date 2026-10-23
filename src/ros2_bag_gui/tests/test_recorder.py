@@ -8,7 +8,10 @@ import sys
 import threading
 from types import SimpleNamespace
 import pytest
+import yaml
 from PySide6.QtWidgets import QApplication
+from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
+from ros2bag.api import convert_yaml_to_qos_profile
 from ros2_bag_gui.ros2.recorder import (
     should_include_in_rosbag, should_record_lidar_laz, lidar_group_of,
     RecordingConfig, Recorder, SYSTEM_EXCLUDE, unloadable_types,
@@ -1050,3 +1053,64 @@ class TestSideRecorders:
         session.recorder.stop_recording()
 
         assert _sync_info(session.recorder)['data_sources']['svo2']['path'] == ['camera_0.svo2']
+
+
+ALERT = {'name': '/excavator/safety/operator_alert', 'type': 'std_msgs/msg/String'}
+ACTION_STATUS = {'name': '/task_manager/execute_task/_action/status',
+                 'type': 'action_msgs/msg/GoalStatusArray'}
+
+
+def _publisher(durability, reliability=QoSReliabilityPolicy.RELIABLE):
+    return SimpleNamespace(
+        qos_profile=QoSProfile(depth=10, durability=durability, reliability=reliability))
+
+
+class TestBagRecordOptions:
+    """What ros2 bag record is told besides the topics."""
+
+    @pytest.fixture
+    def record(self, qtbot, tmp_path, fake_node, fake_ros2, monkeypatch):
+        args_file = tmp_path / 'bag_args.json'
+        monkeypatch.setenv('FAKE_ROS2_ARGS', str(args_file))
+
+        def record(topics):
+            recorder, _log = _recorder_with_log()
+            config = RecordingConfig(topics=topics, output_path=str(tmp_path / 'out'), session_name='t')
+            assert recorder.start_recording(config, fake_node) is True
+            ready = os.path.join(recorder.session_path, 'rosbag', 'ready')
+            qtbot.waitUntil(lambda: os.path.exists(ready), timeout=10000)
+            recorder.stop_recording(fake_node)
+            return json.loads(args_file.read_text())
+
+        return record
+
+    def test_a_hidden_topic_is_recorded_with_hidden_topics_on(self, record):
+        bag_args = record([STATUS, ACTION_STATUS])
+
+        assert '--include-hidden-topics' in bag_args
+        assert ACTION_STATUS['name'] in bag_args
+
+    def test_hidden_topics_stay_off_when_none_is_selected(self, record):
+        assert '--include-hidden-topics' not in record([STATUS])
+
+    def test_a_topic_whose_publishers_mix_durability_is_recorded_volatile(self, record, fake_node):
+        fake_node.publishers[ALERT['name']] = [
+            _publisher(QoSDurabilityPolicy.TRANSIENT_LOCAL), _publisher(QoSDurabilityPolicy.VOLATILE)]
+        fake_node.publishers[STATUS['name']] = [
+            _publisher(QoSDurabilityPolicy.VOLATILE), _publisher(QoSDurabilityPolicy.VOLATILE)]
+
+        bag_args = record([STATUS, ALERT])
+
+        path = bag_args[bag_args.index('--qos-profile-overrides-path') + 1]
+        with open(path, encoding='utf-8') as f:
+            profiles = convert_yaml_to_qos_profile(yaml.safe_load(f))  # as ros2 bag record reads it
+        assert list(profiles) == [ALERT['name']]
+        assert profiles[ALERT['name']].durability == QoSDurabilityPolicy.VOLATILE
+        assert profiles[ALERT['name']].reliability == QoSReliabilityPolicy.RELIABLE
+
+    def test_publishers_that_agree_get_no_qos_override(self, record, fake_node):
+        fake_node.publishers[STATUS['name']] = [
+            _publisher(QoSDurabilityPolicy.TRANSIENT_LOCAL),
+            _publisher(QoSDurabilityPolicy.TRANSIENT_LOCAL)]
+
+        assert '--qos-profile-overrides-path' not in record([STATUS])
