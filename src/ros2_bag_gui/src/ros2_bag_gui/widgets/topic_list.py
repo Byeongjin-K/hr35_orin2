@@ -60,7 +60,7 @@ class TopicListWidget(QWidget):
         self._selected: set = set()
         self._sizes: Dict[str, float] = {}  # GB per hour, measured for checked topics
         self._duplicates: Dict[str, str] = {}  # topic -> the topic holding the same data
-        self._heavy: set = set()  # topics of a type that is big by nature
+        self._heavy: set[str] = set()  # topics of a type that is big by nature
         self._group_view = True
         # Widths of Topic and Type as last fitted to their text; None before the
         # first fit. Once the operator drags a column, it stays as they left it.
