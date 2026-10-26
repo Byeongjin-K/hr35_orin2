@@ -1,10 +1,14 @@
 # PointCloud2 Field Layout
 
+**Last verified:** 2026-10-26 against the 2026-10-23 recordings and live bringup.
+
 ## Topic: `/lidar_boom/points`
 
 **Message Type:** `sensor_msgs/msg/PointCloud2`
 
-**Source:** Ouster OS1-128 LiDAR (excavator boom-mounted)
+**Source:** Ouster OS-0-128 LiDAR, boom-mounted (S/N 122411000861, firmware 3.2.0, driver `ouster-ros` 0.15.1)
+
+**Sensor configuration:** `512x10` (512 columns at 10 Hz), LiDAR profile `RNG19_RFL8_SIG16_NIR16`, `point_type=original`, organized and destaggered.
 
 ## Message Structure
 
@@ -17,8 +21,8 @@
 | Row Step | 24,576 bytes (512 × 48) |
 | Is Bigendian | False |
 | Is Dense | False |
-| Data Size | ~3.1 MB per message |
-| Frequency | 7.70 Hz |
+| Data Size | 3,145,728 bytes = 3.15 MB of point data per message |
+| Frequency | 10 Hz (`512x10`; 9.97 Hz measured live, 9.995-10.001 Hz on `/lidar_boom/scan` across the ten 2026-10-23 sessions) |
 
 ## Field Layout (48 bytes per point)
 
@@ -56,33 +60,34 @@
 - May contain NaN for invalid returns
 
 #### Intensity
-- Normalized signal strength (0.0 - 1.0 typical range)
+- Raw SIGNAL amplitude from the sensor; it is **not** normalized to 0.0 - 1.0
 - Higher values = stronger return signal
 - Useful for material classification
+- The LAZ writer rescales it per frame (`uint16(signal * 65535 / frame_max)`); that scaling belongs to LAZ, not to this topic
 
 #### Timestamp (t)
-- Nanosecond offset from message header timestamp
+- Nanoseconds relative to the sensor's scan start (its first column), not to the epoch and not to the header stamp
 - Allows per-point timing within scan
 - Critical for motion compensation
 
 #### Reflectivity
-- Raw reflectivity value from sensor
-- UINT16 range: 0-65535
+- Reflectivity code from the sensor
+- Carried in a UINT16, but the `RFL8` profile fills only the low 8 bits (0-255)
 - Material-dependent property
 
 #### Ring
-- Laser channel ID (0-127 for OS1-128)
+- Laser channel ID (0-127 for OS-0-128)
 - Identifies which vertical laser emitted the point
 - Used for ring-based filtering
 
 #### Ambient
-- Ambient light measurement at point
+- NEAR_IR measurement at the point (`NIR16` in the profile)
 - Useful for outdoor/indoor detection
 - May affect intensity interpretation
 
 #### Range
-- Direct range measurement in millimeters
-- UINT32 allows up to ~4.2 million mm (4.2 km)
+- Direct range measurement in millimeters; 0 means an invalid or missing return
+- Carried in a UINT32, but the `RNG19` profile encodes 19 bits (up to 524,287 mm)
 - More precise than computing from x/y/z
 
 ## Memory Layout Notes
@@ -93,8 +98,8 @@
 - Unused space at offsets 36-47
 
 ### Performance Implications
-- Large message size (~3.1 MB) requires efficient serialization
-- 7.70 Hz × 3.1 MB = ~24 MB/s bandwidth for this topic alone
+- Large message size (3.15 MB) requires efficient serialization
+- 10 Hz × 3.15 MB = ~31.5 MB/s bandwidth for this topic alone (31.62 MB/s measured)
 - Consider downsampling for real-time visualization
 
 ## Usage Examples
@@ -125,12 +130,17 @@ for point in point_cloud2.read_points(msg, field_names=("x", "y", "z", "range"))
 
 ## Related Topics
 
-- `/lidar_boom/lidar_packets` (310.77 Hz) - Raw Ouster packets
-- `/lidar_boom/imu` (97.30 Hz) - IMU data from LiDAR unit
-- `/tf` (273.64 Hz) - Transform tree including lidar_boom frame
+Rates below are message count divided by bag duration over the ten 2026-10-23 sessions.
+
+- `/lidar_boom/lidar_packets` (320.0 Hz) - Raw Ouster packets: 32 packets of 16 columns make one 128 x 512 scan, 24,832 bytes of payload each
+- `/lidar_boom/imu_packets` (80.0 Hz) - Raw IMU packets; one packet holds several samples
+- `/lidar_boom/imu` (637 Hz) - IMU messages the driver decodes from those packets
+- `/lidar_boom/scan` (10.0 Hz) - One ring of the same scan; its header carries the frame time
+- `/lidar_boom/metadata` (one latched message per session) - Sensor metadata JSON, required to decode packets
+- `/tf` (6.4-10.0 Hz) - Transform tree; published by the mapping stack, not by the sensor
 
 ## References
 
 - [ROS sensor_msgs/PointCloud2](http://docs.ros.org/en/api/sensor_msgs/html/msg/PointCloud2.html)
-- [Ouster OS1 Datasheet](https://ouster.com/products/scanning-lidar/os1-sensor/)
+- Factory metadata of this sensor: `192.168.0-metadata.json` in the workspace root, also published on `/lidar_boom/metadata`
 - [ROS REP-103: Standard Units of Measure](https://www.ros.org/reps/rep-0103.html)
