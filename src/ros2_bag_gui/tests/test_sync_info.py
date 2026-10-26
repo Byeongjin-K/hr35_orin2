@@ -1,8 +1,15 @@
 """Tests for sync_info.json: it reports what is in the bag, not what the GUI saw."""
 import json
+import re
 from datetime import datetime
 
-from ros2_bag_gui.ros2.sync_info import create_sync_info, read_bag_message_counts
+from ros2_bag_gui.ros2 import sync_info as sync_info_module
+from ros2_bag_gui.ros2.sync_info import (
+    SYNC_INFO_FORMAT_VERSION,
+    create_sync_info,
+    logger_commit,
+    read_bag_message_counts,
+)
 
 METADATA = """\
 rosbag2_bagfile_information:
@@ -79,3 +86,25 @@ def test_sync_info_of_svo2_only_has_no_bag(tmp_path):
 
     assert 'rosbag' not in info['data_sources']
     assert info['data_sources']['svo2']['path'] == ['zedx_cabin.svo2']
+
+
+def test_sync_info_states_its_format_and_the_code_that_wrote_it(tmp_path):
+    info = _write(tmp_path, bag_topics=['/tf'])
+
+    assert info['format_version'] == SYNC_INFO_FORMAT_VERSION
+    assert re.fullmatch(r'unknown|[0-9a-f]{7,40}(-dirty)?', info['logger_commit'])
+
+
+def test_sync_info_of_svo2_only_also_states_its_format(tmp_path):
+    info = _write(
+        tmp_path, bag_topics=[], camera_mode='svo2', svo2_files=[str(tmp_path / 'zedx_cabin.svo2')]
+    )
+
+    assert info['format_version'] == SYNC_INFO_FORMAT_VERSION
+    assert info['logger_commit'] == logger_commit()
+
+
+def test_logger_commit_outside_a_checkout_is_unknown(tmp_path, monkeypatch):
+    monkeypatch.setattr(sync_info_module, '__file__', str(tmp_path / 'sync_info.py'))
+
+    assert sync_info_module.logger_commit() == 'unknown'

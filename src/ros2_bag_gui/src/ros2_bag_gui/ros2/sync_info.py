@@ -1,8 +1,44 @@
 """Sync info generation for recording sessions."""
 import os
 import json
+import subprocess
 from datetime import datetime
 from typing import Dict, List, Optional
+
+# Version of the recorded output format: session layout, file names, this
+# schema, LAZ fields, SVO2 handling and time bases. A session whose
+# sync_info.json has no "format_version" was written before the field existed
+# and follows 1.0.0. Raise this whenever the output format or its meaning
+# changes, together with the version of docs/DATA_FORMAT.md.
+SYNC_INFO_FORMAT_VERSION = '1.1.0'
+
+
+def logger_commit() -> str:
+    """Short git commit of this package's source, 'unknown' outside a checkout.
+
+    A '-dirty' suffix means this package had uncommitted changes. Stopping a
+    recording must never fail over this, so every error gives "unknown". Git
+    output is decoded as UTF-8 explicitly: the ZED SDK leaves LC_CTYPE at C
+    once a camera is open, which would otherwise make it ASCII.
+    """
+    source_dir = os.path.dirname(os.path.realpath(__file__))
+
+    def git(*args: str) -> Optional[str]:
+        try:
+            done = subprocess.run(
+                ['git', '-C', source_dir, *args],
+                capture_output=True, timeout=5, encoding='utf-8', errors='replace',
+            )
+        except Exception:
+            return None
+        return done.stdout.strip() if done.returncode == 0 else None
+
+    commit = git('rev-parse', '--short', 'HEAD')
+    if not commit:
+        return 'unknown'
+    if git('status', '--porcelain', '--untracked-files=no', '--', source_dir):
+        commit += '-dirty'
+    return commit
 
 
 def read_bag_message_counts(rosbag_dir: str) -> Optional[Dict[str, int]]:
@@ -108,6 +144,9 @@ def create_sync_info(
 
     sync_info: Dict = {
         "session_id": session_id,
+        # What wrote this session: the output format it follows and the code
+        "format_version": SYNC_INFO_FORMAT_VERSION,
+        "logger_commit": logger_commit(),
         "start_time_ns": start_ns,
         "end_time_ns": end_ns,
         "time_reference": "ros_epoch_ns",
