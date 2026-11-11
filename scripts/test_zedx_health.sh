@@ -29,11 +29,16 @@ printf 'host1x_fence 16384 0 - Live 0x0\nsl_zedx 28672 0 - Live 0x0\n' > "$MODUL
 MODULES_NO_FENCE="$TMP/modules_no_fence"
 printf 'sl_zedx 28672 0 - Live 0x0\n' > "$MODULES_NO_FENCE"
 
-run_case() { # name want_code want_verdict module_dir argus_log client_pattern [modules_file]
+# The ZED-X daemon log is pinned for the same reason: the real one says FROZEN or not depending
+# on what the cameras did this boot.
+DAEMON_QUIET="$TMP/daemon_quiet.log"
+printf ' ** Created Pub Endpoint  "tcp://127.0.0.1:20027"\n' > "$DAEMON_QUIET"
+
+run_case() { # name want_code want_verdict module_dir argus_log client_pattern [modules_file] [daemon_log]
   local name="$1" want_code="$2" want_verdict="$3" moddir="$4" arguslog="$5" pattern="$6" out code
-  local modules="${7:-$MODULES_LOADED}"
+  local modules="${7:-$MODULES_LOADED}" daemonlog="${8:-$DAEMON_QUIET}"
   out="$(ZEDX_MODULE_DIR="$moddir" ZEDX_ARGUS_LOG_CMD="cat $arguslog" ZEDX_CLIENT_PATTERN="$pattern" \
-         ZEDX_MODULES_FILE="$modules" bash "$SCRIPT" 2>&1)"
+         ZEDX_MODULES_FILE="$modules" ZEDX_DAEMON_LOG_CMD="cat $daemonlog" bash "$SCRIPT" 2>&1)"
   code=$?
   if [ "$code" = "$want_code" ] && printf '%s' "$out" | grep -q "VERDICT=$want_verdict"; then
     echo "PASS $name (exit=$code VERDICT=$want_verdict)"; pass=$((pass+1))
@@ -74,8 +79,34 @@ run_case "faults but client holds camera" 0 HEALTHY         "$(mk_mod busy 3)"  
 run_case "missing host1x_fence"           1 RECOVERABLE     "$(mk_mod fence_missing 0)"  "$clean_log" "$NO_CLIENT_PATTERN" "$MODULES_NO_FENCE"
 run_case "missing fence outranks healthy" 1 RECOVERABLE     "$(mk_mod fence_busy 2)"     "$clean_log" "$NO_CLIENT_PATTERN" "$MODULES_NO_FENCE"
 
+# 2026-11-11: the cabin camera MCU (GMSL port 0) reported FROZEN over and over while refcnt=0,
+# host1x_fence was loaded and argus was quiet. This script said HEALTHY, so `sensors start`
+# skipped the recovery and every relaunch died in a 21 s Argus timeout until the MCU was reset.
+# Lines below are copied from that boot's zed_x_daemon journal.
+frozen_log="$TMP/daemon_frozen.log"
+cat > "$frozen_log" <<'EOF'
+Nov 11 09:02:30 exca-orin-2 ZEDX_Daemon[1035]: [ZED-X Daemon] Port  0  Running for CAM ModeliD  8
+Nov 11 16:35:44 exca-orin-2 ZEDX_Daemon[1035]: [ZED-X Daemon] Port  0  OPENING for CAM ModeliD  8
+Nov 11 16:36:05 exca-orin-2 ZEDX_Daemon[1035]: [ZED-X Daemon] Port  0  CLOSING for CAM ModeliD  8
+Nov 11 16:36:23 exca-orin-2 ZEDX_Daemon[1035]: [ZED-X Daemon] Restart NVArgus Daemon
+Nov 11 16:36:40 exca-orin-2 ZEDX_Daemon[1035]: [ZED-X Daemon] Received invalid message :  "ZEDX#0#8#FROZEN"
+EOF
+# After the MCU reset the probe's successful open logs Running, which supersedes the FROZEN lines.
+recovered_log="$TMP/daemon_recovered.log"
+cat "$frozen_log" > "$recovered_log"
+echo 'Nov 11 16:41:02 exca-orin-2 ZEDX_Daemon[1035]: [ZED-X Daemon] Port  0  Running for CAM ModeliD  8' >> "$recovered_log"
+# The other camera running must not hide a frozen one: the state is per port.
+other_port_log="$TMP/daemon_other_port.log"
+cat "$frozen_log" > "$other_port_log"
+echo 'Nov 11 16:41:02 exca-orin-2 ZEDX_Daemon[1035]: [ZED-X Daemon] Port  1  Running for CAM ModeliD  8' >> "$other_port_log"
+
+run_case "frozen MCU, everything else fine" 1 RECOVERABLE "$(mk_mod frozen 0)"    "$clean_log" "$NO_CLIENT_PATTERN" "$MODULES_LOADED" "$frozen_log"
+run_case "Running after FROZEN = healthy"   0 HEALTHY     "$(mk_mod unfrozen 0)"  "$clean_log" "$NO_CLIENT_PATTERN" "$MODULES_LOADED" "$recovered_log"
+run_case "other port Running hides nothing" 1 RECOVERABLE "$(mk_mod frozen_p0 0)" "$clean_log" "$NO_CLIENT_PATTERN" "$MODULES_LOADED" "$other_port_log"
+
 out="$(ZEDX_MODULE_DIR="$(mk_mod fence_reason 0)" ZEDX_ARGUS_LOG_CMD="cat $clean_log" \
        ZEDX_CLIENT_PATTERN="$NO_CLIENT_PATTERN" ZEDX_MODULES_FILE="$MODULES_NO_FENCE" \
+       ZEDX_DAEMON_LOG_CMD="cat $DAEMON_QUIET" \
        bash "$SCRIPT" 2>&1)" || true
 if printf '%s' "$out" | grep -q 'host1x_fence : MISSING' \
    && printf '%s' "$out" | grep -q 'modprobe host1x_fence'; then
@@ -115,6 +146,7 @@ cat > "$TMP/fakebin/systemctl" <<'EOF'
 # only the read-only InvocationID lookup is expected here
 case "$*" in
   *InvocationID*nvargus-daemon*) echo "CURRENTARGUSINVOCATION" ;;
+  *InvocationID*zed_x_daemon*) echo "CURRENTDAEMONINVOCATION" ;;
   *) echo "unexpected systemctl call: $*" >&2; exit 1 ;;
 esac
 exit 0

@@ -18,6 +18,7 @@
 #   ZEDX_ARGUS_LOG_CMD   default: nvargus-daemon journal over $ZEDX_ARGUS_WINDOW
 #   ZEDX_ARGUS_WINDOW    default -15min
 #   ZEDX_CLIENT_PATTERN  default: pgrep -af pattern for processes that open a ZED camera
+#   ZEDX_DAEMON_LOG_CMD  default: zed_x_daemon journal of the running instance
 set -u
 
 MODULE_DIR="${ZEDX_MODULE_DIR:-/sys/module}"
@@ -39,6 +40,19 @@ else
 fi
 CLIENT_PATTERN="${ZEDX_CLIENT_PATTERN:-component_container|ZED_Explorer|ZED_Depth_Viewer|ZED_Media_Server}"
 
+# Camera MCU state as the ZED-X daemon reports it. 2026-11-11: port 0 sent "ZEDX#0#8#FROZEN" 15
+# times while refcnt=0, host1x_fence was loaded and argus was quiet, so this script said HEALTHY,
+# `sensors start` skipped the recovery, and every relaunch died in a 21 s Argus timeout. Only the
+# MCU reset in zedx_recover.sh (reboot_from_input) cleared it. Same scoping rule as argus: only the
+# running daemon instance counts, and per port the LAST state line wins, because a successful
+# open after a reset logs "Port N Running" and that supersedes the earlier FROZEN lines.
+DAEMON_INVOCATION="${ZEDX_DAEMON_INVOCATION:-$($SYSTEMCTL show -p InvocationID --value zed_x_daemon 2>/dev/null)}"
+if [ -n "$DAEMON_INVOCATION" ]; then
+  DAEMON_LOG_CMD="${ZEDX_DAEMON_LOG_CMD:-$JOURNAL -u zed_x_daemon --no-pager _SYSTEMD_INVOCATION_ID=$DAEMON_INVOCATION}"
+else
+  DAEMON_LOG_CMD="${ZEDX_DAEMON_LOG_CMD:-$JOURNAL -u zed_x_daemon --no-pager --since $ARGUS_WINDOW}"
+fi
+
 # A capture session that outlived its client: the sensor stays allocated and every open() fails.
 ARGUS_FAULT_RE='AlreadyAllocated|buffers still pending during EGLStreamProducer'
 
@@ -47,6 +61,11 @@ argus_log="$(eval "$ARGUS_LOG_CMD" 2>/dev/null || true)"
 argus_faults="$(printf '%s\n' "$argus_log" | grep -cE "$ARGUS_FAULT_RE")"
 clients="$(pgrep -af "$CLIENT_PATTERN" 2>/dev/null | head -5 || true)"
 client_n="$(printf '%s' "$clients" | grep -c . )"
+daemon_log="$(eval "$DAEMON_LOG_CMD" 2>/dev/null || true)"
+frozen_ports="$(printf '%s\n' "$daemon_log" | awk '
+  match($0, /ZEDX#[0-9]+#[0-9]+#FROZEN/) { split(substr($0, RSTART, RLENGTH), f, "#"); s[f[2]] = "F"; next }
+  match($0, /Port +[0-9]+ +Running/)    { split(substr($0, RSTART, RLENGTH), f, " +"); s[f[2]] = "R" }
+  END { for (p in s) if (s[p] == "F") printf "%s ", p }' | sed 's/ $//')"
 
 FENCE_MODULE="${ZEDX_FENCE_MODULE:-host1x_fence}"
 MODULES_FILE="${ZEDX_MODULES_FILE:-/proc/modules}"
@@ -72,6 +91,9 @@ elif ! printf '%s' "$refcnt" | grep -qE '^-?[0-9]+$'; then
 elif [ "$refcnt" -lt 0 ]; then
   verdict=RECOVERABLE; code=1
   reason="sl_zedx module use-count underflowed (refcnt=$refcnt, i.e. atomic 0). try_module_get() then fails, tegracam never starts the stream, and BOTH cameras report FROZEN. Restoring the lost base reference and resetting the camera MCU fixes it without a reboot (proven 2026-09-14 and 2026-09-21): $(dirname "$0")/zedx_recover.sh --run"
+elif [ -n "$frozen_ports" ]; then
+  verdict=RECOVERABLE; code=1
+  reason="the ZED-X daemon reports the camera MCU on GMSL port(s) $frozen_ports as FROZEN, with no 'Running' since. Module refcount and argus can look perfectly fine in this state, yet every open() hangs ~21 s and dies in an Argus socket timeout, and each failed open pushes the MCU further in. Resetting the MCU over GMSL fixes it without a reboot (2026-09-21, 2026-11-11): $(dirname "$0")/zedx_recover.sh --run"
 elif [ "$argus_faults" -gt 0 ] && [ "$client_n" -eq 0 ]; then
   verdict=RECOVERABLE; code=1
   reason="nvargus-daemon reports $argus_faults capture-session fault line(s) from $ARGUS_SCOPE while no process holds a camera: a streaming client died without releasing the sensor."
@@ -92,6 +114,7 @@ else
   echo "$FENCE_MODULE : MISSING  (every SDK open segfaults without it)"
 fi
 echo "argus faults   : $argus_faults line(s) in $ARGUS_SCOPE"
+echo "frozen MCU     : ${frozen_ports:-none}   (GMSL port(s) whose last daemon report is FROZEN)"
 if [ "$client_n" -gt 0 ]; then
   echo "camera clients : $client_n"; printf '%s\n' "$clients" | cut -c1-110 | sed 's/^/                 /'
 else

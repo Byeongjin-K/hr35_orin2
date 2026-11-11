@@ -782,3 +782,31 @@ rung 이 계속 되살아나는 런처를 상대로 돌았다. 사용자가 `sen
 **고정**한다 — 안 하면 그 부팅이 fence 를 로드했는지에 따라 판정이 흔들려, 이 테스트가 잡으려는
 비결정성이 테스트 자신에 들어온다. 실기: 카메라 9.83~9.89Hz, FROZEN 0, 언더플로 0.
 
+---
+
+## 17. 2026-11-11 — health 가 MCU FROZEN 을 못 봐서 `srun` 이 복구를 건너뛰었다
+
+증상: `zedx_cabin` 이 `[ZED] Cannot initialize the camera` + `(Argus) Error Timeout ... ClientSocketManager.cpp:137`
+/ `Connection reset by peer` 로 실패. `srun` 을 다시 해도 같았다.
+
+| 지표 | 값 |
+|---|---|
+| `sl_zedx` refcnt | 0 (정상) |
+| host1x_fence | loaded |
+| 커널 `zedx_probe: Serial Number` | 4 |
+| ZED-X 데몬 `ZEDX#0#8#FROZEN` | 15회, nvargus 는 ~70초마다 재시작 |
+| `zedx_health.sh` | **HEALTHY** ← 오진 |
+
+원인: health 가 refcnt / fence / argus 만 보고 **카메라 MCU 상태는 보지 않았다.** 그래서 `sensors start` 의
+preflight 가 "ready" 로 통과시켜 복구(`--safe` 에 이미 들어 있는 reboot-mcu)가 한 번도 돌지 않았다.
+`zedx_recover.sh --run` 을 손으로 돌리자 `RECOVERED after reload-drivers`, 데몬 로그 `Port 0 Running`.
+
+고친 것: `zedx_health.sh` 가 **지금 돌고 있는 zed_x_daemon 인스턴스**(`_SYSTEMD_INVOCATION_ID`)의 로그에서
+포트별 마지막 상태를 본다. 마지막 줄이 `ZEDX#<port>#..#FROZEN` 이면 `RECOVERABLE`(exit 1),
+뒤에 `Port <port> Running` 이 오면 해소된 것으로 본다(복구 프로브의 성공한 open 이 Running 을 남긴다).
+다른 포트의 Running 은 frozen 포트를 가리지 않는다. 출력에 `frozen MCU : <ports|none>` 줄이 생겼다.
+이제 `srun` 이 이 상태를 보면 클라이언트가 없을 때 자동으로 `--safe --run`(MCU 리셋 포함)을 돈다.
+
+검증: `test_zedx_health.sh` 13/13 (FROZEN 케이스 3개 추가, 수정 전 스크립트로는 그중 2개 FAIL 로 RED 확인),
+`test_zedx_recover.sh` 41/41. `test_zedx_preflight.sh` 5/6 — "no root on a non-interactive shell" 1건은
+수정 전 HEAD 에서도 똑같이 실패하는 기존 실패다(이 변경과 무관). 실기: 복구 후 `frozen MCU : none`, `VERDICT=HEALTHY`.
