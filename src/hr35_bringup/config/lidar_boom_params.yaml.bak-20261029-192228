@@ -1,0 +1,115 @@
+lidar_boom:
+  os_driver:
+    ros__parameters:
+      # sensor_hostname[required]: hostname or IP address of the sensor (IP4 or IP6).
+      sensor_hostname: '192.168.0.5'
+      # udp_dest[optional]: hostname or multicast group IP where the sensor will send UDP data packets.
+      udp_dest: ''
+      # mtp_dest[optional]: hostname IP address for receiving data packets via multicast
+      mtp_dest: ''
+      # mtp_main[optional]: if true, then configure and reinit the sensor
+      mtp_main: false
+      # lidar_mode[optional]: resolution and rate
+      # 2026-10-29: 교체된 구 붐 센서(OS0-128)가 512x10 이었고, OS0-32 전환 시뮬레이션도
+      # 512x10 기준이다(견자 채움은 128 채널과 거의 동일, AI/법면 영향 작음). 1024 로 올려도
+      # 32 채널의 진짜 제약인 벏 사이 수직 간격(4 m 에서 우 20 cm)은 전혀 안 줄고
+      # 한 방향으로만 점이 2 배로 늘어 이득은 작은 대신 현 코드/시뮬레이션 기준과 빗나간다.
+      lidar_mode: '512x10'
+      # timestamp_mode[optional]: method used to timestamp measurements
+      timestamp_mode: 'TIME_FROM_ROS_TIME'
+      # ptp_utc_tai_offset[optional]: UTC/TAI offset in seconds
+      ptp_utc_tai_offset: -37.0
+      # udp_profile_lidar[optional]: lidar packet profile
+      # 2026-10-29: 구 붐 센서가 쓰던 단일 반환 포맷과 동일하게 맞춘다 - 패킷 해석이
+      # 그대로 유지된다. FW 2.3 에서 Single Return Profile 로 추가되었고 FW 2.5.0 부터는
+      # 이 값이 udp_profile_lidar 의 기본값이다(공식 2.x changelog) - 2.5.3 에서 지원됨.
+      # 빈 값이면 센서에 남아있는 LEGACY 를 그대로 사용하밋로 벅시히 지정한다.
+      # !! RNG19_RFL8_SIG16_NIR16 는 이 하드웨어에서 사용할 수 없다 (2026-10-29 실촉) !!
+      # 구 붐 센서(OS0-128)가 이 포맷이었지만 그것은 FW 3.2 엀다. 센서는 2.5.3 에서도
+      # 이 포맷을 받아주지만(lidar_data_format 에 정상 반영됨), 드라이버가 죽는다:
+      #   terminate called after throwing an instance of 'std::out_of_range'
+      #     what():  Field 'WINDOW' not found in LidarScan.   -> os_driver exit code -6 (SIGABRT)
+      # 원인: WINDOW(Window Signal) 는 FW 3.2 에서 추가된 필드다. 그런드
+      # point_cloud_processor_factory.h 가 UDP 포맷만 보고 Profile_RNG19_RFL8_SIG16_NIR16
+      # (sensor_point_types.h: ChanFieldTable<6>, 6번지가 ChanField::WINDOW) 를 고를고,
+      # point_cloud_compose.h 가 그 표의 모든 항목을 ls.field<T>() 로 긍었어온다.
+      # FW 2.5.3 스캔에는 WINDOW 가 없으니 바로 out_of_range. point_type 을 바꿔도
+      # 표는 포맷당 고정이라 회피되지 않고, proc_mask 로 IMG 를 낙도 PCL 경로가 터진다.
+      # => Rev 06(FW 2.5.3 상한) 엔 LEGACY 가 유일한 사용 가능 포맷이다. 2.5.3 에서
+      #    LEGACY 는 정식 지원되고(3.1 부터 deprecated, 4.0 에서 제거 - 둘 다 Rev7+ 전용),
+      #    이 센서는 2.5.3 이 상한이니 영구적으로 안전하다.
+      # 빈 값 대신 명시한 이유: 포맷이 항상 드라이버 기동 시 센서에 다시 주입되어
+      # 펜웨어 업데이트나 Reset Configuration 으로 센서가 초기화되도 값이 보증된다.
+      udp_profile_lidar: 'LEGACY'
+      # udp_profile_imu: firmware 3.2 deprecated LEGACY, and on this sensor the
+      # LEGACY IMU stream stops transmitting a few minutes after it starts. It
+      # fails silently: the sensor keeps answering HTTP, the lidar stream stays
+      # at 10 Hz, and the only symptom is /lidar_boom/imu going to zero, which
+      # drops the voxelizer into GNSS attitude fallback. Writing any sensor
+      # config revives it briefly, so a healthy reading right after a restart
+      # does not mean it will still be alive an hour later.
+      # ACCEL32_GYRO32_NMEA is the format 3.2 added and it keeps streaming.
+      # LEGACY 로 잠깐 되돌려 100 Hz 와 480 Hz 를 비교한 결과(2026-09-09), 맵 노이즈의
+      # 상당부분이 레이트 탓임이 확인됐다. 다만 원인은 프로파일이 아니라 레벨링 필터가
+      # dt 를 안 쓰던 것이라, rn_grid_map/imu_leveling.hpp 쪽을 고쳤다. LEGACY 는 몇 분
+      # 뒤 송신을 멈추므로 상시 운용에 못 쓴다 - 여기는 ACCEL32 로 유지한다.
+      # 2026-10-29: 붐 라이다를 신품 OS-0-32-U1 (Rev 06, PN 840-103574-06,
+      # SN 122208001019) 로 교체하면서 FW 를 2.2.1 -> 2.5.3 으로 올렸다. Rev 06 하드웨어는
+      # FW 3.x 를 올릴 수 없다(공식 changelog: "FW 3.0+ 는 Rev7 이상 OS0/OS1/OSDome 전용").
+      # 2.5.3 이 이 하드웨어의 상한이고, ACCEL32_GYRO32_NMEA 는 FW 3.2 에서 추가된 값이라
+      # 2.5.3 센서는 이를 거부한다: set_config_param 이 HTTP 500 으로 떨어지면서
+      # "'udp_profile_imu' encountered error: 'ACCEL32_GYRO32_NMEA' is not supported" 를
+      # 반환하고, TRANSITION_CONFIGURE 가 실패해 드라이버가 아예 활성화되지 못한다.
+      # 빈 값으로 두면 드라이버가 센서 현재값(LEGACY)을 그대로 유지한다.
+      # => 위에 적힌 LEGACY IMU 송신 중단 이슈는 이 하드웨어에서 우회 수단이 없다.
+      #    운용 중 /lidar_boom/imu 가 0 으로 떨어지는지 반드시 계속 관찰할 것.
+      udp_profile_imu: ''
+      # metadata[optional]: path to save metadata file to
+      metadata: ''
+      # lidar_port[optional]: port value should be in the range [0, 65535]
+      lidar_port: 7512
+      # imu_port[optional]: port value should be in the range [0, 65535]
+      imu_port: 7513
+      # sensor_frame[optional]: name to use when referring to the sensor frame
+      sensor_frame: lidar_boom/os_sensor
+      # lidar_frame[optional]: name to use when referring to the lidar frame
+      lidar_frame: lidar_boom/os_lidar
+      # imu_frame[optional]: name to use when referring to the imu frame
+      imu_frame: lidar_boom/os_imu
+      # point_cloud_frame[optional]: which frame of reference to use
+      point_cloud_frame: lidar_boom/os_lidar
+      # pub_static_tf[optional]: when this flag is set to True, the driver will broadcast the TF transforms
+      pub_static_tf: true
+      # proc_mask[optional]: use any combination of the 4 flags IMG, PCL, IMU and SCAN
+      proc_mask: IMU|PCL|SCAN|IMG|RAW
+      # scan_ring[optional]: select which beam of the LidarScan to use
+      scan_ring: 0
+      # use_system_default_qos[optional]: if false, data are published with sensor data QoS
+      use_system_default_qos: true
+      # point_type[optional]: choose from: {original, native, xyz, xyzi, xyzir}
+      point_type: original
+      # azimuth window start[optional]: values range [0, 360000] millidegrees
+      azimuth_window_start: 0
+      # azimuth_window_end[optional]: values range [0, 360000] millidegrees
+      azimuth_window_end: 360000
+      # persist_config[optional]: request the sensor to persist settings
+      persist_config: false
+      # attempt_config[optional]: attempting to reconnect to the sensor after connection loss
+      attempt_reconnect: false
+      # dormant_period_between_reconnects[optional]: wait time in seconds between reconnection attempts
+      dormant_period_between_reconnects: 1.0
+      # max_failed_reconnect_attempts[optional]: maximum number of attempts
+      max_failed_reconnect_attempts: 2147483647
+      # organized[optional]: whether to generate an organized point cloud
+      organized: true
+      # destagger[optional]: enable or disable point cloud destaggering
+      destagger: true
+      # min_range[optional]: minimum lidar range to consider (meters)
+      min_range: 0.0
+      # max_range[optional]: maximum lidar range to consider (meters)
+      max_range: 1000.0
+      # operating_mode: the 3.2 firmware update left the sensor in STANDBY, which
+      # emits no UDP data at all -- the driver connects, configures, then times out
+      # in poll_client(). Setting it here makes every driver start force NORMAL, so
+      # a sensor that boots into STANDBY cannot silently take the LiDAR down.
+      operating_mode: NORMAL 
