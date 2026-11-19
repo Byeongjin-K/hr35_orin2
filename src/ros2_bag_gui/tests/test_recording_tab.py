@@ -45,6 +45,7 @@ class FakeRecorder:
         self.stopped_drivers = None
         self.driver_stop_failures = []
         self.last_duration_s = 60.0
+        self.cameras_closed = False
 
     @property
     def is_recording(self):
@@ -60,6 +61,9 @@ class FakeRecorder:
         self.stopped_drivers = list(paths)
         self.busy_svo_drivers = []
         return []
+
+    def close_cameras(self):
+        self.cameras_closed = True
 
     def stop_recording(self, node=None, reason=None):
         self.stop_calls += 1

@@ -46,6 +46,13 @@ class SVO2WriterThread(QThread):
     timestamps via :meth:`set_ros_timestamp` from the ROS callback thread;
     the writer embeds them into the SVO2 as ``sl.SVOData`` entries.
 
+    The camera stays open between recordings: :meth:`end_recording` closes the
+    SVO2 file only, :meth:`begin_recording` starts the next file on the same
+    open camera, and :meth:`stop` closes the camera.  Closing a ZED X camera
+    tears down its Argus session, which on the robot aborted the ZED ROS
+    driver of the other camera (2026-11-19, twice), and the camera could not
+    be opened again in this process afterwards.
+
     Signals
     -------
     frame_recorded(int)
@@ -78,6 +85,15 @@ class SVO2WriterThread(QThread):
         self._settled = threading.Event()
         self._opened = False
         self._last_error = ""
+
+        # Between recordings: the loop waits on _wake; begin/end requests and
+        # their completion are handed over under _request_lock.
+        self._wake = threading.Event()
+        self._request_lock = threading.Lock()
+        self._begin_path: Optional[str] = None
+        self._end_requested = False
+        self._ended = threading.Event()
+        self._ended.set()
 
     # ------------------------------------------------------------------
     # Public API
@@ -114,14 +130,44 @@ class SVO2WriterThread(QThread):
         self.error_occurred.emit(message)
 
     def stop(self) -> bool:
-        """Request the recording loop to stop and wait for the thread.
+        """Close the SVO2 file and the camera, and wait for the thread to end.
 
         Returns False if the thread is still running after the wait; the caller
         must then keep a reference to it (destroying a running QThread aborts).
         """
         self._running = False
         self._stop_requested = True
+        self._wake.set()
         return self.wait(10_000)  # Wait up to 10 s for graceful shutdown
+
+    def end_recording(self, timeout_s: float = 10.0) -> bool:
+        """Close the SVO2 file and keep the camera open for the next recording.
+
+        Returns False if the file was not closed within timeout_s, or the thread
+        has already ended (camera lost): the caller then retires this writer.
+        """
+        if not self.isRunning():
+            return False
+        with self._request_lock:
+            self._ended.clear()
+            self._end_requested = True
+            self._running = False
+        self._wake.set()
+        return self._ended.wait(timeout_s) and self.isRunning()
+
+    def begin_recording(self, output_path: str) -> None:
+        """Record the open camera into a new SVO2 file; see wait_until_recording."""
+        with self._request_lock:
+            self._config.output_path = output_path
+            self._settled.clear()
+            self._opened = False
+            self._last_error = ""
+            self._begin_path = output_path
+        self._wake.set()
+
+    @property
+    def camera_serial(self) -> str:
+        return self._config.camera_serial
 
     @property
     def frame_count(self) -> int:
@@ -191,39 +237,84 @@ class SVO2WriterThread(QThread):
                 logger.info("ZED opened with fallback resolution %s (requested %s)",
                             used_resolution, self._config.resolution)
 
-            # ---- Ensure output directory exists ----
-            os.makedirs(os.path.dirname(self._config.output_path), exist_ok=True)
-
-            # ---- Recording parameters ----
-            rec_params = sl.RecordingParameters()
-            rec_params.video_filename = self._config.output_path
-            rec_params.compression_mode = self._get_compression(sl)
-
-            status = camera.enable_recording(rec_params)
-            if status != sl.ERROR_CODE.SUCCESS:
-                self._fail(
-                    f"Failed to enable SVO2 recording: {status}"
-                )
-                camera.close()
-                return
-
-            logger.info(
-                "SVO2 recording started: %s (serial=%s, %s @ %d fps, %s)",
-                self._config.output_path,
-                self._config.camera_serial or "auto",
-                self._config.resolution,
-                self._config.fps,
-                self._config.compression,
-            )
-
-            # ---- Grab loop ----
-            self._running = not self._stop_requested
-            self._frame_count = 0
             runtime = sl.RuntimeParameters()
-            self._opened = True
-            self._settled.set()
-            failed_grabs = 0
+            path: Optional[str] = self._config.output_path
+            while path is not None:
+                if not self._record(sl, camera, runtime, path):
+                    break  # the camera is lost: close it, the caller opens a new one
+                with self._request_lock:
+                    self._end_requested = False
+                    self._ended.set()
+                path = self._next_recording()
 
+        except Exception as exc:
+            self._fail(f"SVO2 recording error: {exc}")
+            logger.exception("SVO2 recording error")
+
+        finally:
+            # ---- Cleanup (always runs) ----
+            try:
+                camera.disable_recording()
+            except Exception:
+                pass
+            try:
+                camera.close()
+            except Exception:
+                pass
+
+            self._running = False
+            self._settled.set()
+            self._ended.set()
+            logger.info("ZED camera closed (serial=%s)", self._config.camera_serial or "auto")
+
+    def _next_recording(self) -> Optional[str]:
+        """Idle with the camera open; the next file to record, or None on stop()."""
+        while not self._stop_requested:
+            self._wake.wait()
+            with self._request_lock:
+                self._wake.clear()
+                path, self._begin_path = self._begin_path, None
+            if path is not None and not self._stop_requested:
+                return path
+        return None
+
+    def _record(self, sl, camera, runtime, path: str) -> bool:
+        """Record one SVO2 file until end_recording() or stop().
+
+        Returns False when the camera is lost (an exception from the SDK), True
+        when the file was closed and the camera can record again.
+        """
+        # ---- Ensure output directory exists ----
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+
+        # ---- Recording parameters ----
+        rec_params = sl.RecordingParameters()
+        rec_params.video_filename = path
+        rec_params.compression_mode = self._get_compression(sl)
+
+        status = camera.enable_recording(rec_params)
+        if status != sl.ERROR_CODE.SUCCESS:
+            self._fail(f"Failed to enable SVO2 recording: {status}")
+            return True  # the camera stays open; the next Start tries again
+
+        logger.info(
+            "SVO2 recording started: %s (serial=%s, %s @ %d fps, %s)",
+            path,
+            self._config.camera_serial or "auto",
+            self._config.resolution,
+            self._config.fps,
+            self._config.compression,
+        )
+
+        # ---- Grab loop ----
+        with self._request_lock:
+            self._running = not (self._stop_requested or self._end_requested)
+        self._frame_count = 0
+        self._opened = True
+        self._settled.set()
+        failed_grabs = 0
+        lost = False
+        try:
             while self._running:
                 err = camera.grab(runtime)
                 if err == sl.ERROR_CODE.SUCCESS:
@@ -244,30 +335,19 @@ class SVO2WriterThread(QThread):
                             f"ZED camera has delivered no frame for {failed_grabs} "
                             f"grabs in a row (last: {err})"
                         )
-
         except Exception as exc:
+            lost = True
             self._fail(f"SVO2 recording error: {exc}")
             logger.exception("SVO2 recording error")
-
         finally:
-            # ---- Cleanup (always runs) ----
             try:
                 camera.disable_recording()
             except Exception:
                 pass
-            try:
-                camera.close()
-            except Exception:
-                pass
-
             self._running = False
-            self._settled.set()
-            logger.info(
-                "SVO2 recording stopped: %s (%d frames)",
-                self._config.output_path,
-                self._frame_count,
-            )
-            self.recording_stopped.emit(self._config.output_path)
+            logger.info("SVO2 recording stopped: %s (%d frames)", path, self._frame_count)
+            self.recording_stopped.emit(path)
+        return not lost
 
     # ------------------------------------------------------------------
     # Internal helpers

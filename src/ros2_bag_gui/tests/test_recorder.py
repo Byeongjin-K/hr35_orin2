@@ -19,6 +19,22 @@ from ros2_bag_gui.ros2.recorder import (
 
 ALL_BAG = {'boom': 'bag', 'cabin': 'bag'}
 
+
+@pytest.fixture(autouse=True)
+def _close_recorder_cameras(monkeypatch):
+    """Close the cameras a test's recorders keep open: a running QThread left behind aborts."""
+    made = []
+    init = Recorder.__init__
+
+    def tracking_init(self, *args, **kwargs):
+        init(self, *args, **kwargs)
+        made.append(self)
+
+    monkeypatch.setattr(Recorder, '__init__', tracking_init)
+    yield
+    for recorder in made:
+        recorder.close_cameras()
+
 class TestTopicExclusion:
     def test_lidar_points_excluded_in_laz_mode(self):
         assert not should_include_in_rosbag(
@@ -585,7 +601,8 @@ def _laz_files(recorder):
 def _fake_zed_sdk(monkeypatch, opens=True, fail_after_grabs=None,
                   cameras=(('45233238', 'ZED X', True),)):
     """A stand-in for pyzed.sl: a camera that opens (or not) and delivers frames."""
-    sl = SimpleNamespace(grabs=0, frame_period=threading.Event(), serial_asked_for=None)
+    sl = SimpleNamespace(grabs=0, frame_period=threading.Event(), serial_asked_for=None,
+                         opens=0, closes=0, events=[], held=set())
     sl.ERROR_CODE = SimpleNamespace(
         SUCCESS='SUCCESS', END_OF_SVOFILE_REACHED='EOF', FAILURE='CAMERA NOT DETECTED')
     sl.DEPTH_MODE = SimpleNamespace(NONE=0)
@@ -601,7 +618,12 @@ def _fake_zed_sdk(monkeypatch, opens=True, fail_after_grabs=None,
 
     class Camera:
         def open(self, params):
-            return sl.ERROR_CODE.SUCCESS if opens else sl.ERROR_CODE.FAILURE
+            if not opens:
+                return sl.ERROR_CODE.FAILURE
+            sl.opens += 1
+            self.serial = str(sl.serial_asked_for)
+            sl.held.add(self.serial)
+            return sl.ERROR_CODE.SUCCESS
 
         def enable_recording(self, params):
             open(params.video_filename, 'wb').close()
@@ -615,15 +637,20 @@ def _fake_zed_sdk(monkeypatch, opens=True, fail_after_grabs=None,
             return sl.ERROR_CODE.SUCCESS
 
         def disable_recording(self):
-            pass
+            sl.events.append('disable_recording')
 
         def close(self):
-            pass
+            if hasattr(self, 'serial'):
+                sl.closes += 1
+                sl.held.discard(self.serial)
 
     sl.Camera = Camera
     monkeypatch.setattr('ros2_bag_gui.zed.svo_writer.get_sl_module', lambda: sl)
     monkeypatch.setattr('ros2_bag_gui.ros2.recorder.is_zed_sdk_available', lambda: True)
-    monkeypatch.setattr('ros2_bag_gui.ros2.recorder.list_zed_cameras', lambda: list(cameras))
+    # A camera this process holds open is not available, as the SDK lists it
+    monkeypatch.setattr('ros2_bag_gui.ros2.recorder.list_zed_cameras', lambda: [
+        (serial, model, available and serial not in sl.held)
+        for serial, model, available in cameras])
     return sl
 
 
@@ -1018,6 +1045,40 @@ class TestSideRecorders:
         assert len(recorder.driver_stop_failures) == 1
         assert 'ros2 service call /zedx_cabin/zedx_cabin_node/stop_svo_rec' in recorder.driver_stop_failures[0]
         assert warnings == recorder.driver_stop_failures
+
+    def test_the_camera_stays_open_between_recordings(
+            self, qtbot, tmp_path, fake_node, fake_ros2, monkeypatch):
+        # Closing it aborted the other camera's driver, and it could not be opened again
+        sl = _fake_zed_sdk(monkeypatch)
+        recorder, log = _recorder_with_log()
+        for name in ('first', 'second'):
+            config = RecordingConfig(
+                topics=[], output_path=str(tmp_path / 'out'), session_name=name,
+                camera_mode='svo2', svo2_camera_serial='45233238')
+            assert recorder.start_recording(config, fake_node) is True
+            recorder.stop_recording(fake_node)
+            assert len(_sync_info(recorder)['data_sources']['svo2']['path']) == 1
+
+        assert (sl.opens, sl.closes) == (1, 0)
+        assert log['errors'] == []
+        recorder.close_cameras()
+        assert sl.closes == 1
+
+    def test_drivers_close_their_svo2_before_the_direct_camera(self, session, monkeypatch):
+        sl = _fake_zed_sdk(monkeypatch, cameras=[('49749405', 'ZED X', False), ('45233238', 'ZED X', True)])
+        _fake_zed_driver(session.node)
+        stop_name = '/zedx_cabin/zedx_cabin_node/stop_svo_rec'
+        srv_type, stop = session.node.services[stop_name]
+
+        def noted_stop(request):
+            sl.events.append('driver stop')
+            return stop(request)
+
+        session.node.services[stop_name] = (srv_type, noted_stop)
+        session.start([STATUS, CABIN_IMAGE], camera_mode='svo2')
+        session.recorder.stop_recording()
+
+        assert sl.events == ['driver stop', 'disable_recording']
 
     def test_svo2_opens_the_camera_chosen_by_serial(self, session, monkeypatch):
         sl = _fake_zed_sdk(monkeypatch)

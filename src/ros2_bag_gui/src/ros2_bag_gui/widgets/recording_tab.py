@@ -461,6 +461,7 @@ class RecordingTab(QWidget):
             if failures:
                 # Shown now: the GUI is closing, a queued warning would never appear.
                 QMessageBox.critical(self, "ZED Driver Still Recording", "\n\n".join(failures))
+        self._recorder.close_cameras()
         self._stats_timer.stop()
         self._refresh_timer.stop()
         self._ros2_thread.stop()

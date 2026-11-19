@@ -180,7 +180,10 @@ class Recorder(QObject):
         self._config: Optional[RecordingConfig] = None
         self._laz_subscriptions: List[object] = []
         self._laz_writer: Optional[LAZWriterThread] = None
-        self._svo2_writers: List[SVO2WriterThread] = []
+        self._svo2_writers: List[SVO2WriterThread] = []  # recording SVO2 for this session
+        # Cameras opened here stay open between sessions, by serial: closing one aborted
+        # the ZED driver of the other camera and it could not be reopened (close_cameras).
+        self._open_cameras: Dict[str, SVO2WriterThread] = {}
         self._session_start_time: Optional[datetime] = None
         self._last_duration_s = 0.0
         self._recording = threading.Event()
@@ -333,9 +336,7 @@ class Recorder(QObject):
         if self._laz_writer is not None:
             self._retire_thread(self._laz_writer)
             self._laz_writer = None
-        for writer in self._svo2_writers:
-            self._retire_thread(writer)
-        self._svo2_writers.clear()
+        self._end_svo2_recordings()
         # Leave no empty session folder behind a Start that did not happen. Only
         # empty directories go: bottom-up rmdir keeps anything that holds data.
         session_folder = self._generate_session_path()
@@ -460,7 +461,8 @@ class Recorder(QObject):
         serial = config.svo2_camera_serial
         if serial and not _camera_switched_on(names.get(serial, ''), config.cameras):
             return None
-        free = {s: available for s, _model, available in list_zed_cameras()
+        held = {s for s, writer in self._open_cameras.items() if writer.isRunning()}
+        free = {s: available or s in held for s, _model, available in list_zed_cameras()
                 if _camera_switched_on(names.get(s, ''), config.cameras)}
         if serial and not free.get(serial):
             if serial in free and drivers_record:
@@ -540,14 +542,19 @@ class Recorder(QObject):
         # Named after the camera when its name is known, so the file says which one it is
         name = camera_names_by_serial().get(camera_serial, '') if camera_serial else ''
         svo2_path = os.path.join(session_folder, f'{name or "camera_0"}.svo2')
-        svo2_config = SVO2Config(
-            output_path=svo2_path, camera_serial=camera_serial, camera_index=0)
-        writer = SVO2WriterThread(svo2_config, parent=None)
-        writer.error_occurred.connect(self._on_svo2_error)
-        writer.start()
+        writer = self._open_cameras.pop(camera_serial, None)
+        if writer is not None and writer.isRunning():
+            writer.begin_recording(svo2_path)  # the camera is still open from the last session
+        else:
+            svo2_config = SVO2Config(
+                output_path=svo2_path, camera_serial=camera_serial, camera_index=0)
+            writer = SVO2WriterThread(svo2_config, parent=None)
+            writer.error_occurred.connect(self._on_svo2_error)
+            writer.start()
         if not writer.wait_until_recording(self.SVO2_OPEN_TIMEOUT_S):
             self._retire_thread(writer)
             return writer.last_error or "the camera could not be opened"
+        self._open_cameras[camera_serial] = writer
         self._svo2_writers.append(writer)
         logger.info("SVO2 writer started: %s", svo2_path)
         return None
@@ -819,16 +826,13 @@ class Recorder(QObject):
                 logger.info("ros2 bag record stopped")
                 self._bag_proc = None
 
-            for writer in self._svo2_writers:
-                self._retire_thread(writer)
-                logger.info("SVO2 writer stopped: %d frames at %s",
-                            writer.frame_count, writer.output_path)
-            self._svo2_writers.clear()
+            # The drivers' files first: they are the ones a camera session teardown can abort
             self._driver_stop_failures = self._stop_driver_svo2(node, self._driver_svo)
             for failure in self._driver_stop_failures:
                 logger.error(failure)
                 self.warning_occurred.emit(failure)
             self._driver_svo = []
+            self._end_svo2_recordings()
 
             if self._config:
                 session_folder = self._generate_session_path()
@@ -843,6 +847,23 @@ class Recorder(QObject):
             self.error_occurred.emit(failure)
 
         return session_folder
+
+    def _end_svo2_recordings(self) -> None:
+        """Close this session's SVO2 files; their cameras stay open for the next session."""
+        for writer in self._svo2_writers:
+            if not writer.end_recording():
+                # The camera is lost or did not close its file: open it anew next time
+                self._open_cameras.pop(writer.camera_serial, None)
+                self._retire_thread(writer)
+            logger.info("SVO2 writer stopped: %d frames at %s",
+                        writer.frame_count, writer.output_path)
+        self._svo2_writers.clear()
+
+    def close_cameras(self) -> None:
+        """Close the cameras opened here (the GUI is closing). Not while recording."""
+        for writer in self._open_cameras.values():
+            self._retire_thread(writer)
+        self._open_cameras.clear()
 
     def _generate_session_path(self) -> str:
         if not self._config or not self._session_start_time:
