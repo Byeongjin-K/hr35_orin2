@@ -12,6 +12,7 @@
 #   sensors check     Check the ZED capture stack (auto-repair when safe)
 #   sensors stop      Gracefully stop all sensors (Ctrl+C) and kill the session
 #   sensors restart   stop + start
+#   sensors zed       Restart only the zed window (Ctrl+C, wait, preflight, relaunch)
 #   sensors attach    Attach to the running tmux session
 #   sensors status    Show whether the session is running and list windows
 #   sensors list      Show all configured sensors
@@ -57,6 +58,9 @@ PREFLIGHT_CMD="${SENSORS_PREFLIGHT_CMD:-$HOME/robot_ws/scripts/zedx_preflight.sh
 # 3 s sleep was shorter than the close itself.
 SHUTDOWN_GRACE_SECONDS="${SENSORS_SHUTDOWN_GRACE:-45}"
 SHUTDOWN_WAIT_PATTERN="${SENSORS_SHUTDOWN_PATTERN:-component_container|os_driver|ros2 launch hr35_bringup}"
+# `sensors zed` 가 재기동 전에 사라지길 기다리는 ZED 프로세스. 런치, 컨테이너,
+# state_publisher 모두 cmdline 에 zedx_cabin 이 들어 있고 ouster/docker 는 없다.
+ZED_WAIT_PATTERN="${SENSORS_ZED_PATTERN:-zedx_cabin}"
 
 # =============================================================================
 # Implementation - normally you don't need to edit anything below this line
@@ -273,6 +277,65 @@ cmd_restart() {
     cmd_start "$@"
 }
 
+# ZED 창만 재시작한다. 다른 창(ouster, docker)은 건드리지 않는다.
+# 순서는 sdown -> srun 과 같다: Ctrl+C -> 카메라 close 대기 -> preflight(복구) -> 재기동.
+# zed 창 안에서 실행하면(런치를 Ctrl+C 로 끈 뒤 프롬프트에서) 그 창에서 바로 런치를 띄우고,
+# 다른 창에서 실행하면 zed 창에 Ctrl+C 와 런치 명령을 보낸다.
+cmd_zed() {
+    require_tmux
+
+    local entry zed_cmd=""
+    for entry in "${SENSORS[@]}"; do
+        parse_entry "$entry"
+        [ "$ENTRY_NAME" = "zed" ] && zed_cmd="$ENTRY_CMD"
+    done
+    if [ -z "$zed_cmd" ]; then
+        err "No 'zed' entry in the SENSORS array."
+        exit 1
+    fi
+
+    local target="${SESSION_NAME}:zed"
+    local in_window=0
+    if [ -n "${TMUX_PANE:-}" ] && \
+       [ "$(tmux display-message -p -t "$target" '#{pane_id}' 2>/dev/null)" = "$TMUX_PANE" ]; then
+        in_window=1
+    fi
+
+    if [ "$in_window" -eq 0 ]; then
+        if ! tmux list-windows -t "$SESSION_NAME" -F '#{window_name}' 2>/dev/null | grep -qx zed; then
+            err "No 'zed' window in session '$SESSION_NAME'. Start the sensors first: srun"
+            exit 1
+        fi
+        log "Sending Ctrl+C to the zed window..."
+        tmux send-keys -t "$target" C-c
+    fi
+
+    log "Waiting up to ${SHUTDOWN_GRACE_SECONDS}s for the ZED node to close the camera..."
+    local waited=0
+    while [ "$waited" -lt "$SHUTDOWN_GRACE_SECONDS" ]; do
+        pgrep -f "$ZED_WAIT_PATTERN" >/dev/null 2>&1 || break
+        sleep 1
+        waited=$((waited + 1))
+    done
+    if pgrep -f "$ZED_WAIT_PATTERN" >/dev/null 2>&1; then
+        # 닫히는 중인 노드 위에 새로 띄우면 캡처 스택이 wedge 된다. 재기동하지 않는다.
+        err "ZED is still running after ${waited}s -- not relaunching:"
+        pgrep -af "$ZED_WAIT_PATTERN" | cut -c1-100 | sed 's/^/    /'
+        err "wait for it to exit, then run this again."
+        return 1
+    fi
+    ok "ZED exited after ${waited}s."
+
+    run_preflight
+
+    if [ "$in_window" -eq 1 ]; then
+        log "Relaunching here: $zed_cmd"
+        eval "exec $zed_cmd"
+    fi
+    tmux send-keys -t "$target" "$zed_cmd" C-m
+    ok "Relaunched in window '$target': $zed_cmd"
+}
+
 cmd_attach() {
     require_tmux
     if ! session_exists; then
@@ -326,6 +389,8 @@ Commands:
   check         Check the ZED capture stack, and repair it when that is safe
   stop          Gracefully stop all sensors (Ctrl+C) and kill the session
   restart [-a]  Stop then start (forwards -a flag if given)
+  zed           ZED 창만 재시작 (Ctrl+C -> close 대기 -> preflight 복구 -> 재기동)
+                  zed 창에서 런치를 Ctrl+C 로 끈 뒤 실행해도 되고, 다른 창에서 실행해도 된다
   attach        Attach to the running tmux session
   status        Show whether the session is running and list windows
   list          Show all configured sensors
@@ -380,6 +445,7 @@ main() {
         check|preflight)   cmd_check ;;
         stop)              cmd_stop ;;
         restart)           cmd_restart "$@" ;;
+        zed)               cmd_zed ;;
         attach|a)          cmd_attach ;;
         status|st)         cmd_status ;;
         list|ls)           cmd_list ;;
