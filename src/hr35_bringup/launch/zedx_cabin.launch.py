@@ -1,6 +1,7 @@
 from launch import LaunchDescription
 from launch.actions import IncludeLaunchDescription, SetLaunchConfiguration
 from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 import os
 
@@ -28,5 +29,12 @@ def generate_launch_description():
                 'node_name': 'zedx_cabin_node',
                 'ros_params_override_path': config_path,
             }.items(),
+        ),
+        # ORIN1 GUI camera panel only: 3 Hz, 640x400 preview on /zedx_cabin/gui_preview/compressed.
+        Node(
+            package='hr35_bringup',
+            executable='gui_camera_preview.py',
+            name='zedx_cabin_gui_preview',
+            output='screen',
         ),
     ])

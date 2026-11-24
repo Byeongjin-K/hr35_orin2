@@ -13,4 +13,9 @@ install(DIRECTORY config/
   DESTINATION share/${PROJECT_NAME}/config
 )
 
+# Install executable scripts
+install(PROGRAMS scripts/gui_camera_preview.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 ament_package()
