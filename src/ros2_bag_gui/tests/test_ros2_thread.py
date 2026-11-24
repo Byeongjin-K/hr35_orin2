@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import SingleThreadedExecutor
 from rclpy.impl.implementation_singleton import rclpy_implementation as _rclpy
 
 from ros2_bag_gui.ros2.ros2_thread import ROS2Thread
@@ -12,7 +12,7 @@ from ros2_bag_gui.ros2.ros2_thread import ROS2Thread
 
 def test_thread_survives_a_subscription_destroyed_under_the_executor(qtbot, monkeypatch):
     """Stop and topic refresh destroy subscriptions while the executor waits on them."""
-    spin_once = MultiThreadedExecutor.spin_once
+    spin_once = SingleThreadedExecutor.spin_once
     passes = {'count': 0}
     kept_spinning = threading.Event()
 
@@ -24,7 +24,7 @@ def test_thread_survives_a_subscription_destroyed_under_the_executor(qtbot, monk
             kept_spinning.set()
         return spin_once(self, *args, **kwargs)
 
-    monkeypatch.setattr(MultiThreadedExecutor, 'spin_once', spin_once_with_one_invalid_handle)
+    monkeypatch.setattr(SingleThreadedExecutor, 'spin_once', spin_once_with_one_invalid_handle)
     thread = ROS2Thread()
     connection = []
     thread.connection_status_changed.connect(connection.append)
@@ -100,9 +100,14 @@ def test_rates_stay_off_while_recording_through_refreshes(qtbot, fake_node):
     assert _measured(fake_node) == ['/excavator/status', '/lidar_boom/points']
 
 
-def test_the_measured_topics_report_their_size_in_bytes_per_second(qtbot, fake_node, monkeypatch):
-    clock = {'now': 100.0}
-    monkeypatch.setattr('ros2_bag_gui.ros2.ros2_thread.time', SimpleNamespace(monotonic=lambda: clock['now']))
+@pytest.fixture
+def clock(monkeypatch):
+    now = {'now': 100.0}
+    monkeypatch.setattr('ros2_bag_gui.ros2.ros2_thread.time', SimpleNamespace(monotonic=lambda: now['now']))
+    return now
+
+
+def test_a_measurement_reports_rate_and_size_and_then_unsubscribes(qtbot, fake_node, clock):
     thread = _thread_on(fake_node, GRAPH)
     thread.set_hz_topics(['/lidar_boom/points'])
     _refresh(thread)
@@ -110,12 +115,37 @@ def test_the_measured_topics_report_their_size_in_bytes_per_second(qtbot, fake_n
     for _ in range(11):  # 10 Hz for a second, 2000 bytes a message
         receive(b'x' * 2000)
         clock['now'] += 0.1
-    sizes = []
+    rates, sizes = [], []
+    thread.hz_updated.connect(rates.append)
     thread.rate_updated.connect(sizes.append)
 
-    thread._emit_hz()
+    thread._measure_rates()  # the window is not over yet
+    assert sizes == [] and _measured(fake_node) == ['/lidar_boom/points']
 
+    clock['now'] = 105.0
+    thread._measure_rates()
+
+    assert rates == [{'/lidar_boom/points': pytest.approx(10.0)}]
     assert sizes == [{'/lidar_boom/points': pytest.approx(20000.0)}]
+    assert _measured(fake_node) == []
+
+
+def test_a_ticked_topic_is_measured_again_every_period(qtbot, fake_node, clock):
+    thread = _thread_on(fake_node, GRAPH)
+    thread.set_hz_topics(['/excavator/status'])
+    _refresh(thread)
+    clock['now'] = 105.0
+    thread._measure_rates()
+    assert _measured(fake_node) == []
+
+    clock['now'] = 129.0
+    thread._measure_rates()
+    _refresh(thread)  # a refresh does not start a measurement before it is due
+    assert _measured(fake_node) == []
+
+    clock['now'] = 130.0
+    thread._measure_rates()
+    assert _measured(fake_node) == ['/excavator/status']
 
 
 def test_a_ticked_topic_is_measured_once_it_comes_up(qtbot, fake_node):

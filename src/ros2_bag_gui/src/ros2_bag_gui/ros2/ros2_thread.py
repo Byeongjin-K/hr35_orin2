@@ -1,20 +1,17 @@
 """ROS2 thread for running rclpy in background."""
-import itertools
 import time
 import threading
 
 from PySide6.QtCore import QThread, Signal
 import rclpy
 from rclpy.executors import (
-    MultiThreadedExecutor, ShutdownException, ExternalShutdownException,
+    SingleThreadedExecutor, ShutdownException, ExternalShutdownException,
 )
 from rclpy.impl.implementation_singleton import rclpy_implementation as _rclpy
 from rclpy.node import Node
-from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 from rclpy.subscription import Subscription
 from rosidl_runtime_py.utilities import get_message
-from collections import deque
 from typing import Dict, Optional
 
 _HZ_QOS = QoSProfile(
@@ -23,7 +20,21 @@ _HZ_QOS = QoSProfile(
     history=QoSHistoryPolicy.KEEP_LAST,
 )
 
+# A ticked topic is subscribed to for _HZ_WINDOW seconds every _HZ_PERIOD
+# seconds, not all the time: every message of a measured topic goes through a
+# Python callback here, and the lidar packets, images and IMUs cost about a
+# core when measured continuously (2026-10-22: 7 topics, 33% CPU).
 _HZ_WINDOW = 5.0
+_HZ_PERIOD = 30.0
+
+
+def _rates(acc) -> tuple[float, float]:
+    """(Hz, bytes per second) of a measurement [count, first time, last time, bytes after the first]."""
+    count, first, last, nbytes = acc
+    if count < 2 or last <= first:
+        return 0.0, 0.0
+    span = last - first
+    return (count - 1) / span, nbytes / span
 
 
 class ROS2Thread(QThread):
@@ -31,14 +42,14 @@ class ROS2Thread(QThread):
     topic_list_updated = Signal(list)
     connection_status_changed = Signal(bool)
     error_occurred = Signal(str)
-    hz_updated = Signal(dict)
-    rate_updated = Signal(dict)  # topic -> bytes per second, of the measured topics
+    hz_updated = Signal(dict)  # topic -> Hz, of the topics whose measurement just ended
+    rate_updated = Signal(dict)  # topic -> bytes per second, of the same topics
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._running = False
         self._node: Optional[Node] = None
-        self._executor: Optional[MultiThreadedExecutor] = None
+        self._executor: Optional[SingleThreadedExecutor] = None
         self._command_lock = threading.Lock()
         self._pending_command: Optional[str] = None
 
@@ -46,25 +57,28 @@ class ROS2Thread(QThread):
         # only. A subscription to every topic pulls every image and point cloud
         # of the robot into this process, and makes drivers that publish only
         # for a subscriber (the cameras) produce all of their streams.
-        self._hz_lock = threading.Lock()
-        self._hz_samples: Dict[str, deque] = {}  # topic -> (time, message bytes) of the last window
+        # Everything below except _hz_topics/_hz_dirty is used on the ROS thread only.
         self._hz_topics: set[str] = set()  # asked for by the GUI; under _command_lock
         self._hz_dirty = False  # _hz_topics or _hz_active changed; under _command_lock
-        self._hz_subs: Dict[str, tuple[Subscription, str]] = {}  # topic -> (subscription, type); ROS thread only
-        self._topic_types: Dict[str, str] = {}  # from the last discovery; ROS thread only
-        self._hz_cb_group = ReentrantCallbackGroup()
-        self._hz_active = threading.Event()  # cleared while recording: the recorder counts then
+        self._hz_subs: Dict[str, tuple[Subscription, str, float]] = {}  # topic -> (subscription, type, start)
+        self._hz_acc: Dict[str, list[float]] = {}  # topic -> [count, first time, last time, bytes after the first]
+        self._hz_result: Dict[str, tuple[float, float]] = {}  # topic -> (Hz, bytes/s) of the last measurement
+        self._hz_next: Dict[str, float] = {}  # topic -> when its next measurement is due
+        self._topic_types: Dict[str, str] = {}  # from the last discovery
+        self._hz_active = threading.Event()  # cleared while recording
         self._hz_active.set()
 
     def run(self):
         try:
             rclpy.init()
             self._node = rclpy.create_node('ros2_bag_gui')
-            self._executor = MultiThreadedExecutor(num_threads=4)
+            # One thread: the callbacks hold the GIL anyway, and a thread pool
+            # only adds a hand-off per message.
+            self._executor = SingleThreadedExecutor()
             self._executor.add_node(self._node)
 
             self._node.create_timer(0.2, self._process_command)
-            self._node.create_timer(1.0, self._emit_hz)
+            self._node.create_timer(1.0, self._measure_rates)
 
             self._running = True
             self.connection_status_changed.emit(True)
@@ -116,7 +130,7 @@ class ROS2Thread(QThread):
                 topics.append({
                     'name': name,
                     'type': topic_type,
-                    'hz': self._cached_hz(name),
+                    'hz': self._hz_result.get(name, (0.0, 0.0))[0],
                     'category': category,
                 })
 
@@ -145,14 +159,6 @@ class ROS2Thread(QThread):
         with self._command_lock:
             self._pending_command = 'discover_topics'
 
-    def _cached_hz(self, topic_name: str) -> float:
-        with self._hz_lock:
-            samples = self._hz_samples.get(topic_name)
-            if samples and len(samples) >= 2:
-                span = samples[-1][0] - samples[0][0]
-                return (len(samples) - 1) / span if span > 0 else 0.0
-        return 0.0
-
     def set_hz_topics(self, names) -> None:
         """Measure the rates of these topics only (called from the GUI thread)."""
         names = set(names)
@@ -161,23 +167,37 @@ class ROS2Thread(QThread):
                 self._hz_topics = names
                 self._hz_dirty = True
 
-    def _sync_hz_subs(self):
-        """Subscribe to the asked-for topics that are up, and drop the others.
-
-        A subscription that is still right is kept: a refresh or another tick
-        does not reset the rates of the topics already measured.
-        """
+    def _wanted(self) -> set[str]:
         with self._command_lock:
-            wanted = set(self._hz_topics) if self._hz_active.is_set() else set()
+            return set(self._hz_topics) if self._hz_active.is_set() else set()
 
-        for name, (_sub, sub_type) in list(self._hz_subs.items()):
+    def _sync_hz_subs(self):
+        """Drop what is no longer asked for, and start the measurements that are due.
+
+        A topic ticked just now is measured at once; a measurement under way
+        or a result already shown is kept through refreshes and other ticks.
+        """
+        wanted = self._wanted()
+        for name, (_sub, sub_type, _start) in list(self._hz_subs.items()):
             if name not in wanted or self._topic_types.get(name, sub_type) != sub_type:
                 self._destroy_hz_sub(name)
+        with self._command_lock:
+            ticked = set(self._hz_topics)
+        for name in (self._hz_result.keys() | self._hz_next.keys()) - ticked:
+            self._hz_result.pop(name, None)
+            self._hz_next.pop(name, None)
+        if not self._hz_active.is_set():
+            self._hz_next.clear()  # measured anew once the recording is over
+            return
+        self._start_due_measurements(wanted, time.monotonic())
 
+    def _start_due_measurements(self, wanted: set[str], now: float):
         for name in sorted(wanted - self._hz_subs.keys()):
+            if self._hz_next.get(name, 0.0) > now:
+                continue
             topic_type = self._topic_types.get(name)
             if topic_type is None:
-                continue  # not up yet: subscribed once a discovery lists it
+                continue  # not up yet: measured once a discovery lists it
             try:
                 msg_class = get_message(topic_type)
             except Exception:
@@ -188,55 +208,50 @@ class ROS2Thread(QThread):
 
             try:
                 sub = self._node.create_subscription(
-                    msg_class, name, raw_cb, _HZ_QOS,
-                    callback_group=self._hz_cb_group, raw=True,
+                    msg_class, name, raw_cb, _HZ_QOS, raw=True,
                 )
             except Exception:
                 continue
-            self._hz_subs[name] = (sub, topic_type)
+            self._hz_subs[name] = (sub, topic_type, now)
+            self._hz_acc[name] = [0, 0.0, 0.0, 0]
+            self._hz_next[name] = now + _HZ_PERIOD
 
     def _hz_tick(self, topic_name: str, size: int = 0):
+        acc = self._hz_acc.get(topic_name)
+        if acc is None:
+            return  # a message delivered after its measurement ended
+        now = time.monotonic()
+        if acc[0] == 0:
+            acc[1] = now
+        else:
+            acc[3] += size
+        acc[0] += 1
+        acc[2] = now
+
+    def _measure_rates(self):
+        """Once a second: end the measurements whose window is over, start the ones due."""
         if not self._hz_active.is_set():
             return
         now = time.monotonic()
-        with self._hz_lock:
-            samples = self._hz_samples.setdefault(topic_name, deque())
-            samples.append((now, size))
-            cutoff = now - _HZ_WINDOW
-            while samples and samples[0][0] < cutoff:
-                samples.popleft()
-
-    def _emit_hz(self):
-        if not self._hz_active.is_set() or not self._hz_subs:
-            return
-        now = time.monotonic()
-        result: Dict[str, float] = {}
+        hz: Dict[str, float] = {}
         sizes: Dict[str, float] = {}
-        with self._hz_lock:
-            for topic in self._hz_subs:  # a measured topic with no message yet is 0.0
-                samples = self._hz_samples.get(topic)
-                cutoff = now - _HZ_WINDOW
-                while samples and samples[0][0] < cutoff:
-                    samples.popleft()
-                if samples is not None and len(samples) >= 2 and samples[-1][0] > samples[0][0]:
-                    span = samples[-1][0] - samples[0][0]
-                    result[topic] = (len(samples) - 1) / span
-                    # the bytes of the messages after the first, over the time they took
-                    sizes[topic] = sum(size for _t, size in itertools.islice(samples, 1, None)) / span
-                else:
-                    result[topic] = sizes[topic] = 0.0
-        if result:
-            self.hz_updated.emit(result)
+        for name, (_sub, _type, start) in list(self._hz_subs.items()):
+            if now - start < _HZ_WINDOW:
+                continue
+            hz[name], sizes[name] = self._hz_result[name] = _rates(self._hz_acc[name])
+            self._destroy_hz_sub(name)
+        if hz:
+            self.hz_updated.emit(hz)
             self.rate_updated.emit(sizes)
+        self._start_due_measurements(self._wanted(), now)
 
     def _destroy_hz_sub(self, name: str):
-        sub, _type = self._hz_subs.pop(name)
+        sub, _type, _start = self._hz_subs.pop(name)
+        self._hz_acc.pop(name, None)
         try:
             self._node.destroy_subscription(sub)
         except Exception:
             pass
-        with self._hz_lock:
-            self._hz_samples.pop(name, None)
 
     def _destroy_hz_subs(self):
         for name in list(self._hz_subs):
