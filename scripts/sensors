@@ -121,6 +121,9 @@ cmd_start() {
     local attach_after=0
     # 전역맵은 기본 꺼짐. compose 의 profiles 가 opt-in 이라 그쪽 관례를 따른다.
     local global_map="${SENSORS_GLOBAL_MAP:-0}"
+    # 캐빈 ZED 칼리브 tf·라이다 정합 확인 영상(OT_zed_cam_overlay)은 기본 포함.
+    # hr35 GUI 후처리 칸(깎/채움 색칠, AI 계획 선)이 이 tf 가 있어야 그려진다(2026-11-24).
+    local cam_overlay="${SENSORS_CAM_OVERLAY:-1}"
     while [ $# -gt 0 ]; do
         case "$1" in
             -a|--attach|--foreground|-f)
@@ -135,6 +138,14 @@ cmd_start() {
                 global_map=0
                 shift
                 ;;
+            -c|--cam-overlay)
+                cam_overlay=1
+                shift
+                ;;
+            -C|--no-cam-overlay)
+                cam_overlay=0
+                shift
+                ;;
             -h|--help)
                 cat <<EOF
 Usage: sensors start [options]
@@ -144,6 +155,8 @@ Options:
                                    launching (foreground mode - watch live output)
   -g, --global-map                 전역맵 노드(OT_global_map)도 함께 띄운다
   -G, --no-global-map              전역맵 제외 (기본값)
+  -c, --cam-overlay                카메라 오버레이(OT_zed_cam_overlay) 포함 (기본값)
+  -C, --no-cam-overlay             카메라 오버레이 제외
 
 Without options, sensors start in the background (detached) and you return
 to the prompt. Use 'sensors attach' later to view, or 'sensors stop' to kill.
@@ -179,13 +192,12 @@ EOF
     for entry in "${SENSORS[@]}"; do
         parse_entry "$entry"
 
-        # 전역맵 on/off 를 docker 창 명령에 주입한다. 플레이스홀더가 없는
+        # 전역맵·카메라 오버레이 on/off 를 docker 창 명령에 주입한다. 플레이스홀더가 없는
         # 다른 창은 그대로 남는다.
-        if [ "$global_map" -eq 1 ]; then
-            ENTRY_CMD="${ENTRY_CMD//@COMPOSE_PROFILE@/--profile globalmap}"
-        else
-            ENTRY_CMD="${ENTRY_CMD//@COMPOSE_PROFILE@/}"
-        fi
+        local profiles=""
+        [ "$global_map" -eq 1 ] && profiles+=" --profile globalmap"
+        [ "$cam_overlay" -eq 1 ] && profiles+=" --profile camoverlay"
+        ENTRY_CMD="${ENTRY_CMD//@COMPOSE_PROFILE@/$profiles}"
         ENTRY_CMD="$(printf '%s' "$ENTRY_CMD" | tr -s ' ')"
 
         if [ "$first" -eq 1 ]; then
@@ -219,6 +231,11 @@ EOF
         ok "전역맵: 포함 (OT_global_map 기동, /rn/global_map 발행)"
     else
         ok "전역맵: 제외  (켜려면 -g / --global-map)"
+    fi
+    if [ "$cam_overlay" -eq 1 ]; then
+        ok "카메라 오버레이: 포함 (OT_zed_cam_overlay, tf gm_swing_axis -> zedx_cabin_calib_optical)"
+    else
+        ok "카메라 오버레이: 제외  (GUI 후처리 칸 겹치기가 안 그려진다, 켜려면 -c)"
     fi
 
     if [ "$attach_after" -eq 1 ]; then
@@ -366,7 +383,7 @@ cmd_list() {
     local i=0
     for entry in "${SENSORS[@]}"; do
         parse_entry "$entry"
-        ENTRY_CMD="${ENTRY_CMD//@COMPOSE_PROFILE@/[--profile globalmap]}"
+        ENTRY_CMD="${ENTRY_CMD//@COMPOSE_PROFILE@/[--profile globalmap] --profile camoverlay}"
         printf "  %d) %-12s %s\n" "$i" "$ENTRY_NAME" "$ENTRY_CMD"
         if [ "$ENTRY_WORKDIR" != "-" ] && [ -n "$ENTRY_WORKDIR" ]; then
             printf "     %s(cwd: %s)%s\n" "$YELLOW" "$ENTRY_WORKDIR" "$NC"
@@ -386,6 +403,8 @@ Commands:
                                                        (watch live output)
                   -g / --global-map    -> 전역맵 노드도 함께 띄운다
                   -G / --no-global-map -> 전역맵 제외 (기본값)
+                  -c / --cam-overlay   -> 카메라 오버레이 포함 (기본값)
+                  -C / --no-cam-overlay -> 카메라 오버레이 제외
   check         Check the ZED capture stack, and repair it when that is safe
   stop          Gracefully stop all sensors (Ctrl+C) and kill the session
   restart [-a]  Stop then start (forwards -a flag if given)
@@ -410,6 +429,11 @@ Two execution modes:
 
   전역맵만 따로 내리기: sudo docker stop OT_global_map
 
+카메라 오버레이 (캐빈 ZED 칼리브 tf + 라이다 정합 확인 영상, GUI 후처리 칸이 쓴다):
+  포함 (기본) : sensors start        (별칭: srun, srun -g 에도 포함)
+  제외        : sensors start -C     (별칭: srun -C)
+  따로 내리기 : sudo docker stop OT_zed_cam_overlay
+
 Inside tmux (after attach):
   Ctrl+b  n   next sensor window
   Ctrl+b  p   previous sensor window
@@ -426,6 +450,7 @@ Configuration:
 Environment overrides:
   SENSORS_SESSION  override tmux session name (default: sensors)
   SENSORS_GLOBAL_MAP  1 로 두면 전역맵 기본값이 '포함' 이 된다 (기본: 0)
+  SENSORS_CAM_OVERLAY 0 으로 두면 카메라 오버레이 기본값이 '제외' 가 된다 (기본: 1)
 
 Examples:
   sensors start            # background
@@ -433,6 +458,7 @@ Examples:
   sensors restart -a       # restart and watch live
   sensors start -g         # 전역맵 포함 (백그라운드)
   sensors start -a -g      # 전역맵 포함 + 라이브 뷰
+  sensors start -a -C      # 카메라 오버레이 제외 + 라이브 뷰
   SENSORS_SESSION=test sensors start
 EOF
 }
