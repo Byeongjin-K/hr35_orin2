@@ -232,6 +232,17 @@ def test_a_topic_holding_the_data_of_another_one_says_which(topic_list):
     assert notes[f'{node}/imu/data'] == ''
 
 
+def test_a_refresh_that_finds_the_same_topics_keeps_the_rows(topic_list):
+    _tick(topic_list, ['/tf'])
+    topic_list.update_hz({'/tf': 12.5})
+    row = topic_list.tree.topLevelItem(0)
+
+    topic_list.set_topics([dict(t, hz=0.0) for t in MOCK_TOPICS])
+
+    assert topic_list.tree.topLevelItem(0) is row
+    assert _hz_column(topic_list)['/tf'] == '12.5'
+
+
 def test_a_rate_update_is_not_a_selection_change(topic_list, qtbot):
     _tick(topic_list, FIVE)
     changes = []

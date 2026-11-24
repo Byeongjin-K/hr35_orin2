@@ -61,6 +61,7 @@ class TopicListWidget(QWidget):
         self._sizes: Dict[str, float] = {}  # GB per hour, measured for checked topics
         self._duplicates: Dict[str, str] = {}  # topic -> the topic holding the same data
         self._heavy: set[str] = set()  # topics of a type that is big by nature
+        self._items: Dict[str, QTreeWidgetItem] = {}  # topic -> its row in the tree now
         self._group_view = True
         # Widths of Topic and Type as last fitted to their text; None before the
         # first fit. Once the operator drags a column, it stays as they left it.
@@ -138,7 +139,11 @@ class TopicListWidget(QWidget):
         Args:
             topics: List of dicts, each containing 'name', 'type', 'hz', 'category'
         """
+        unchanged = ([(t['name'], t['type'], t.get('category')) for t in topics]
+                     == [(t['name'], t['type'], t.get('category')) for t in self._topics])
         self._topics = topics
+        if unchanged:
+            return  # the 5 s refresh found the same graph: the rows already show it
         self._duplicates = duplicates(t['name'] for t in topics)
         self._heavy = {t['name'] for t in topics if t['type'] in HEAVY_TYPES}
         self._refresh_tree()
@@ -146,6 +151,7 @@ class TopicListWidget(QWidget):
     def _refresh_tree(self):
         """Rebuild the tree based on current view mode and filter text."""
         self.tree.clear()
+        self._items.clear()
         # Block signals during bulk updates to prevent spamming selection_changed
         self.tree.blockSignals(True)
         
@@ -262,6 +268,7 @@ class TopicListWidget(QWidget):
             Qt.CheckState.Checked if topic['name'] in self._selected else Qt.CheckState.Unchecked,
         )
         item.setData(0, Qt.ItemDataRole.UserRole, topic['name'])
+        self._items[topic['name']] = item
 
         if isinstance(parent, QTreeWidget):
             parent.addTopLevelItem(item)
@@ -269,32 +276,17 @@ class TopicListWidget(QWidget):
             parent.addChild(item)
 
     def update_hz(self, hz_map: Dict[str, float]):
-        def update_item(item):
-            if item.childCount() == 0:
-                name = item.data(0, Qt.ItemDataRole.UserRole)
-                if name and name in hz_map and name in self._selected:
-                    item.setText(2, self._hz_text(name, hz_map[name]))
-            else:
-                for i in range(item.childCount()):
-                    update_item(item.child(i))
-
-        for i in range(self.tree.topLevelItemCount()):
-            update_item(self.tree.topLevelItem(i))
-    
-    def _topic_items(self):
-        stack = [self.tree.topLevelItem(i) for i in range(self.tree.topLevelItemCount())]
-        while stack:
-            item = stack.pop()
-            stack.extend(item.child(i) for i in range(item.childCount()))
-            if item.data(0, Qt.ItemDataRole.UserRole):
-                yield item
+        for name, hz in hz_map.items():
+            item = self._items.get(name)
+            if item is not None and name in self._selected:
+                item.setText(_HZ, self._hz_text(name, hz))
 
     def update_rates(self, bytes_per_second: Dict[str, float]):
         """Show the measured size of the checked topics, in GB per hour."""
         self._sizes.update({name: gb_per_hour(rate) for name, rate in bytes_per_second.items()})
-        for item in self._topic_items():
-            name = item.data(0, Qt.ItemDataRole.UserRole)
-            if name in bytes_per_second:
+        for name in bytes_per_second:
+            item = self._items.get(name)
+            if item is not None:
                 self._show_size(item, name)
 
     def _on_view_changed(self, checked: bool):
