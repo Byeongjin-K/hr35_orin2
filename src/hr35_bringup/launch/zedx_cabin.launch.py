@@ -49,12 +49,15 @@ def generate_launch_description():
                 'ros_params_override_path': config_path,
             }.items(),
         ),
-        # ORIN1 GUI camera panel only: 3 Hz, 640x400 preview on /zedx_cabin/gui_preview/compressed.
+        # 640x400 preview on /zedx_cabin/gui_preview/compressed for the ORIN1 GUI camera panel and the
+        # browser overlay (camera_overlay_publisher). 5 Hz keeps the overlay page under ~1.2 Mbps; the GUI
+        # panel still throttles itself with ai_camera_max_fps.
         Node(
             package='hr35_bringup',
             executable='gui_camera_preview.py',
             name='zedx_cabin_gui_preview',
             output='screen',
+            parameters=[{'rate_hz': 5.0}],
         ),
         *_web_video_server(),
     ])
