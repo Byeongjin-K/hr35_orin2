@@ -2,27 +2,8 @@ from launch import LaunchDescription
 from launch.actions import IncludeLaunchDescription, SetLaunchConfiguration
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
-from ament_index_python.packages import PackageNotFoundError, get_package_share_directory
+from ament_index_python.packages import get_package_share_directory
 import os
-
-
-def _web_video_server():
-    # Browser view from any PC, no ROS needed there:
-    #   http://<orin2>:8080/stream?topic=/zedx_cabin/zedx_cabin_node/left/image_rect_color&type=ros_compressed
-    # ros_compressed forwards the ZED JPEGs as they are (no re-encode here, no load on ORIN1).
-    # Optional: skipped until `sudo apt install ros-humble-web-video-server`.
-    # A standalone server already holding port 8080 makes this one exit; stop that one first.
-    try:
-        get_package_share_directory('web_video_server')
-    except PackageNotFoundError:
-        return []
-    return [Node(
-        package='web_video_server',
-        executable='web_video_server',
-        name='zedx_cabin_web_video',
-        output='screen',
-        parameters=[{'port': 8080, 'default_stream_type': 'ros_compressed'}],
-    )]
 
 
 def generate_launch_description():
@@ -59,5 +40,7 @@ def generate_launch_description():
             output='screen',
             parameters=[{'rate_hz': 5.0}],
         ),
-        *_web_video_server(),
+        # web_video_server(:8080) 는 여기서 띄우지 않는다. 3.1.0 이 끊긴 HTTP 접속의 구독을 지우지 않아
+        # (접속 1회당 1개 영구 잔류) 사용자 systemd 서비스 zed-web-video.service 가 띄우고,
+        # zed-web-video-idle-restart.timer 가 시청자 없을 때 재시작해 비운다(ORIN1 robot_ws scripts/zed_view/).
     ])
